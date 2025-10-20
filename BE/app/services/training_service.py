@@ -1,0 +1,421 @@
+"""
+Training service for managing PyTorch model training
+"""
+import torch
+import torch.nn as nn
+import torch.optim as optim
+from torch.utils.data import Dataset, DataLoader
+from torchvision import transforms, models
+from PIL import Image
+import threading
+import time
+from pathlib import Path
+from typing import Dict, Optional, Callable
+import json
+from datetime import datetime, timedelta
+
+
+class ObjectDetectionDataset(Dataset):
+    """Custom dataset for object detection training"""
+
+    def __init__(self, images_data: list, transform=None):
+        """
+        Args:
+            images_data: List of dicts with 'path', 'annotations' keys
+            transform: Optional transform to be applied on images
+        """
+        self.images_data = images_data
+        self.transform = transform
+
+    def __len__(self):
+        return len(self.images_data)
+
+    def __getitem__(self, idx):
+        img_data = self.images_data[idx]
+        image = Image.open(img_data['path']).convert('RGB')
+
+        if self.transform:
+            image = self.transform(image)
+
+        # For now, return image and basic label
+        # In production, this would include bounding boxes and class labels
+        label = img_data.get('label', 0)
+
+        return image, label
+
+
+class TrainingEngine:
+    """Manages training job execution and monitoring"""
+
+    def __init__(self, job_id: int, db_session_factory):
+        self.job_id = job_id
+        self.db_session_factory = db_session_factory
+        self.device = torch.device('cuda' if torch.cuda.is_available() else 'cpu')
+        self.model = None
+        self.optimizer = None
+        self.criterion = None
+        self.is_paused = False
+        self.is_cancelled = False
+        self.current_epoch = 0
+
+    def _get_db(self):
+        """Get database session"""
+        return self.db_session_factory()
+
+    def _update_job_status(self, status: str, **kwargs):
+        """Update training job status in database"""
+        from app.models.training import TrainingJob, TrainingStatus
+
+        db = self._get_db()
+        try:
+            job = db.query(TrainingJob).filter(TrainingJob.id == self.job_id).first()
+            if job:
+                job.status = TrainingStatus(status)
+                for key, value in kwargs.items():
+                    if hasattr(job, key):
+                        setattr(job, key, value)
+                db.commit()
+        finally:
+            db.close()
+
+    def _save_metric(self, epoch: int, metrics: Dict):
+        """Save training metrics to database"""
+        from app.models.training import TrainingMetric
+
+        db = self._get_db()
+        try:
+            metric = TrainingMetric(
+                training_job_id=self.job_id,
+                epoch=epoch,
+                step=metrics.get('step', 0),
+                train_loss=metrics.get('train_loss', 0.0),
+                train_accuracy=metrics.get('train_accuracy', 0.0),
+                val_loss=metrics.get('val_loss'),
+                val_accuracy=metrics.get('val_accuracy'),
+                learning_rate=metrics.get('learning_rate', 0.001)
+            )
+            db.add(metric)
+            db.commit()
+        finally:
+            db.close()
+
+    def _build_model(self, architecture: str, num_classes: int = 10):
+        """Build model based on architecture name"""
+        if architecture.lower() == 'resnet18':
+            model = models.resnet18(pretrained=True)
+            model.fc = nn.Linear(model.fc.in_features, num_classes)
+        elif architecture.lower() == 'resnet50':
+            model = models.resnet50(pretrained=True)
+            model.fc = nn.Linear(model.fc.in_features, num_classes)
+        elif architecture.lower() == 'mobilenet_v2':
+            model = models.mobilenet_v2(pretrained=True)
+            model.classifier[1] = nn.Linear(model.last_channel, num_classes)
+        else:
+            # Default to ResNet18
+            model = models.resnet18(pretrained=True)
+            model.fc = nn.Linear(model.fc.in_features, num_classes)
+
+        return model.to(self.device)
+
+    def _prepare_data(self, dataset_id: int):
+        """Prepare dataset and dataloaders"""
+        from app.models.dataset import Dataset as DatasetModel, Image as ImageModel
+
+        db = self._get_db()
+        try:
+            # Get dataset
+            dataset = db.query(DatasetModel).filter(DatasetModel.id == dataset_id).first()
+            if not dataset:
+                raise ValueError(f"Dataset {dataset_id} not found")
+
+            # Get all images
+            images = db.query(ImageModel).filter(ImageModel.dataset_id == dataset_id).all()
+
+            if len(images) == 0:
+                raise ValueError(f"No images found in dataset {dataset_id}")
+
+            # Prepare image data
+            images_data = []
+            base_upload_dir = Path("uploads")
+            for img in images:
+                img_path = base_upload_dir / img.file_path
+                if img_path.exists():
+                    images_data.append({
+                        'path': str(img_path),
+                        'label': 0  # Simplified for now
+                    })
+
+            # Define transforms
+            transform = transforms.Compose([
+                transforms.Resize((224, 224)),
+                transforms.ToTensor(),
+                transforms.Normalize(mean=[0.485, 0.456, 0.406],
+                                   std=[0.229, 0.224, 0.225])
+            ])
+
+            # Create dataset
+            full_dataset = ObjectDetectionDataset(images_data, transform=transform)
+
+            # Split into train/val (80/20)
+            train_size = int(0.8 * len(full_dataset))
+            val_size = len(full_dataset) - train_size
+            train_dataset, val_dataset = torch.utils.data.random_split(
+                full_dataset, [train_size, val_size]
+            )
+
+            return train_dataset, val_dataset
+
+        finally:
+            db.close()
+
+    def train(self, config: Dict):
+        """
+        Execute training job
+
+        Args:
+            config: Training configuration dict with keys:
+                - dataset_id: Dataset ID
+                - architecture: Model architecture name
+                - hyperparameters: Dict with batch_size, epochs, learning_rate, etc.
+        """
+        try:
+            # Update status to running
+            self._update_job_status('RUNNING', started_at=datetime.utcnow())
+
+            # Extract config
+            dataset_id = config['dataset_id']
+            architecture = config['architecture']
+            hyperparams = config['hyperparameters']
+
+            batch_size = hyperparams.get('batch_size', 32)
+            epochs = hyperparams.get('epochs', 10)
+            learning_rate = hyperparams.get('learning_rate', 0.001)
+            num_classes = hyperparams.get('num_classes', 10)
+
+            # Prepare data
+            train_dataset, val_dataset = self._prepare_data(dataset_id)
+
+            train_loader = DataLoader(
+                train_dataset,
+                batch_size=batch_size,
+                shuffle=True,
+                num_workers=0  # Set to 0 for Windows compatibility
+            )
+
+            val_loader = DataLoader(
+                val_dataset,
+                batch_size=batch_size,
+                shuffle=False,
+                num_workers=0
+            )
+
+            # Build model
+            self.model = self._build_model(architecture, num_classes)
+
+            # Setup optimizer and loss
+            self.optimizer = optim.Adam(self.model.parameters(), lr=learning_rate)
+            self.criterion = nn.CrossEntropyLoss()
+
+            # Training loop
+            for epoch in range(epochs):
+                # Check for pause/cancel
+                while self.is_paused and not self.is_cancelled:
+                    time.sleep(1)
+
+                if self.is_cancelled:
+                    self._update_job_status('CANCELLED')
+                    return
+
+                self.current_epoch = epoch + 1
+
+                # Training phase
+                self.model.train()
+                train_loss = 0.0
+                train_correct = 0
+                train_total = 0
+
+                for batch_idx, (inputs, labels) in enumerate(train_loader):
+                    # Check cancellation during batch
+                    if self.is_cancelled:
+                        self._update_job_status('CANCELLED')
+                        return
+
+                    inputs, labels = inputs.to(self.device), labels.to(self.device)
+
+                    self.optimizer.zero_grad()
+                    outputs = self.model(inputs)
+                    loss = self.criterion(outputs, labels)
+                    loss.backward()
+                    self.optimizer.step()
+
+                    train_loss += loss.item()
+                    _, predicted = outputs.max(1)
+                    train_total += labels.size(0)
+                    train_correct += predicted.eq(labels).sum().item()
+
+                # Validation phase
+                self.model.eval()
+                val_loss = 0.0
+                val_correct = 0
+                val_total = 0
+
+                with torch.no_grad():
+                    for inputs, labels in val_loader:
+                        inputs, labels = inputs.to(self.device), labels.to(self.device)
+                        outputs = self.model(inputs)
+                        loss = self.criterion(outputs, labels)
+
+                        val_loss += loss.item()
+                        _, predicted = outputs.max(1)
+                        val_total += labels.size(0)
+                        val_correct += predicted.eq(labels).sum().item()
+
+                # Calculate metrics
+                avg_train_loss = train_loss / len(train_loader)
+                train_accuracy = 100.0 * train_correct / train_total
+                avg_val_loss = val_loss / len(val_loader)
+                val_accuracy = 100.0 * val_correct / val_total
+
+                # Save metrics
+                metrics = {
+                    'step': batch_idx,
+                    'train_loss': avg_train_loss,
+                    'train_accuracy': train_accuracy,
+                    'val_loss': avg_val_loss,
+                    'val_accuracy': val_accuracy,
+                    'learning_rate': learning_rate
+                }
+                self._save_metric(epoch + 1, metrics)
+
+                # Update job progress
+                progress = ((epoch + 1) / epochs) * 100
+                estimated_completion = datetime.utcnow() + timedelta(
+                    seconds=(epochs - epoch - 1) * 60  # Rough estimate
+                )
+
+                self._update_job_status(
+                    'RUNNING',
+                    current_epoch=epoch + 1,
+                    current_loss=avg_train_loss,
+                    current_accuracy=train_accuracy,
+                    current_learning_rate=learning_rate,
+                    progress_percentage=progress,
+                    estimated_completion=estimated_completion
+                )
+
+                print(f"Epoch {epoch+1}/{epochs} - "
+                      f"Train Loss: {avg_train_loss:.4f}, Acc: {train_accuracy:.2f}% - "
+                      f"Val Loss: {avg_val_loss:.4f}, Acc: {val_accuracy:.2f}%")
+
+            # Training completed
+            self._save_model(config)
+            self._update_job_status('COMPLETED', completed_at=datetime.utcnow())
+
+        except Exception as e:
+            error_msg = f"Training failed: {str(e)}"
+            print(error_msg)
+            self._update_job_status('FAILED', training_logs=error_msg)
+
+    def _save_model(self, config: Dict):
+        """Save trained model to disk"""
+        from app.utils.file_storage import file_storage
+        from app.models.model import Model as ModelRecord
+        from app.models.training import TrainingJob
+
+        db = self._get_db()
+        try:
+            # Get training job
+            job = db.query(TrainingJob).filter(TrainingJob.id == self.job_id).first()
+            if not job or not job.model_id:
+                return
+
+            # Save model state
+            model_dir = file_storage.get_model_directory(job.model_id)
+            model_path = model_dir / "model.pth"
+
+            torch.save({
+                'model_state_dict': self.model.state_dict(),
+                'optimizer_state_dict': self.optimizer.state_dict(),
+                'config': config
+            }, model_path)
+
+            # Update model record
+            model = db.query(ModelRecord).filter(ModelRecord.id == job.model_id).first()
+            if model:
+                model.file_path = str(model_path)
+                model.file_size = model_path.stat().st_size
+                model.status = 'TRAINED'
+                db.commit()
+
+        finally:
+            db.close()
+
+    def pause(self):
+        """Pause training"""
+        self.is_paused = True
+        self._update_job_status('PAUSED')
+
+    def resume(self):
+        """Resume training"""
+        self.is_paused = False
+        self._update_job_status('RUNNING')
+
+    def cancel(self):
+        """Cancel training"""
+        self.is_cancelled = True
+        self._update_job_status('CANCELLED')
+
+
+class TrainingManager:
+    """Manages multiple training jobs"""
+
+    def __init__(self):
+        self.active_jobs: Dict[int, TrainingEngine] = {}
+
+    def start_training(self, job_id: int, config: Dict, db_session_factory):
+        """Start training job in background thread"""
+        if job_id in self.active_jobs:
+            raise ValueError(f"Training job {job_id} is already running")
+
+        engine = TrainingEngine(job_id, db_session_factory)
+        self.active_jobs[job_id] = engine
+
+        # Start training in background thread
+        thread = threading.Thread(
+            target=engine.train,
+            args=(config,),
+            daemon=True
+        )
+        thread.start()
+
+        return engine
+
+    def pause_training(self, job_id: int):
+        """Pause a training job"""
+        if job_id not in self.active_jobs:
+            raise ValueError(f"Training job {job_id} is not running")
+
+        self.active_jobs[job_id].pause()
+
+    def resume_training(self, job_id: int):
+        """Resume a paused training job"""
+        if job_id not in self.active_jobs:
+            raise ValueError(f"Training job {job_id} is not running")
+
+        self.active_jobs[job_id].resume()
+
+    def cancel_training(self, job_id: int):
+        """Cancel a training job"""
+        if job_id not in self.active_jobs:
+            raise ValueError(f"Training job {job_id} is not running")
+
+        self.active_jobs[job_id].cancel()
+        del self.active_jobs[job_id]
+
+    def get_active_jobs(self):
+        """Get list of active job IDs"""
+        return list(self.active_jobs.keys())
+
+
+# Global training manager instance
+training_manager = TrainingManager()

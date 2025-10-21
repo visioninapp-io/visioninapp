@@ -6,6 +6,8 @@ class App {
         this.routes = {
             '/': HomePage,
             '/datasets': DatasetsPage,
+            '/generate': GeneratePage,
+            '/export': ExportPage,
             '/training': TrainingPage,
             '/conversion': ConversionPage,
             '/evaluation': EvaluationPage,

@@ -9,6 +9,14 @@ class TrainingPage {
 
     async init() {
         await this.loadTrainingJobs();
+
+        // Re-render the page after data is loaded
+        const app = document.getElementById('app');
+        if (app) {
+            app.innerHTML = this.render();
+            this.afterRender();
+        }
+
         this.attachEventListeners();
         this.startAutoRefresh();
     }
@@ -513,7 +521,7 @@ async function handleStartTraining() {
         epochs: parseInt(document.getElementById('epochs').value),
         batch_size: parseInt(document.getElementById('batch-size').value),
         learning_rate: parseFloat(document.getElementById('learning-rate').value),
-        image_size: parseInt(document.getElementById('image-size').value),
+        img_size: parseInt(document.getElementById('image-size').value),
         optimizer: document.getElementById('optimizer').value,
         momentum: parseFloat(document.getElementById('momentum').value),
         weight_decay: parseFloat(document.getElementById('weight-decay').value),
@@ -527,8 +535,7 @@ async function handleStartTraining() {
             name,
             dataset_id: parseInt(datasetId),
             architecture,
-            hyperparameters: JSON.stringify(hyperparameters),
-            total_epochs: hyperparameters.epochs
+            hyperparameters: hyperparameters  // Send as object, not JSON string
         };
 
         const result = await apiService.startTraining(trainingData);

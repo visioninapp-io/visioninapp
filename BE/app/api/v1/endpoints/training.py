@@ -24,8 +24,8 @@ async def get_training_jobs(
     db: Session = Depends(get_db),
     current_user: dict = Depends(get_current_user_dev)
 ):
-    """Get all training jobs"""
-    query = db.query(TrainingJob)
+    """Get all training jobs for current user"""
+    query = db.query(TrainingJob).filter(TrainingJob.created_by == current_user["uid"])
 
     if status_filter:
         query = query.filter(TrainingJob.status == status_filter)

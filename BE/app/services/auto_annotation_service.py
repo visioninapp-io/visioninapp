@@ -32,15 +32,22 @@ class AutoAnnotationService:
         model_path = project_root / "AI" / "models" / "best.pt"
         return model_path
 
-    def load_model(self) -> bool:
+    def load_model(self, model_path: Optional[str] = None) -> bool:
         """
         YOLO 모델 로드
+
+        Args:
+            model_path: 모델 파일 경로 (None이면 기본 경로 사용)
 
         Returns:
             성공 여부
         """
         try:
             from ultralytics import YOLO
+
+            # 경로가 지정되면 업데이트
+            if model_path:
+                self.model_path = model_path
 
             if not Path(self.model_path).exists():
                 logger.error(f"모델 파일을 찾을 수 없습니다: {self.model_path}")

@@ -45,6 +45,16 @@
                         </a>
                     </li>
                     <li class="nav-item">
+                        <a class="nav-link" href="#/generate">
+                            <i class="bi bi-layers me-1"></i>Generate
+                        </a>
+                    </li>
+                    <li class="nav-item">
+                        <a class="nav-link" href="#/export">
+                            <i class="bi bi-download me-1"></i>Export
+                        </a>
+                    </li>
+                    <li class="nav-item">
                         <a class="nav-link" href="#/training">
                             <i class="bi bi-activity me-1"></i>Training
                         </a>
@@ -96,8 +106,69 @@
     <!-- Main Content -->
     <div id="app"></div>
 
+    <!-- Toast Container for Notifications -->
+    <div class="toast-container position-fixed top-0 end-0 p-3" style="z-index: 11000;">
+        <div id="liveToast" class="toast" role="alert" aria-live="assertive" aria-atomic="true">
+            <div class="toast-header">
+                <i class="bi bi-info-circle-fill me-2" id="toast-icon"></i>
+                <strong class="me-auto" id="toast-title">Notification</strong>
+                <button type="button" class="btn-close" data-bs-dismiss="toast" aria-label="Close"></button>
+            </div>
+            <div class="toast-body" id="toast-message">
+                Message here
+            </div>
+        </div>
+    </div>
+
     <!-- Bootstrap 5 JS Bundle -->
     <script src="https://cdn.jsdelivr.net/npm/bootstrap@5.3.2/dist/js/bootstrap.bundle.min.js"></script>
+
+    <!-- Toast Helper Function -->
+    <script>
+        function showToast(message, type = 'info') {
+            const toast = document.getElementById('liveToast');
+            const toastIcon = document.getElementById('toast-icon');
+            const toastTitle = document.getElementById('toast-title');
+            const toastMessage = document.getElementById('toast-message');
+            const toastHeader = toast.querySelector('.toast-header');
+
+            // Remove all background classes
+            toastHeader.classList.remove('bg-primary', 'bg-success', 'bg-danger', 'bg-warning', 'text-white');
+
+            // Set icon, title and color based on type
+            if (type === 'success') {
+                toastIcon.className = 'bi bi-check-circle-fill me-2';
+                toastTitle.textContent = 'Success';
+                toastHeader.classList.add('bg-success', 'text-white');
+            } else if (type === 'error') {
+                toastIcon.className = 'bi bi-exclamation-circle-fill me-2';
+                toastTitle.textContent = 'Error';
+                toastHeader.classList.add('bg-danger', 'text-white');
+            } else if (type === 'warning') {
+                toastIcon.className = 'bi bi-exclamation-triangle-fill me-2';
+                toastTitle.textContent = 'Warning';
+                toastHeader.classList.add('bg-warning');
+            } else {
+                toastIcon.className = 'bi bi-info-circle-fill me-2';
+                toastTitle.textContent = 'Info';
+                toastHeader.classList.add('bg-primary', 'text-white');
+            }
+
+            toastMessage.textContent = message;
+
+            const bsToast = new bootstrap.Toast(toast, {
+                autohide: true,
+                delay: 5000
+            });
+            bsToast.show();
+
+            // Also log to console
+            console.log(`[${type.toUpperCase()}] ${message}`);
+        }
+
+        // Make it globally available
+        window.showToast = showToast;
+    </script>
 
     <!-- Services -->
     <script src="./js/services/api.js"></script>
@@ -107,8 +178,11 @@
     <!-- Page Components -->
     <script src="./js/pages/home.js"></script>
     <script src="./js/pages/datasets.js"></script>
+    <script src="./js/pages/datasets-helpers.js"></script>
     <script src="./js/pages/auto-annotate.js"></script>
     <script src="./js/pages/dataset-detail.js"></script>
+    <script src="./js/pages/generate.js"></script>
+    <script src="./js/pages/export.js"></script>
     <script src="./js/pages/training.js"></script>
     <script src="./js/pages/conversion.js"></script>
     <script src="./js/pages/evaluation.js"></script>

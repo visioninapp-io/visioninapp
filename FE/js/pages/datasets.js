@@ -1,8 +1,12 @@
 // Datasets Page Component
+// Enhanced with robust error handling and debugging
 
 class DatasetsPage {
     constructor() {
+        console.log('[DatasetsPage] Initializing...');
         this.datasets = [];
+        this.selectedDataset = null;
+        this.datasetImages = [];
         this.stats = {
             totalImages: 0,
             totalDatasets: 0,
@@ -10,45 +14,137 @@ class DatasetsPage {
             autoAnnotatedPercent: 0
         };
         this.searchQuery = '';
+        this.isLoading = true;
+        this.loadError = null;
     }
 
     async init() {
-        await this.loadDatasets();
-        await this.loadStats();
-        this.attachEventListeners();
+        console.log('[DatasetsPage] Starting initialization...');
+        this.isLoading = true;
+        this.loadError = null;
+
+        // Clear selected dataset to prevent showing deleted datasets
+        this.selectedDataset = null;
+        this.datasetImages = [];
+
+        try {
+            // Load data in parallel
+            await Promise.all([
+                this.loadDatasets(),
+                this.loadStats()
+            ]);
+
+            console.log('[DatasetsPage] Data loaded successfully');
+            this.isLoading = false;
+
+        } catch (error) {
+            console.error('[DatasetsPage] Initialization failed:', error);
+            this.loadError = error.message;
+            this.isLoading = false;
+        }
+
+        // Re-render the page after data is loaded
+        const app = document.getElementById('app');
+        if (app) {
+            app.innerHTML = this.render();
+            this.attachEventListeners();
+        }
     }
 
     async loadDatasets() {
         try {
-            console.log('Loading datasets from API...');
-            this.datasets = await apiService.getDatasets();
-            console.log('Loaded datasets:', this.datasets);
-        } catch (error) {
-            console.error('Error loading datasets:', error);
-            console.error('Error details:', error.message, error.stack);
-            this.datasets = [];
+            console.log('[DatasetsPage] Loading datasets from API...');
+            const datasets = await apiService.getDatasets();
 
-            // Show error to user
-            if (typeof showToast === 'function') {
-                showToast('Failed to load datasets. Please check if backend server is running.', 'error');
+            if (!datasets || !Array.isArray(datasets)) {
+                console.warn('[DatasetsPage] Invalid datasets response:', datasets);
+                this.datasets = [];
+                this.selectedDataset = null;
+                this.datasetImages = [];
+                return;
             }
+
+            this.datasets = datasets;
+            console.log(`[DatasetsPage] Loaded ${this.datasets.length} datasets:`, this.datasets);
+
+            // Auto-select first dataset if available
+            if (this.datasets.length > 0) {
+                // If selected dataset exists, check if it's still in the list
+                if (this.selectedDataset) {
+                    const stillExists = this.datasets.find(d => d.id === this.selectedDataset.id);
+                    if (!stillExists) {
+                        console.log('[DatasetsPage] Previously selected dataset no longer exists, selecting first dataset');
+                        this.selectedDataset = this.datasets[0];
+                    }
+                } else {
+                    this.selectedDataset = this.datasets[0];
+                    console.log('[DatasetsPage] Auto-selected dataset:', this.selectedDataset);
+                }
+
+                await this.loadDatasetImages(this.selectedDataset.id);
+            } else {
+                // No datasets available
+                this.selectedDataset = null;
+                this.datasetImages = [];
+            }
+
+        } catch (error) {
+            console.error('[DatasetsPage] Error loading datasets:', error);
+            this.datasets = [];
+            this.selectedDataset = null;
+            this.datasetImages = [];
+            showToast('Failed to load datasets. Using empty dataset list.', 'warning');
+        }
+    }
+
+    async loadDatasetImages(datasetId) {
+        try {
+            console.log(`[DatasetsPage] Loading images for dataset ${datasetId}...`);
+            const images = await apiService.getDatasetImages(datasetId);
+
+            if (!images || !Array.isArray(images)) {
+                console.warn('[DatasetsPage] Invalid images response:', images);
+                this.datasetImages = [];
+                return;
+            }
+
+            this.datasetImages = images;
+            console.log(`[DatasetsPage] Loaded ${this.datasetImages.length} images`);
+
+            // Update the image grid if we're already rendered
+            this.updateImageGrid();
+
+        } catch (error) {
+            console.error(`[DatasetsPage] Error loading images for dataset ${datasetId}:`, error);
+            this.datasetImages = [];
+            this.updateImageGrid();
         }
     }
 
     async loadStats() {
         try {
-            console.log('Loading dataset stats...');
+            console.log('[DatasetsPage] Loading dataset stats...');
             const statsData = await apiService.getDatasetStats();
-            this.stats = statsData;
-            console.log('Loaded stats:', this.stats);
+
+            if (statsData) {
+                this.stats = {
+                    totalImages: statsData.total_images || 0,
+                    totalDatasets: statsData.total_datasets || 0,
+                    totalClasses: statsData.total_classes || 0,
+                    autoAnnotatedPercent: Math.round(statsData.auto_annotation_rate || 0)
+                };
+                console.log('[DatasetsPage] Loaded stats:', this.stats);
+            }
+
         } catch (error) {
-            console.error('Error loading stats:', error);
+            console.error('[DatasetsPage] Error loading stats:', error);
             // Calculate stats from datasets if API fails
             this.calculateStatsFromDatasets();
         }
     }
 
     calculateStatsFromDatasets() {
+        console.log('[DatasetsPage] Calculating stats from datasets...');
         this.stats.totalDatasets = this.datasets.length;
         this.stats.totalImages = this.datasets.reduce((sum, d) => sum + (d.total_images || 0), 0);
         this.stats.totalClasses = this.datasets.reduce((sum, d) => sum + (d.total_classes || 0), 0);
@@ -57,12 +153,32 @@ class DatasetsPage {
         this.stats.autoAnnotatedPercent = this.stats.totalImages > 0
             ? Math.round((annotatedImages / this.stats.totalImages) * 100)
             : 0;
+
+        console.log('[DatasetsPage] Calculated stats:', this.stats);
     }
 
     render() {
+        console.log('[DatasetsPage] Rendering page...');
+        console.log('[DatasetsPage] Current state:', {
+            isLoading: this.isLoading,
+            datasetsCount: this.datasets.length,
+            selectedDataset: this.selectedDataset?.name,
+            loadError: this.loadError
+        });
+
+        // Show loading state
+        if (this.isLoading) {
+            return this.renderLoadingState();
+        }
+
+        // Show error state
+        if (this.loadError) {
+            return this.renderErrorState();
+        }
+
         return `
             <div class="min-vh-100 bg-light">
-                <div class="container py-4">
+                <div class="container-fluid py-4">
                     <!-- Page Header -->
                     <div class="mb-4">
                         <h1 class="display-5 fw-bold mb-2">Dataset Management</h1>
@@ -109,118 +225,252 @@ class DatasetsPage {
                         </div>
                     </div>
 
-                    <!-- Datasets Table Card -->
-                    <div class="card border-0 shadow-sm">
-                        <div class="card-header bg-white border-0 py-3">
-                            <div class="row align-items-center">
-                                <div class="col">
-                                    <h5 class="mb-1 fw-bold">Datasets</h5>
-                                    <p class="text-muted mb-0 small">Manage and organize your training datasets</p>
-                                </div>
-                                <div class="col-auto">
-                                    <button class="btn btn-outline-primary btn-sm me-2" onclick="showConfigureDatasetModal()">
-                                        <i class="bi bi-gear me-1"></i> Configure
-                                    </button>
-                                    <button class="btn btn-primary btn-sm" onclick="showUploadDatasetModal()">
-                                        <i class="bi bi-upload me-1"></i> Upload Dataset
-                                    </button>
+                    <!-- Dataset Selection and Actions -->
+                    <div class="row mb-4">
+                        <div class="col-md-6">
+                            <div class="card border-0 shadow-sm">
+                                <div class="card-body">
+                                    <label class="form-label fw-bold">
+                                        <i class="bi bi-database me-2"></i>Select Dataset
+                                    </label>
+                                    <select class="form-select form-select-lg" id="dataset-selector">
+                                        ${this.datasets.length === 0 ?
+                                            '<option value="">No datasets available</option>' :
+                                            this.datasets.map(dataset => `
+                                                <option value="${dataset.id}" ${this.selectedDataset && this.selectedDataset.id === dataset.id ? 'selected' : ''}>
+                                                    ${dataset.name} (${dataset.total_images || 0} images)
+                                                </option>
+                                            `).join('')
+                                        }
+                                    </select>
                                 </div>
                             </div>
                         </div>
-                        <div class="card-body">
-                            <!-- Search -->
-                            <div class="mb-3">
-                                <div class="input-group">
-                                    <span class="input-group-text bg-white">
-                                        <i class="bi bi-search"></i>
-                                    </span>
-                                    <input type="text" class="form-control" id="dataset-search" placeholder="Search datasets...">
+                        <div class="col-md-6">
+                            <div class="card border-0 shadow-sm">
+                                <div class="card-body">
+                                    <label class="form-label fw-bold">
+                                        <i class="bi bi-gear me-2"></i>Actions
+                                    </label>
+                                    <div class="d-flex gap-2">
+                                        <button class="btn btn-outline-primary flex-fill" onclick="showConfigureDatasetModal()">
+                                            <i class="bi bi-plus-circle me-1"></i> Create New
+                                        </button>
+                                        <button class="btn btn-primary flex-fill" onclick="showUploadDatasetModal()">
+                                            <i class="bi bi-upload me-1"></i> Upload Images
+                                        </button>
+                                        <button class="btn btn-success flex-fill" onclick="window.currentPageInstance.triggerAutoAnnotate()" ${!this.selectedDataset ? 'disabled' : ''}>
+                                            <i class="bi bi-sparkles me-1"></i> Auto-Annotate
+                                        </button>
+                                    </div>
                                 </div>
-                            </div>
-
-                            <!-- Loading State -->
-                            <div id="datasets-loading" class="text-center py-5 d-none">
-                                <div class="spinner-border text-primary" role="status">
-                                    <span class="visually-hidden">Loading...</span>
-                                </div>
-                                <p class="text-muted mt-2">Loading datasets...</p>
-                            </div>
-
-                            <!-- Empty State -->
-                            <div id="datasets-empty" class="text-center py-5 ${this.datasets.length > 0 ? 'd-none' : ''}">
-                                <i class="bi bi-database text-muted" style="font-size: 4rem;"></i>
-                                <h5 class="mt-3">No Datasets Yet</h5>
-                                <p class="text-muted">Upload your first dataset to get started</p>
-                                <button class="btn btn-primary" onclick="showUploadDatasetModal()">
-                                    <i class="bi bi-upload me-1"></i> Upload Dataset
-                                </button>
-                            </div>
-
-                            <!-- Datasets List -->
-                            <div id="datasets-list" class="list-group list-group-flush ${this.datasets.length === 0 ? 'd-none' : ''}">
-                                ${this.renderDatasetsList()}
                             </div>
                         </div>
                     </div>
+
+                    <!-- Dataset Info and Images -->
+                    ${this.datasets.length > 0 && this.selectedDataset ? this.renderDatasetDetail() : this.renderEmptyState()}
                 </div>
             </div>
         `;
     }
 
-    renderDatasetsList() {
-        const filteredDatasets = this.datasets.filter(dataset => {
-            if (!this.searchQuery) return true;
-            return dataset.name.toLowerCase().includes(this.searchQuery.toLowerCase()) ||
-                   (dataset.description && dataset.description.toLowerCase().includes(this.searchQuery.toLowerCase()));
-        });
-
-        if (filteredDatasets.length === 0) {
-            return `
-                <div class="text-center py-4">
-                    <p class="text-muted">No datasets found matching "${this.searchQuery}"</p>
+    renderLoadingState() {
+        return `
+            <div class="min-vh-100 bg-light d-flex align-items-center justify-content-center">
+                <div class="text-center">
+                    <div class="spinner-border text-primary mb-3" style="width: 4rem; height: 4rem;" role="status">
+                        <span class="visually-hidden">Loading...</span>
+                    </div>
+                    <h4 class="text-muted">Loading datasets...</h4>
+                    <p class="text-muted small">Please wait while we fetch your data</p>
                 </div>
-            `;
-        }
-
-        return filteredDatasets.map(dataset => this.renderDatasetCard(dataset)).join('');
+            </div>
+        `;
     }
 
-    renderDatasetCard(dataset) {
+    renderErrorState() {
+        return `
+            <div class="min-vh-100 bg-light d-flex align-items-center justify-content-center">
+                <div class="text-center">
+                    <i class="bi bi-exclamation-triangle text-danger mb-3" style="font-size: 4rem;"></i>
+                    <h4 class="text-danger">Error Loading Datasets</h4>
+                    <p class="text-muted">${this.loadError || 'Unknown error occurred'}</p>
+                    <button class="btn btn-primary" onclick="window.location.reload()">
+                        <i class="bi bi-arrow-clockwise me-1"></i> Retry
+                    </button>
+                </div>
+            </div>
+        `;
+    }
+
+    renderDatasetDetail() {
+        const dataset = this.selectedDataset;
         const statusMap = {
             'created': { class: 'bg-secondary', text: 'Created' },
             'uploading': { class: 'bg-info', text: 'Uploading' },
             'processing': { class: 'bg-warning', text: 'Processing' },
             'ready': { class: 'bg-success', text: 'Ready' },
+            'READY': { class: 'bg-success', text: 'Ready' },
             'annotated': { class: 'bg-primary', text: 'Annotated' },
             'error': { class: 'bg-danger', text: 'Error' }
         };
-
         const status = statusMap[dataset.status] || statusMap['created'];
-        const lastModified = dataset.updated_at
-            ? this.formatTimeAgo(new Date(dataset.updated_at))
-            : this.formatTimeAgo(new Date(dataset.created_at));
 
         return `
-            <div class="list-group-item border rounded mb-2 hover-shadow" data-dataset-id="${dataset.id}">
-                <div class="row align-items-center">
-                    <div class="col">
-                        <div class="d-flex align-items-center gap-2 mb-1">
-                            <h6 class="mb-0 fw-bold">${dataset.name}</h6>
-                            <span class="badge ${status.class}">${status.text}</span>
+            <div class="row">
+                <!-- Dataset Info -->
+                <div class="col-md-4">
+                    <div class="card border-0 shadow-sm mb-4">
+                        <div class="card-header bg-white">
+                            <h5 class="mb-0 fw-bold">
+                                <i class="bi bi-info-circle me-2"></i>Dataset Information
+                            </h5>
                         </div>
-                        ${dataset.description ? `<p class="text-muted small mb-2">${dataset.description}</p>` : ''}
-                        <div class="d-flex gap-3 text-muted small">
-                            <span><i class="bi bi-image me-1"></i>${dataset.total_images || 0} images</span>
-                            <span><i class="bi bi-tag me-1"></i>${dataset.total_classes || 0} classes</span>
-                            <span><i class="bi bi-clock me-1"></i>Modified ${lastModified}</span>
+                        <div class="card-body">
+                            <h4 class="fw-bold mb-3">${dataset.name}</h4>
+                            ${dataset.description ? `<p class="text-muted mb-3">${dataset.description}</p>` : ''}
+
+                            <div class="mb-3">
+                                <span class="badge ${status.class} mb-2">${status.text}</span>
+                            </div>
+
+                            <div class="border-top pt-3">
+                                <div class="row mb-2">
+                                    <div class="col-6 text-muted">Total Images:</div>
+                                    <div class="col-6 fw-bold text-end">${dataset.total_images || 0}</div>
+                                </div>
+                                <div class="row mb-2">
+                                    <div class="col-6 text-muted">Annotated:</div>
+                                    <div class="col-6 fw-bold text-end text-success">${dataset.annotated_images || 0}</div>
+                                </div>
+                                <div class="row mb-2">
+                                    <div class="col-6 text-muted">Classes:</div>
+                                    <div class="col-6 fw-bold text-end">${dataset.total_classes || 0}</div>
+                                </div>
+                                <div class="row mb-2">
+                                    <div class="col-6 text-muted">Created:</div>
+                                    <div class="col-6 text-end small">${this.formatDate(dataset.created_at)}</div>
+                                </div>
+                                <div class="row">
+                                    <div class="col-6 text-muted">Updated:</div>
+                                    <div class="col-6 text-end small">${this.formatDate(dataset.updated_at)}</div>
+                                </div>
+                            </div>
+
+                            ${dataset.class_names && Array.isArray(dataset.class_names) && dataset.class_names.length > 0 ? `
+                                <div class="border-top pt-3 mt-3">
+                                    <h6 class="fw-bold mb-2">Classes:</h6>
+                                    <div class="d-flex flex-wrap gap-1">
+                                        ${dataset.class_names.map(className =>
+                                            `<span class="badge bg-light text-dark">${className}</span>`
+                                        ).join('')}
+                                    </div>
+                                </div>
+                            ` : ''}
+
+                            <div class="d-grid gap-2 mt-3">
+                                <button class="btn btn-outline-primary" onclick="navigateToDatasetDetail(${dataset.id})">
+                                    <i class="bi bi-eye me-1"></i> View Full Details
+                                </button>
+                            </div>
                         </div>
                     </div>
-                    <div class="col-auto">
-                        <button class="btn btn-outline-primary btn-sm me-2" onclick="navigateToAutoAnnotate(${dataset.id})">
-                            <i class="bi bi-sparkles me-1"></i> Auto-Annotate
+                </div>
+
+                <!-- Images Grid -->
+                <div class="col-md-8">
+                    <div class="card border-0 shadow-sm">
+                        <div class="card-header bg-white">
+                            <div class="row align-items-center">
+                                <div class="col">
+                                    <h5 class="mb-0 fw-bold">
+                                        <i class="bi bi-images me-2"></i>Dataset Images
+                                        <span class="badge bg-primary ms-2">${this.datasetImages.length}</span>
+                                    </h5>
+                                </div>
+                                <div class="col-auto">
+                                    <button class="btn btn-outline-primary btn-sm" onclick="window.currentPageInstance.refreshImages()">
+                                        <i class="bi bi-arrow-clockwise me-1"></i> Refresh
+                                    </button>
+                                </div>
+                            </div>
+                        </div>
+                        <div class="card-body" id="images-grid-container" style="max-height: 600px; overflow-y: auto;">
+                            ${this.renderImageGrid()}
+                        </div>
+                    </div>
+                </div>
+            </div>
+        `;
+    }
+
+    renderImageGrid() {
+        if (this.datasetImages.length === 0) {
+            return `
+                <div class="text-center py-5">
+                    <i class="bi bi-image text-muted" style="font-size: 4rem;"></i>
+                    <h5 class="mt-3 text-muted">No Images in Dataset</h5>
+                    <p class="text-muted">Upload images to this dataset to get started</p>
+                    <button class="btn btn-primary" onclick="showUploadDatasetModal()">
+                        <i class="bi bi-upload me-1"></i> Upload Images
+                    </button>
+                </div>
+            `;
+        }
+
+        return `
+            <div class="row g-3">
+                ${this.datasetImages.map(image => this.renderImageCard(image)).join('')}
+            </div>
+        `;
+    }
+
+    renderImageCard(image) {
+        const imageUrl = `http://localhost:8000/${image.file_path}`;
+        const isAnnotated = image.is_annotated;
+
+        return `
+            <div class="col-md-4 col-lg-3">
+                <div class="card border ${isAnnotated ? 'border-success' : ''} hover-shadow">
+                    <div class="position-relative">
+                        <img src="${imageUrl}" class="card-img-top" alt="${image.filename}"
+                             style="height: 200px; object-fit: cover;"
+                             onerror="this.src='https://via.placeholder.com/300x200?text=Image+Not+Found'">
+                        ${isAnnotated ? `
+                            <span class="position-absolute top-0 end-0 m-2">
+                                <span class="badge bg-success">
+                                    <i class="bi bi-check-circle-fill"></i> Annotated
+                                </span>
+                            </span>
+                        ` : ''}
+                    </div>
+                    <div class="card-body p-2">
+                        <p class="mb-1 small text-truncate" title="${image.filename}">
+                            <i class="bi bi-file-image me-1"></i>${image.filename}
+                        </p>
+                        <p class="mb-0 text-muted" style="font-size: 0.75rem;">
+                            ${image.width || 'N/A'}x${image.height || 'N/A'} • ${this.formatFileSize(image.file_size)}
+                        </p>
+                    </div>
+                </div>
+            </div>
+        `;
+    }
+
+    renderEmptyState() {
+        return `
+            <div class="card border-0 shadow-sm">
+                <div class="card-body text-center py-5">
+                    <i class="bi bi-database text-muted" style="font-size: 5rem;"></i>
+                    <h3 class="mt-4 mb-3">No Datasets Yet</h3>
+                    <p class="text-muted mb-4">Create your first dataset to start managing training data</p>
+                    <div class="d-flex gap-2 justify-content-center">
+                        <button class="btn btn-primary btn-lg" onclick="showConfigureDatasetModal()">
+                            <i class="bi bi-plus-circle me-2"></i> Create Dataset
                         </button>
-                        <button class="btn btn-primary btn-sm" onclick="navigateToDatasetDetail(${dataset.id})">
-                            <i class="bi bi-eye me-1"></i> View Dataset
+                        <button class="btn btn-outline-primary btn-lg" onclick="showUploadDatasetModal()">
+                            <i class="bi bi-upload me-2"></i> Upload Images
                         </button>
                     </div>
                 </div>
@@ -228,49 +478,105 @@ class DatasetsPage {
         `;
     }
 
-    formatTimeAgo(date) {
-        const seconds = Math.floor((new Date() - date) / 1000);
-
-        const intervals = {
-            year: 31536000,
-            month: 2592000,
-            week: 604800,
-            day: 86400,
-            hour: 3600,
-            minute: 60
-        };
-
-        for (const [unit, secondsInUnit] of Object.entries(intervals)) {
-            const interval = Math.floor(seconds / secondsInUnit);
-            if (interval >= 1) {
-                return `${interval} ${unit}${interval > 1 ? 's' : ''} ago`;
-            }
+    formatDate(dateString) {
+        if (!dateString) return 'N/A';
+        try {
+            const date = new Date(dateString);
+            return date.toLocaleDateString() + ' ' + date.toLocaleTimeString([], { hour: '2-digit', minute: '2-digit' });
+        } catch {
+            return 'N/A';
         }
+    }
 
-        return 'just now';
+    formatFileSize(bytes) {
+        if (!bytes || bytes === 0) return '0 Bytes';
+        const k = 1024;
+        const sizes = ['Bytes', 'KB', 'MB', 'GB'];
+        const i = Math.floor(Math.log(bytes) / Math.log(k));
+        return Math.round(bytes / Math.pow(k, i) * 100) / 100 + ' ' + sizes[i];
     }
 
     attachEventListeners() {
-        // Search functionality
-        const searchInput = document.getElementById('dataset-search');
-        if (searchInput) {
-            searchInput.addEventListener('input', (e) => {
-                this.searchQuery = e.target.value;
-                this.updateDatasetsList();
+        console.log('[DatasetsPage] Attaching event listeners...');
+
+        // Dataset selector
+        const datasetSelector = document.getElementById('dataset-selector');
+        if (datasetSelector) {
+            datasetSelector.addEventListener('change', async (e) => {
+                const datasetId = parseInt(e.target.value);
+                const dataset = this.datasets.find(d => d.id === datasetId);
+
+                if (dataset) {
+                    console.log(`[DatasetsPage] Dataset changed to: ${dataset.name}`);
+                    this.selectedDataset = dataset;
+                    await this.loadDatasetImages(datasetId);
+
+                    // Re-render the page
+                    const app = document.getElementById('app');
+                    if (app) {
+                        app.innerHTML = this.render();
+                        this.attachEventListeners();
+                    }
+                }
             });
         }
     }
 
-    updateDatasetsList() {
-        const listContainer = document.getElementById('datasets-list');
-        if (listContainer) {
-            listContainer.innerHTML = this.renderDatasetsList();
+    updateImageGrid() {
+        const container = document.getElementById('images-grid-container');
+        if (container) {
+            console.log('[DatasetsPage] Updating image grid...');
+            container.innerHTML = this.renderImageGrid();
+        }
+    }
+
+    async refreshImages() {
+        if (this.selectedDataset) {
+            console.log(`[DatasetsPage] Refreshing images for dataset ${this.selectedDataset.id}...`);
+            await this.loadDatasetImages(this.selectedDataset.id);
+        }
+    }
+
+    async triggerAutoAnnotate() {
+        if (!this.selectedDataset) {
+            showToast('Please select a dataset first', 'error');
+            return;
+        }
+
+        console.log(`[DatasetsPage] Navigating to auto-annotate for dataset ${this.selectedDataset.id}...`);
+        navigateToAutoAnnotate(this.selectedDataset.id);
+    }
+
+    async reloadDatasets(datasetIdToSelect = null) {
+        console.log('[DatasetsPage] Reloading datasets...', datasetIdToSelect ? `Select: ${datasetIdToSelect}` : '');
+
+        // Reload datasets and stats
+        await Promise.all([
+            this.loadDatasets(),
+            this.loadStats()
+        ]);
+
+        // If a specific dataset ID was provided, select it
+        if (datasetIdToSelect) {
+            const dataset = this.datasets.find(d => d.id === datasetIdToSelect);
+            if (dataset) {
+                this.selectedDataset = dataset;
+                await this.loadDatasetImages(dataset.id);
+            }
+        }
+
+        // Re-render the page
+        const app = document.getElementById('app');
+        if (app) {
+            app.innerHTML = this.render();
+            this.attachEventListeners();
         }
     }
 }
 
 // Configure Dataset Modal
 function showConfigureDatasetModal() {
+    console.log('[DatasetsPage] Showing configure dataset modal...');
     const modalHTML = `
         <div class="modal fade" id="configureDatasetModal" tabindex="-1" aria-hidden="true">
             <div class="modal-dialog modal-lg">
@@ -293,36 +599,6 @@ function showConfigureDatasetModal() {
                                 <label for="dataset-description" class="form-label">Description</label>
                                 <textarea class="form-control" id="dataset-description" rows="3"
                                           placeholder="Describe the purpose and contents of this dataset"></textarea>
-                            </div>
-
-                            <div class="mb-3">
-                                <label class="form-label">Auto-Annotation Settings</label>
-                                <div class="form-check form-switch">
-                                    <input class="form-check-input" type="checkbox" id="enable-auto-annotation" checked>
-                                    <label class="form-check-label" for="enable-auto-annotation">
-                                        Enable automatic annotation
-                                    </label>
-                                </div>
-                            </div>
-
-                            <div id="auto-annotation-settings" class="border rounded p-3 mb-3">
-                                <div class="mb-3">
-                                    <label for="confidence-threshold" class="form-label">
-                                        Confidence Threshold: <span id="confidence-value">0.5</span>
-                                    </label>
-                                    <input type="range" class="form-range" id="confidence-threshold"
-                                           min="0" max="1" step="0.05" value="0.5">
-                                    <small class="text-muted">Only annotations above this confidence will be saved</small>
-                                </div>
-
-                                <div class="mb-0">
-                                    <label for="annotation-format" class="form-label">Annotation Format</label>
-                                    <select class="form-select" id="annotation-format">
-                                        <option value="yolo" selected>YOLO</option>
-                                        <option value="coco">COCO</option>
-                                        <option value="pascal-voc">Pascal VOC</option>
-                                    </select>
-                                </div>
                             </div>
 
                             <div class="mb-3">
@@ -353,22 +629,11 @@ function showConfigureDatasetModal() {
         </div>
     `;
 
-    // Remove existing modal
     const existingModal = document.getElementById('configureDatasetModal');
     if (existingModal) existingModal.remove();
 
     document.body.insertAdjacentHTML('beforeend', modalHTML);
     const modal = new bootstrap.Modal(document.getElementById('configureDatasetModal'));
-
-    // Event listeners
-    document.getElementById('confidence-threshold').addEventListener('input', (e) => {
-        document.getElementById('confidence-value').textContent = e.target.value;
-    });
-
-    document.getElementById('enable-auto-annotation').addEventListener('change', (e) => {
-        document.getElementById('auto-annotation-settings').style.display =
-            e.target.checked ? 'block' : 'none';
-    });
 
     document.getElementById('add-class-btn').addEventListener('click', () => {
         const container = document.getElementById('class-definitions-container');
@@ -386,11 +651,7 @@ function showConfigureDatasetModal() {
     document.getElementById('save-dataset-config').addEventListener('click', async () => {
         const name = document.getElementById('dataset-name').value;
         const description = document.getElementById('dataset-description').value;
-        const enableAutoAnnotation = document.getElementById('enable-auto-annotation').checked;
-        const confidenceThreshold = parseFloat(document.getElementById('confidence-threshold').value);
-        const annotationFormat = document.getElementById('annotation-format').value;
 
-        // Get all class names
         const classInputs = document.querySelectorAll('[data-class-input]');
         const classNames = Array.from(classInputs)
             .map(input => input.value.trim())
@@ -415,42 +676,18 @@ function showConfigureDatasetModal() {
                 status: 'created'
             };
 
+            console.log('[DatasetsPage] Creating dataset:', datasetData);
             const createdDataset = await apiService.createDataset(datasetData);
 
             modal.hide();
             showToast('Dataset configured successfully!', 'success');
 
-            // Dynamically update the datasets list without page reload
-            setTimeout(async () => {
-                if (window.currentPageInstance && window.currentPageInstance.constructor.name === 'DatasetsPage') {
-                    // Reload datasets from API
-                    await window.currentPageInstance.loadDatasets();
-                    await window.currentPageInstance.loadStats();
-
-                    // Update the DOM
-                    const listContainer = document.getElementById('datasets-list');
-                    const emptyState = document.getElementById('datasets-empty');
-
-                    if (listContainer && emptyState) {
-                        if (window.currentPageInstance.datasets.length > 0) {
-                            listContainer.classList.remove('d-none');
-                            listContainer.innerHTML = window.currentPageInstance.renderDatasetsList();
-                            emptyState.classList.add('d-none');
-                        }
-                    }
-
-                    // Update stats
-                    document.getElementById('stat-total-images').textContent = window.currentPageInstance.stats.totalImages.toLocaleString();
-                    document.getElementById('stat-datasets').textContent = window.currentPageInstance.stats.totalDatasets;
-                    document.getElementById('stat-classes').textContent = window.currentPageInstance.stats.totalClasses;
-                    document.getElementById('stat-annotated').textContent = window.currentPageInstance.stats.autoAnnotatedPercent + '%';
-                } else {
-                    // Fallback: navigate to datasets page
-                    window.location.hash = '#/datasets';
-                }
-            }, 500);
+            // Reload datasets without page refresh and select the new dataset
+            if (window.currentPageInstance && typeof window.currentPageInstance.reloadDatasets === 'function') {
+                await window.currentPageInstance.reloadDatasets(createdDataset.id);
+            }
         } catch (error) {
-            console.error('Error creating dataset:', error);
+            console.error('[DatasetsPage] Error creating dataset:', error);
             showToast('Failed to create dataset: ' + error.message, 'error');
         }
     });
@@ -458,321 +695,4 @@ function showConfigureDatasetModal() {
     modal.show();
 }
 
-// Upload Dataset Modal
-function showUploadDatasetModal() {
-    const modalHTML = `
-        <div class="modal fade" id="uploadDatasetModal" tabindex="-1" aria-hidden="true">
-            <div class="modal-dialog modal-lg">
-                <div class="modal-content">
-                    <div class="modal-header">
-                        <h5 class="modal-title">
-                            <i class="bi bi-upload me-2"></i>Upload Dataset
-                        </h5>
-                        <button type="button" class="btn-close" data-bs-dismiss="modal"></button>
-                    </div>
-                    <div class="modal-body">
-                        <div class="mb-3">
-                            <label for="upload-dataset-select" class="form-label">Select Dataset</label>
-                            <select class="form-select" id="upload-dataset-select">
-                                <option value="">-- Create New Dataset --</option>
-                            </select>
-                        </div>
-
-                        <div id="new-dataset-fields" class="mb-3">
-                            <div class="mb-3">
-                                <label for="new-dataset-name" class="form-label">Dataset Name *</label>
-                                <input type="text" class="form-control" id="new-dataset-name" required>
-                            </div>
-                            <div class="mb-3">
-                                <label for="new-dataset-description" class="form-label">Description</label>
-                                <textarea class="form-control" id="new-dataset-description" rows="2"></textarea>
-                            </div>
-                        </div>
-
-                        <div class="mb-3">
-                            <label class="form-label">Upload Method</label>
-                            <div class="btn-group w-100" role="group">
-                                <input type="radio" class="btn-check" name="upload-method" id="upload-images" value="images" checked>
-                                <label class="btn btn-outline-primary" for="upload-images">
-                                    <i class="bi bi-image me-1"></i> Images
-                                </label>
-
-                                <input type="radio" class="btn-check" name="upload-method" id="upload-zip" value="zip">
-                                <label class="btn btn-outline-primary" for="upload-zip">
-                                    <i class="bi bi-file-zip me-1"></i> ZIP File
-                                </label>
-                            </div>
-                        </div>
-
-                        <div id="upload-images-section">
-                            <div class="mb-3">
-                                <label for="image-files" class="form-label">Select Images</label>
-                                <input type="file" class="form-control" id="image-files"
-                                       accept="image/*" multiple>
-                                <small class="text-muted">Supports JPG, PNG. Max 100 files at once.</small>
-                            </div>
-                        </div>
-
-                        <div id="upload-zip-section" class="d-none">
-                            <div class="mb-3">
-                                <label for="zip-file" class="form-label">Select ZIP File</label>
-                                <input type="file" class="form-control" id="zip-file" accept=".zip">
-                                <small class="text-muted">ZIP should contain images in the root or folders</small>
-                            </div>
-                        </div>
-
-                        <div id="upload-preview" class="mb-3 d-none">
-                            <label class="form-label">Selected Files</label>
-                            <div id="files-preview" class="border rounded p-3" style="max-height: 200px; overflow-y: auto;">
-                            </div>
-                        </div>
-
-                        <div id="upload-progress" class="d-none">
-                            <label class="form-label">Upload Progress</label>
-                            <div class="progress">
-                                <div id="upload-progress-bar" class="progress-bar progress-bar-striped progress-bar-animated"
-                                     role="progressbar" style="width: 0%"></div>
-                            </div>
-                            <p class="text-muted small mt-2" id="upload-status">Preparing upload...</p>
-                        </div>
-                    </div>
-                    <div class="modal-footer">
-                        <button type="button" class="btn btn-secondary" data-bs-dismiss="modal">Cancel</button>
-                        <button type="button" class="btn btn-primary" id="start-upload-btn">
-                            <i class="bi bi-upload me-1"></i> Start Upload
-                        </button>
-                    </div>
-                </div>
-            </div>
-        </div>
-    `;
-
-    const existingModal = document.getElementById('uploadDatasetModal');
-    if (existingModal) existingModal.remove();
-
-    document.body.insertAdjacentHTML('beforeend', modalHTML);
-    const modal = new bootstrap.Modal(document.getElementById('uploadDatasetModal'));
-
-    // Load existing datasets
-    loadDatasetsForUpload();
-
-    // Event listeners
-    document.querySelectorAll('[name="upload-method"]').forEach(radio => {
-        radio.addEventListener('change', (e) => {
-            if (e.target.value === 'images') {
-                document.getElementById('upload-images-section').classList.remove('d-none');
-                document.getElementById('upload-zip-section').classList.add('d-none');
-            } else {
-                document.getElementById('upload-images-section').classList.add('d-none');
-                document.getElementById('upload-zip-section').classList.remove('d-none');
-            }
-        });
-    });
-
-    document.getElementById('upload-dataset-select').addEventListener('change', (e) => {
-        const newDatasetFields = document.getElementById('new-dataset-fields');
-        newDatasetFields.style.display = e.target.value === '' ? 'block' : 'none';
-    });
-
-    document.getElementById('image-files').addEventListener('change', (e) => {
-        showFilePreview(e.target.files);
-    });
-
-    document.getElementById('zip-file').addEventListener('change', (e) => {
-        showFilePreview(e.target.files);
-    });
-
-    document.getElementById('start-upload-btn').addEventListener('click', handleUpload);
-
-    modal.show();
-}
-
-async function loadDatasetsForUpload() {
-    try {
-        const datasets = await apiService.getDatasets();
-        const select = document.getElementById('upload-dataset-select');
-
-        datasets.forEach(dataset => {
-            const option = document.createElement('option');
-            option.value = dataset.id;
-            option.textContent = dataset.name;
-            select.appendChild(option);
-        });
-    } catch (error) {
-        console.error('Error loading datasets:', error);
-    }
-}
-
-function showFilePreview(files) {
-    if (files.length === 0) return;
-
-    const preview = document.getElementById('upload-preview');
-    const filesPreview = document.getElementById('files-preview');
-
-    preview.classList.remove('d-none');
-
-    // Check for duplicate filenames
-    const fileNames = Array.from(files).map(f => f.name);
-    const duplicates = fileNames.filter((name, index) => fileNames.indexOf(name) !== index);
-
-    let html = `<p class="mb-2"><strong>${files.length} file(s) selected</strong></p>`;
-
-    if (duplicates.length > 0) {
-        html += `<div class="alert alert-warning alert-sm py-2 mb-2">
-            <i class="bi bi-exclamation-triangle me-1"></i>
-            <strong>Warning:</strong> ${duplicates.length} duplicate filename(s) detected: ${[...new Set(duplicates)].join(', ')}
-        </div>`;
-    }
-
-    html += `<ul class="list-unstyled mb-0">`;
-
-    Array.from(files).slice(0, 10).forEach(file => {
-        const isDuplicate = duplicates.includes(file.name);
-        html += `<li class="small ${isDuplicate ? 'text-warning' : ''}">
-            <i class="bi bi-${isDuplicate ? 'exclamation-triangle' : 'file-image'} me-1"></i>
-            ${file.name} (${formatFileSize(file.size)})
-        </li>`;
-    });
-
-    if (files.length > 10) {
-        html += `<li class="small text-muted">... and ${files.length - 10} more files</li>`;
-    }
-
-    html += '</ul>';
-    filesPreview.innerHTML = html;
-}
-
-function formatFileSize(bytes) {
-    if (bytes === 0) return '0 Bytes';
-    const k = 1024;
-    const sizes = ['Bytes', 'KB', 'MB', 'GB'];
-    const i = Math.floor(Math.log(bytes) / Math.log(k));
-    return Math.round(bytes / Math.pow(k, i) * 100) / 100 + ' ' + sizes[i];
-}
-
-async function handleUpload() {
-    const uploadMethod = document.querySelector('[name="upload-method"]:checked').value;
-    const datasetId = document.getElementById('upload-dataset-select').value;
-    const newDatasetName = document.getElementById('new-dataset-name').value;
-    const newDatasetDescription = document.getElementById('new-dataset-description').value;
-
-    let files;
-    if (uploadMethod === 'images') {
-        files = document.getElementById('image-files').files;
-    } else {
-        files = document.getElementById('zip-file').files;
-    }
-
-    if (files.length === 0) {
-        showToast('Please select files to upload', 'error');
-        return;
-    }
-
-    if (datasetId === '' && !newDatasetName) {
-        showToast('Please enter a dataset name or select an existing dataset', 'error');
-        return;
-    }
-
-    // Check for duplicate filenames
-    const fileNames = Array.from(files).map(f => f.name);
-    const duplicates = fileNames.filter((name, index) => fileNames.indexOf(name) !== index);
-
-    if (duplicates.length > 0) {
-        const uniqueDuplicates = [...new Set(duplicates)];
-        const confirmMessage = `Warning: ${uniqueDuplicates.length} duplicate filename(s) detected:\n\n${uniqueDuplicates.join('\n')}\n\nDuplicate files will be renamed with unique IDs. Continue?`;
-
-        if (!confirm(confirmMessage)) {
-            return;
-        }
-    }
-
-    // Show progress
-    document.getElementById('upload-progress').classList.remove('d-none');
-    document.getElementById('start-upload-btn').disabled = true;
-
-    try {
-        const formData = new FormData();
-
-        // Add files
-        Array.from(files).forEach(file => {
-            formData.append('files', file);
-        });
-
-        // Add dataset info
-        if (datasetId) {
-            formData.append('dataset_id', datasetId);
-        } else {
-            formData.append('name', newDatasetName);
-            if (newDatasetDescription) {
-                formData.append('description', newDatasetDescription);
-            }
-        }
-
-        // Simulate progress
-        let progress = 0;
-        const progressBar = document.getElementById('upload-progress-bar');
-        const statusText = document.getElementById('upload-status');
-
-        const progressInterval = setInterval(() => {
-            progress += 10;
-            if (progress >= 90) clearInterval(progressInterval);
-            progressBar.style.width = progress + '%';
-            statusText.textContent = `Uploading... ${progress}%`;
-        }, 500);
-
-        const result = await apiService.uploadDataset(formData);
-
-        clearInterval(progressInterval);
-        progressBar.style.width = '100%';
-        statusText.textContent = 'Upload complete!';
-
-        showToast('Dataset uploaded successfully!', 'success');
-
-        setTimeout(async () => {
-            // Close modal
-            const modal = bootstrap.Modal.getInstance(document.getElementById('uploadDatasetModal'));
-            if (modal) modal.hide();
-
-            // Reload datasets without full page reload
-            if (window.currentPageInstance && window.currentPageInstance.constructor.name === 'DatasetsPage') {
-                await window.currentPageInstance.loadDatasets();
-                await window.currentPageInstance.loadStats();
-
-                // Update the DOM
-                const listContainer = document.getElementById('datasets-list');
-                const emptyState = document.getElementById('datasets-empty');
-
-                if (listContainer && emptyState) {
-                    if (window.currentPageInstance.datasets.length > 0) {
-                        listContainer.classList.remove('d-none');
-                        listContainer.innerHTML = window.currentPageInstance.renderDatasetsList();
-                        emptyState.classList.add('d-none');
-                    }
-                }
-
-                // Update stats
-                document.getElementById('stat-total-images').textContent = window.currentPageInstance.stats.totalImages.toLocaleString();
-                document.getElementById('stat-datasets').textContent = window.currentPageInstance.stats.totalDatasets;
-                document.getElementById('stat-classes').textContent = window.currentPageInstance.stats.totalClasses;
-                document.getElementById('stat-annotated').textContent = window.currentPageInstance.stats.autoAnnotatedPercent + '%';
-            } else {
-                // Fallback: navigate to datasets page
-                window.location.hash = '#/datasets';
-            }
-        }, 1500);
-
-    } catch (error) {
-        console.error('Upload error:', error);
-        showToast('Upload failed: ' + error.message, 'error');
-        document.getElementById('start-upload-btn').disabled = false;
-    }
-}
-
-// Navigation functions
-function navigateToAutoAnnotate(datasetId) {
-    window.location.hash = `#/auto-annotate/${datasetId}`;
-}
-
-function navigateToDatasetDetail(datasetId) {
-    window.location.hash = `#/dataset-detail/${datasetId}`;
-}
+console.log('[DatasetsPage] Module loaded');

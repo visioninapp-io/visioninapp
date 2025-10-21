@@ -1,4 +1,4 @@
-from fastapi import APIRouter, Depends, HTTPException, status
+from fastapi import APIRouter, Depends, HTTPException, status, UploadFile, File
 from sqlalchemy.orm import Session
 from typing import List
 from app.core.database import get_db
@@ -21,8 +21,8 @@ async def get_models(
     db: Session = Depends(get_db),
     current_user: dict = Depends(get_current_user_dev)
 ):
-    """Get all models"""
-    query = db.query(Model)
+    """Get all models for current user"""
+    query = db.query(Model).filter(Model.created_by == current_user["uid"])
 
     if framework:
         query = query.filter(Model.framework == framework)
@@ -192,3 +192,69 @@ async def download_model(
         "file_path": model.file_path,
         "download_url": f"/api/v1/models/{model_id}/file"
     }
+
+
+@router.post("/{model_id}/predict")
+async def predict_with_model(
+    model_id: int,
+    file: UploadFile = File(...),
+    confidence: float = 0.25,
+    db: Session = Depends(get_db),
+    current_user: dict = Depends(get_current_user_dev)
+):
+    """Run inference with a .pt model file"""
+    from pathlib import Path
+    from app.services.auto_annotation_service import get_auto_annotation_service
+    import tempfile
+    import shutil
+
+    # Get model from database
+    model = db.query(Model).filter(Model.id == model_id).first()
+    if not model:
+        raise HTTPException(status_code=404, detail="Model not found")
+
+    # Check if model file exists
+    if not model.file_path:
+        raise HTTPException(status_code=404, detail="Model file not available")
+
+    model_path = Path(model.file_path)
+    if not model_path.exists():
+        raise HTTPException(status_code=404, detail=f"Model file not found at {model.file_path}")
+
+    # Save uploaded image to temporary file
+    try:
+        # Create temporary file
+        with tempfile.NamedTemporaryFile(delete=False, suffix=Path(file.filename).suffix) as tmp_file:
+            shutil.copyfileobj(file.file, tmp_file)
+            tmp_path = tmp_file.name
+
+        # Load model and run inference
+        service = get_auto_annotation_service()
+
+        # Load the specific model
+        if not service.load_model(str(model_path)):
+            raise HTTPException(status_code=500, detail="Failed to load model")
+
+        # Run prediction
+        predictions = service.predict_image(tmp_path, confidence)
+
+        # Clean up temporary file
+        Path(tmp_path).unlink(missing_ok=True)
+
+        # Get model info
+        model_info = service.get_model_info()
+
+        return {
+            "model_id": model.id,
+            "model_name": model.name,
+            "predictions": predictions,
+            "num_detections": len(predictions),
+            "confidence_threshold": confidence,
+            "class_names": model_info.get("class_names", [])
+        }
+
+    except Exception as e:
+        # Clean up on error
+        if 'tmp_path' in locals():
+            Path(tmp_path).unlink(missing_ok=True)
+        raise HTTPException(status_code=500, detail=f"Inference failed: {str(e)}")

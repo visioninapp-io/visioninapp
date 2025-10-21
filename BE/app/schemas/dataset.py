@@ -1,7 +1,7 @@
 from pydantic import BaseModel, Field
-from typing import Optional, List
+from typing import Optional, List, Dict, Any
 from datetime import datetime
-from app.models.dataset import DatasetStatus
+from app.models.dataset import DatasetStatus, DatasetType
 
 
 class ImageBase(BaseModel):
@@ -37,6 +37,7 @@ class AnnotationCreate(BaseModel):
     y_center: float = Field(..., ge=0, le=1)
     width: float = Field(..., ge=0, le=1)
     height: float = Field(..., ge=0, le=1)
+    polygon_points: Optional[List[List[float]]] = None  # [[x1, y1], [x2, y2], ...]
     confidence: float = Field(1.0, ge=0, le=1)
     is_auto_generated: bool = False
 
@@ -50,6 +51,7 @@ class AnnotationResponse(BaseModel):
     y_center: float
     width: float
     height: float
+    polygon_points: Optional[List[List[float]]] = None
     confidence: float
     is_auto_generated: bool
     is_verified: bool
@@ -62,12 +64,15 @@ class AnnotationResponse(BaseModel):
 class DatasetBase(BaseModel):
     name: str
     description: Optional[str] = None
+    dataset_type: Optional[DatasetType] = DatasetType.OBJECT_DETECTION
 
 
 class DatasetCreate(DatasetBase):
     total_classes: Optional[int] = 0
     class_names: Optional[List[str]] = []
+    class_colors: Optional[Dict[str, str]] = {}
     status: Optional[str] = "created"
+    is_public: Optional[bool] = False
 
 
 class DatasetUpdate(BaseModel):
@@ -81,13 +86,16 @@ class DatasetUpdate(BaseModel):
 
 class DatasetResponse(DatasetBase):
     id: int
+    dataset_type: DatasetType
     status: DatasetStatus
     total_images: int
     annotated_images: int
     total_classes: int
     class_names: List[str]
+    class_colors: Dict[str, str]
     auto_annotation_enabled: bool
     auto_annotation_model_id: Optional[int]
+    is_public: bool
     created_at: datetime
     updated_at: datetime
     created_by: str
@@ -105,6 +113,9 @@ class DatasetStats(BaseModel):
 
 class AutoAnnotationRequest(BaseModel):
     dataset_id: int
-    model_id: int
+    model_id: Optional[int] = None  # Optional: use default model if not specified
     confidence_threshold: float = Field(0.5, ge=0, le=1)
     overwrite_existing: bool = False
+
+    class Config:
+        protected_namespaces = ()

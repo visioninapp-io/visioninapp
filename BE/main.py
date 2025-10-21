@@ -76,3 +76,8 @@ app.include_router(api_router, prefix=settings.API_V1_STR)
 upload_dir = Path(settings.UPLOAD_DIR)
 upload_dir.mkdir(exist_ok=True)
 app.mount("/uploads", StaticFiles(directory=str(upload_dir)), name="uploads")
+
+# Mount datasets directory for image access
+datasets_dir = upload_dir / "datasets"
+datasets_dir.mkdir(exist_ok=True)
+app.mount("/datasets", StaticFiles(directory=str(datasets_dir)), name="datasets")

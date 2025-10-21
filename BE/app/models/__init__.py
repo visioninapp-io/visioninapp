@@ -1,4 +1,7 @@
-from app.models.dataset import Dataset, Image, Annotation
+from app.models.dataset import (
+    Dataset, Image, Annotation, DatasetVersion,
+    UploadBatch, ExportJob, DatasetStatus, DatasetType
+)
 from app.models.model import Model, ModelConversion
 from app.models.training import TrainingJob, TrainingMetric
 from app.models.evaluation import Evaluation
@@ -7,7 +10,8 @@ from app.models.monitoring import MonitoringAlert, PerformanceMetric, FeedbackLo
 from app.models.user import User
 
 __all__ = [
-    "Dataset", "Image", "Annotation",
+    "Dataset", "Image", "Annotation", "DatasetVersion",
+    "UploadBatch", "ExportJob", "DatasetStatus", "DatasetType",
     "Model", "ModelConversion",
     "TrainingJob", "TrainingMetric",
     "Evaluation",

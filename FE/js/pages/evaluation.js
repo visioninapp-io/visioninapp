@@ -107,22 +107,107 @@ class EvaluationPage {
                                     <span class="fw-medium">${latest.model_name || 'N/A'}</span>
                                 </div>
                                 <div class="d-flex justify-content-between mb-2">
-                                    <span class="text-muted">Evaluated At:</span>
-                                    <span class="fw-medium">${latest.created_at ? new Date(latest.created_at).toLocaleString() : 'N/A'}</span>
+                                    <span class="text-muted">Test Dataset:</span>
+                                    <span class="fw-medium">${latest.test_dataset_name || 'N/A'} (${latest.test_dataset_size || 0} images)</span>
                                 </div>
                                 <div class="d-flex justify-content-between mb-2">
-                                    <span class="text-muted">Status:</span>
-                                    <span class="badge badge-success">${latest.status}</span>
+                                    <span class="text-muted">Evaluated At:</span>
+                                    <span class="fw-medium">${latest.created_at ? new Date(latest.created_at).toLocaleString() : 'N/A'}</span>
                                 </div>
                             </div>
                         </div>
                     </div>
                 </div>
             </div>
+
+            <!-- Per-Class Metrics -->
+            ${latest.class_metrics && latest.class_metrics.length > 0 ? `
+                <div class="card border-0 shadow-sm mb-4">
+                    <div class="card-header bg-white">
+                        <h5 class="mb-1 fw-bold">Per-Class Performance</h5>
+                        <p class="text-muted mb-0 small">Detailed metrics for each class</p>
+                    </div>
+                    <div class="card-body">
+                        <div class="table-responsive">
+                            <table class="table table-hover">
+                                <thead>
+                                    <tr>
+                                        <th>Class</th>
+                                        <th>Precision</th>
+                                        <th>Recall</th>
+                                        <th>F1-Score</th>
+                                        <th>Support</th>
+                                    </tr>
+                                </thead>
+                                <tbody>
+                                    ${latest.class_metrics.map(cm => `
+                                        <tr>
+                                            <td><strong>${cm.class || 'N/A'}</strong></td>
+                                            <td>${(cm.precision * 100).toFixed(1)}%</td>
+                                            <td>${(cm.recall * 100).toFixed(1)}%</td>
+                                            <td>${(cm.f1 * 100).toFixed(1)}%</td>
+                                            <td>${cm.support || 0}</td>
+                                        </tr>
+                                    `).join('')}
+                                </tbody>
+                            </table>
+                        </div>
+                    </div>
+                </div>
+            ` : ''}
+
+            <!-- Confusion Matrix -->
+            ${latest.confusion_matrix ? `
+                <div class="card border-0 shadow-sm">
+                    <div class="card-header bg-white">
+                        <h5 class="mb-1 fw-bold">Confusion Matrix</h5>
+                        <p class="text-muted mb-0 small">Prediction vs ground truth</p>
+                    </div>
+                    <div class="card-body">
+                        <div id="confusion-matrix-container"></div>
+                    </div>
+                </div>
+            ` : ''}
         `;
 
         // Initialize chart after rendering
-        setTimeout(() => this.initCharts(latest), 100);
+        setTimeout(() => {
+            this.initCharts(latest);
+            if (latest.confusion_matrix) {
+                this.renderConfusionMatrix(latest.confusion_matrix);
+            }
+        }, 100);
+    }
+
+    renderConfusionMatrix(matrix) {
+        const container = document.getElementById('confusion-matrix-container');
+        if (!container || !matrix || !Array.isArray(matrix) || matrix.length === 0) return;
+
+        // Assuming matrix is a 2D array
+        const numClasses = matrix.length;
+        const classes = Array.from({length: numClasses}, (_, i) => `Class ${i}`);
+
+        let html = '<table class="table table-bordered text-center" style="max-width: 600px; margin: 0 auto;">';
+        html += '<thead><tr><th></th>';
+
+        // Header row (predicted)
+        classes.forEach(cls => {
+            html += `<th class="small">${cls}</th>`;
+        });
+        html += '</tr></thead><tbody>';
+
+        // Data rows
+        matrix.forEach((row, i) => {
+            html += `<tr><th class="small">Actual ${classes[i]}</th>`;
+            row.forEach((val, j) => {
+                const color = i === j ? 'bg-success bg-opacity-25' : (val > 0 ? 'bg-danger bg-opacity-10' : '');
+                html += `<td class="${color}"><strong>${val}</strong></td>`;
+            });
+            html += '</tr>';
+        });
+
+        html += '</tbody></table>';
+        container.innerHTML = html;
     }
 
     render() {

@@ -9,12 +9,25 @@ class DatasetDetailPage {
         this.imagesPerPage = 12;
         this.selectedImage = null;
         this.filterStatus = 'all'; // all, annotated, unannotated
+        this.filterClass = 'all'; // all, or specific class name
+        this.minConfidence = 0; // 0-100, for annotation display threshold
     }
 
     async init() {
         await this.loadDataset();
         await this.loadImages();
+
+        // Re-render after data is loaded
+        this.updateUI();
         this.attachEventListeners();
+    }
+
+    updateUI() {
+        // Re-render the page
+        const app = document.getElementById('app');
+        if (app) {
+            app.innerHTML = this.render();
+        }
     }
 
     async loadDataset() {
@@ -169,10 +182,19 @@ class DatasetDetailPage {
                                         <label class="form-label small">Class</label>
                                         <select class="form-select form-select-sm" id="filter-class">
                                             <option value="all">All Classes</option>
-                                            ${classNames.map((name, idx) => `
-                                                <option value="${idx}">${name}</option>
+                                            ${classNames.map(name => `
+                                                <option value="${name}">${name}</option>
                                             `).join('')}
                                         </select>
+                                    </div>
+                                    <div class="mb-3">
+                                        <label class="form-label small">Min Confidence: <span id="confidence-value">0%</span></label>
+                                        <input type="range" class="form-range" id="filter-confidence"
+                                               min="0" max="100" value="0" step="5">
+                                        <div class="d-flex justify-content-between small text-muted">
+                                            <span>0%</span>
+                                            <span>100%</span>
+                                        </div>
                                     </div>
                                     <button class="btn btn-outline-secondary btn-sm w-100" id="reset-filters">
                                         <i class="bi bi-arrow-clockwise me-1"></i> Reset Filters
@@ -229,9 +251,22 @@ class DatasetDetailPage {
     }
 
     renderImageGallery() {
+        // Use filtered images if available, otherwise use all images
+        const displayImages = this.filteredImages || this.images;
+
         const startIdx = (this.currentPage - 1) * this.imagesPerPage;
         const endIdx = startIdx + this.imagesPerPage;
-        const pageImages = this.images.slice(startIdx, endIdx);
+        const pageImages = displayImages.slice(startIdx, endIdx);
+
+        if (displayImages.length === 0) {
+            return `
+                <div class="text-center py-5">
+                    <i class="bi bi-filter text-muted" style="font-size: 3rem;"></i>
+                    <h5 class="mt-3 text-muted">No images match the current filters</h5>
+                    <p class="text-muted">Try adjusting your filter settings</p>
+                </div>
+            `;
+        }
 
         return `
             <div class="row g-3" id="image-gallery">
@@ -273,7 +308,9 @@ class DatasetDetailPage {
     }
 
     renderPagination() {
-        const totalPages = Math.ceil(this.images.length / this.imagesPerPage);
+        // Use filtered images if available, otherwise use all images
+        const displayImages = this.filteredImages || this.images;
+        const totalPages = Math.ceil(displayImages.length / this.imagesPerPage);
 
         if (totalPages <= 1) return '';
 
@@ -281,12 +318,18 @@ class DatasetDetailPage {
             <nav>
                 <ul class="pagination pagination-sm mb-0 justify-content-center">
                     <li class="page-item ${this.currentPage === 1 ? 'disabled' : ''}">
-                        <a class="page-link" href="#" onclick="changePage(${this.currentPage - 1}); return false;">
-                            Previous
-                        </a>
-                    </li>
         `;
 
+        // Previous button - only add onclick if not disabled
+        if (this.currentPage === 1) {
+            paginationHTML += `<span class="page-link">Previous</span>`;
+        } else {
+            paginationHTML += `<a class="page-link" href="#" onclick="changePage(${this.currentPage - 1}); return false;">Previous</a>`;
+        }
+
+        paginationHTML += `</li>`;
+
+        // Page numbers
         for (let i = 1; i <= totalPages; i++) {
             if (i === 1 || i === totalPages || (i >= this.currentPage - 2 && i <= this.currentPage + 2)) {
                 paginationHTML += `
@@ -299,11 +342,15 @@ class DatasetDetailPage {
             }
         }
 
+        // Next button - only add onclick if not disabled
+        paginationHTML += `<li class="page-item ${this.currentPage === totalPages ? 'disabled' : ''}">`;
+        if (this.currentPage === totalPages) {
+            paginationHTML += `<span class="page-link">Next</span>`;
+        } else {
+            paginationHTML += `<a class="page-link" href="#" onclick="changePage(${this.currentPage + 1}); return false;">Next</a>`;
+        }
+
         paginationHTML += `
-                    <li class="page-item ${this.currentPage === totalPages ? 'disabled' : ''}">
-                        <a class="page-link" href="#" onclick="changePage(${this.currentPage + 1}); return false;">
-                            Next
-                        </a>
                     </li>
                 </ul>
             </nav>
@@ -324,17 +371,16 @@ class DatasetDetailPage {
                         <div class="modal-body">
                             <div class="row">
                                 <div class="col-lg-8">
-                                    <canvas id="annotation-canvas" class="border w-100"></canvas>
+                                    <div class="border rounded p-2" style="background-color: #f8f9fa; max-height: 600px; overflow: auto;">
+                                        <canvas id="annotation-canvas" style="max-width: 100%; display: block;"></canvas>
+                                    </div>
                                 </div>
                                 <div class="col-lg-4">
-                                    <h6 class="fw-bold mb-3">Annotations</h6>
-                                    <div id="annotation-list" class="list-group">
-                                        <div class="text-muted text-center py-3">No annotations</div>
-                                    </div>
-                                    <div class="mt-3">
-                                        <button class="btn btn-sm btn-primary w-100">
-                                            <i class="bi bi-plus-circle me-1"></i> Add Annotation
-                                        </button>
+                                    <h6 class="fw-bold mb-3">
+                                        <i class="bi bi-tags me-2"></i>Annotations
+                                    </h6>
+                                    <div id="annotation-list" class="list-group" style="max-height: 500px; overflow-y: auto;">
+                                        <div class="text-muted text-center py-3">Loading...</div>
                                     </div>
                                 </div>
                             </div>
@@ -360,6 +406,35 @@ class DatasetDetailPage {
         if (filterStatus) {
             filterStatus.addEventListener('change', (e) => {
                 this.filterStatus = e.target.value;
+                console.log('[Filter] Status changed to:', this.filterStatus);
+                this.applyFilters();
+            });
+        }
+
+        // Filter class
+        const filterClass = document.getElementById('filter-class');
+        if (filterClass) {
+            filterClass.addEventListener('change', (e) => {
+                this.filterClass = e.target.value;
+                console.log('[Filter] Class changed to:', this.filterClass);
+                this.applyFilters();
+            });
+        }
+
+        // Filter confidence threshold
+        const filterConfidence = document.getElementById('filter-confidence');
+        const confidenceValue = document.getElementById('confidence-value');
+        if (filterConfidence && confidenceValue) {
+            filterConfidence.addEventListener('input', (e) => {
+                this.minConfidence = parseInt(e.target.value);
+                confidenceValue.textContent = `${this.minConfidence}%`;
+                console.log('[Filter] Min confidence changed to:', this.minConfidence);
+                // Don't apply filters on every slider movement, wait for change event
+            });
+
+            filterConfidence.addEventListener('change', (e) => {
+                this.minConfidence = parseInt(e.target.value);
+                console.log('[Filter] Min confidence set to:', this.minConfidence);
                 this.applyFilters();
             });
         }
@@ -369,18 +444,64 @@ class DatasetDetailPage {
         if (resetFilters) {
             resetFilters.addEventListener('click', () => {
                 this.filterStatus = 'all';
+                this.filterClass = 'all';
+                this.minConfidence = 0;
                 document.getElementById('filter-status').value = 'all';
                 document.getElementById('filter-class').value = 'all';
+                document.getElementById('filter-confidence').value = '0';
+                document.getElementById('confidence-value').textContent = '0%';
+                console.log('[Filter] Reset to all');
                 this.applyFilters();
             });
         }
     }
 
-    applyFilters() {
-        // Filter logic would go here
-        this.loadImages().then(() => {
-            this.updateGallery();
-        });
+    async applyFilters() {
+        console.log('[Filter] Applying filters - Status:', this.filterStatus, 'Class:', this.filterClass);
+
+        // Get all images (reload from backend to ensure we have latest data)
+        await this.loadImages();
+
+        // Apply filters to the loaded images
+        let filteredImages = [...this.images];
+
+        // Filter by annotation status
+        if (this.filterStatus === 'annotated') {
+            filteredImages = filteredImages.filter(img => img.is_annotated === true);
+            console.log('[Filter] After annotated filter:', filteredImages.length, 'images');
+        } else if (this.filterStatus === 'unannotated') {
+            filteredImages = filteredImages.filter(img => img.is_annotated === false);
+            console.log('[Filter] After unannotated filter:', filteredImages.length, 'images');
+        }
+
+        // Filter by class (need to check annotations for each image)
+        if (this.filterClass !== 'all') {
+            const imagesWithClass = [];
+            const minConf = this.minConfidence > 0 ? this.minConfidence / 100 : null;
+            for (const img of filteredImages) {
+                if (img.is_annotated) {
+                    // Get annotations for this image (filtered by confidence if set)
+                    const annotations = await apiService.getImageAnnotations(img.id, minConf);
+                    // Check if any annotation has the selected class
+                    const hasClass = annotations.some(ann => ann.class_name === this.filterClass);
+                    if (hasClass) {
+                        imagesWithClass.push(img);
+                    }
+                }
+            }
+            filteredImages = imagesWithClass;
+            console.log('[Filter] After class filter:', filteredImages.length, 'images');
+        }
+
+        // Store filtered images temporarily for display
+        this.filteredImages = filteredImages;
+        console.log('[Filter] Final filtered count:', filteredImages.length);
+
+        // Reset to first page when filters change
+        this.currentPage = 1;
+
+        // Update gallery display
+        this.updateGallery();
     }
 
     updateGallery() {
@@ -391,15 +512,161 @@ class DatasetDetailPage {
     }
 
     changePage(page) {
+        console.log('[DatasetDetail] Changing to page:', page);
+
+        // Calculate total pages
+        const displayImages = this.filteredImages || this.images;
+        const totalPages = Math.ceil(displayImages.length / this.imagesPerPage);
+
+        // Validate page number
+        if (page < 1 || page > totalPages) {
+            console.warn('[DatasetDetail] Invalid page number:', page);
+            return;
+        }
+
         this.currentPage = page;
-        this.updateGallery();
+
+        // Re-render the entire page to update both gallery and pagination
+        const app = document.getElementById('app');
+        if (app) {
+            app.innerHTML = this.render();
+            this.attachEventListeners();
+        }
     }
 }
 
 // Global functions for onclick handlers
-function viewImage(imageId) {
+async function viewImage(imageId) {
+    console.log('[ViewImage] Loading image:', imageId);
+
+    // Find image data
+    const page = window.currentDatasetDetailPage;
+    if (!page) {
+        console.error('[ViewImage] No page instance found');
+        return;
+    }
+
+    const image = page.images.find(img => img.id === imageId);
+    if (!image) {
+        console.error('[ViewImage] Image not found:', imageId);
+        return;
+    }
+
+    console.log('[ViewImage] Image data:', image);
+
+    // Load annotations (filtered by min confidence if set)
+    const minConf = page.minConfidence > 0 ? page.minConfidence / 100 : null;
+    console.log('[ViewImage] Using min confidence:', minConf);
+    const annotations = await apiService.getImageAnnotations(imageId, minConf);
+    console.log('[ViewImage] Loaded annotations:', annotations);
+
+    // Show modal
     const modal = new bootstrap.Modal(document.getElementById('imageViewerModal'));
     modal.show();
+
+    // Wait for modal to be shown
+    setTimeout(() => {
+        drawImageWithAnnotations(image, annotations);
+    }, 100);
+}
+
+function drawImageWithAnnotations(imageData, annotations) {
+    console.log('[DrawImage] Drawing image with annotations');
+    const canvas = document.getElementById('annotation-canvas');
+    if (!canvas) {
+        console.error('[DrawImage] Canvas not found');
+        return;
+    }
+
+    const ctx = canvas.getContext('2d');
+    const img = new Image();
+
+    img.onload = function() {
+        console.log('[DrawImage] Image loaded:', img.width, 'x', img.height);
+
+        // Set canvas size to match image
+        canvas.width = img.width;
+        canvas.height = img.height;
+
+        // Draw image
+        ctx.drawImage(img, 0, 0);
+
+        // Draw annotations
+        annotations.forEach((ann, idx) => {
+            console.log(`[DrawImage] Drawing annotation ${idx}:`, ann);
+
+            // Convert normalized coordinates to pixel coordinates
+            const x_center = ann.x_center * img.width;
+            const y_center = ann.y_center * img.height;
+            const width = ann.width * img.width;
+            const height = ann.height * img.height;
+
+            // Calculate top-left corner
+            const x = x_center - width / 2;
+            const y = y_center - height / 2;
+
+            // Draw bounding box
+            ctx.strokeStyle = getColorForClass(ann.class_id);
+            ctx.lineWidth = 3;
+            ctx.strokeRect(x, y, width, height);
+
+            // Draw label background
+            const label = `${ann.class_name} ${(ann.confidence * 100).toFixed(0)}%`;
+            ctx.font = '16px Arial';
+            const textMetrics = ctx.measureText(label);
+            const textHeight = 20;
+
+            ctx.fillStyle = getColorForClass(ann.class_id);
+            ctx.fillRect(x, y - textHeight, textMetrics.width + 10, textHeight);
+
+            // Draw label text
+            ctx.fillStyle = 'white';
+            ctx.fillText(label, x + 5, y - 5);
+        });
+
+        // Update annotation list
+        updateAnnotationList(annotations);
+    };
+
+    img.onerror = function() {
+        console.error('[DrawImage] Failed to load image');
+        showToast('Failed to load image', 'error');
+    };
+
+    img.src = `http://localhost:8000/${imageData.file_path}`;
+}
+
+function getColorForClass(classId) {
+    const colors = [
+        '#FF6384', '#36A2EB', '#FFCE56', '#4BC0C0', '#9966FF',
+        '#FF9F40', '#FF6384', '#C9CBCF', '#4BC0C0', '#FF6384'
+    ];
+    return colors[classId % colors.length];
+}
+
+function updateAnnotationList(annotations) {
+    const listContainer = document.getElementById('annotation-list');
+    if (!listContainer) return;
+
+    if (annotations.length === 0) {
+        listContainer.innerHTML = '<div class="text-muted text-center py-3">No annotations</div>';
+        return;
+    }
+
+    listContainer.innerHTML = annotations.map((ann, idx) => `
+        <div class="list-group-item">
+            <div class="d-flex justify-content-between align-items-center">
+                <div>
+                    <span class="badge" style="background-color: ${getColorForClass(ann.class_id)}">${ann.class_id}</span>
+                    <strong>${ann.class_name}</strong>
+                </div>
+                <small class="text-muted">${(ann.confidence * 100).toFixed(1)}%</small>
+            </div>
+            <small class="text-muted">
+                ${ann.is_auto_generated ? '<i class="bi bi-robot"></i> Auto' : '<i class="bi bi-pencil"></i> Manual'}
+            </small>
+        </div>
+    `).join('');
 }
 
 function changePage(page) {
@@ -472,10 +739,16 @@ function confirmDeleteDataset(datasetId) {
     if (confirm('Are you sure you want to delete this dataset? This action cannot be undone.')) {
         apiService.delete(`/datasets/${datasetId}`)
             .then(() => {
-                window.location.hash = '#/datasets';
+                showToast('Dataset deleted successfully', 'success');
+                // Force page reload to update dataset list
+                setTimeout(() => {
+                    window.location.hash = '#/datasets';
+                    window.location.reload();
+                }, 500);
             })
             .catch(error => {
                 console.error('Failed to delete dataset:', error);
+                showToast('Failed to delete dataset: ' + error.message, 'error');
             });
     }
 }

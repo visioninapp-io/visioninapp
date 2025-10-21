@@ -55,3 +55,7 @@ Thumbs.db
 # Uploads
 uploads/
 !uploads/.gitkeep
+
+exports/
+
+augmented/

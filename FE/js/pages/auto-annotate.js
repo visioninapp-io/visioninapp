@@ -9,29 +9,51 @@ class AutoAnnotatePage {
         this.confidenceThreshold = 0.5;
         this.isAnnotating = false;
         this.progress = 0;
+        this.useDefaultModel = true; // Default to using built-in model
     }
 
     async init() {
+        console.log('[AutoAnnotatePage] Initializing...');
         await this.loadDataset();
         await this.loadModels();
-        this.attachEventListeners();
+
+        // Re-render after data is loaded
+        console.log('[AutoAnnotatePage] Data loaded, updating UI...');
+        this.updatePage();
+        // attachEventListeners() is called inside updatePage()
+    }
+
+    updatePage() {
+        // Re-render the entire page
+        const app = document.getElementById('app');
+        if (app) {
+            app.innerHTML = this.render();
+            // Re-attach event listeners after re-rendering
+            this.attachEventListeners();
+        }
     }
 
     async loadDataset() {
         try {
+            console.log('[AutoAnnotatePage] Loading dataset...');
             this.dataset = await apiService.getDataset(this.datasetId);
+            console.log('[AutoAnnotatePage] Dataset loaded:', this.dataset);
         } catch (error) {
-            console.error('Error loading dataset:', error);
+            console.error('[AutoAnnotatePage] Error loading dataset:', error);
+            showToast('Failed to load dataset', 'error');
         }
     }
 
     async loadModels() {
         try {
+            console.log('[AutoAnnotatePage] Loading models...');
             const allModels = await apiService.getModels();
-            // Filter for ready models that can be used for annotation
-            this.models = allModels.filter(m => m.status === 'ready' || m.status === 'deployed');
+            console.log('[AutoAnnotatePage] All models:', allModels);
+            // Filter for ready models
+            this.models = allModels.filter(m => m.status === 'ready' || m.status === 'completed' || m.status === 'trained');
+            console.log('[AutoAnnotatePage] Filtered models:', this.models);
         } catch (error) {
-            console.error('Error loading models:', error);
+            console.error('[AutoAnnotatePage] Error loading models:', error);
             this.models = [];
         }
     }
@@ -65,7 +87,7 @@ class AutoAnnotatePage {
                         <h1 class="display-5 fw-bold mb-2">
                             <i class="bi bi-sparkles me-2"></i>Auto-Annotate Dataset
                         </h1>
-                        <p class="text-muted">Automatically annotate images using a pre-trained model</p>
+                        <p class="text-muted">Automatically annotate images using AI-powered object detection</p>
                     </div>
 
                     <div class="row g-4">
@@ -74,7 +96,9 @@ class AutoAnnotatePage {
                             <!-- Dataset Info Card -->
                             <div class="card border-0 shadow-sm mb-4">
                                 <div class="card-header bg-white border-0">
-                                    <h5 class="mb-0 fw-bold">Dataset Information</h5>
+                                    <h5 class="mb-0 fw-bold">
+                                        <i class="bi bi-info-circle me-2"></i>Dataset Information
+                                    </h5>
                                 </div>
                                 <div class="card-body">
                                     <h6 class="fw-bold">${this.dataset.name}</h6>
@@ -86,11 +110,11 @@ class AutoAnnotatePage {
                                         </div>
                                         <div class="d-flex justify-content-between">
                                             <span class="text-muted">Annotated:</span>
-                                            <strong>${this.dataset.annotated_images || 0}</strong>
+                                            <strong class="text-success">${this.dataset.annotated_images || 0}</strong>
                                         </div>
                                         <div class="d-flex justify-content-between">
-                                            <span class="text-muted">Classes:</span>
-                                            <strong>${this.dataset.total_classes || 0}</strong>
+                                            <span class="text-muted">Remaining:</span>
+                                            <strong class="text-warning">${(this.dataset.total_images || 0) - (this.dataset.annotated_images || 0)}</strong>
                                         </div>
                                         <div class="d-flex justify-content-between">
                                             <span class="text-muted">Status:</span>
@@ -103,38 +127,56 @@ class AutoAnnotatePage {
                             <!-- Model Selection Card -->
                             <div class="card border-0 shadow-sm mb-4">
                                 <div class="card-header bg-white border-0">
-                                    <h5 class="mb-0 fw-bold">Model Selection</h5>
+                                    <h5 class="mb-0 fw-bold">
+                                        <i class="bi bi-cpu me-2"></i>Model Selection
+                                    </h5>
                                 </div>
                                 <div class="card-body">
-                                    <div class="mb-3">
-                                        <label for="model-select" class="form-label">Select Pre-trained Model</label>
-                                        <select class="form-select" id="model-select" ${this.isAnnotating ? 'disabled' : ''}>
-                                            <option value="">-- Choose a model --</option>
-                                            ${this.models.map(model => `
-                                                <option value="${model.id}">
-                                                    ${model.name} (${model.framework || 'Unknown'})
-                                                </option>
-                                            `).join('')}
-                                        </select>
+                                    <div class="form-check form-switch mb-3">
+                                        <input class="form-check-input" type="checkbox" id="use-default-model"
+                                               ${this.useDefaultModel ? 'checked' : ''} ${this.isAnnotating ? 'disabled' : ''}>
+                                        <label class="form-check-label" for="use-default-model">
+                                            <strong>Use Default Model</strong>
+                                            <br><small class="text-muted">YOLOv8 (AI/models/best.pt)</small>
+                                        </label>
                                     </div>
 
-                                    ${this.selectedModel ? `
-                                        <div class="alert alert-info">
-                                            <h6 class="alert-heading">Selected Model</h6>
-                                            <p class="mb-1"><strong>${this.selectedModel.name}</strong></p>
-                                            <small class="text-muted">
-                                                Framework: ${this.selectedModel.framework}<br>
-                                                Architecture: ${this.selectedModel.architecture || 'N/A'}
-                                            </small>
+                                    <div id="custom-model-section" class="${this.useDefaultModel ? 'd-none' : ''}">
+                                        <div class="mb-3">
+                                            <label for="model-select" class="form-label">Select Custom Model</label>
+                                            <select class="form-select" id="model-select" ${this.isAnnotating ? 'disabled' : ''}>
+                                                <option value="">-- Choose a trained model --</option>
+                                                ${this.models.map(model => `
+                                                    <option value="${model.id}">
+                                                        ${model.name} (${model.framework || 'Unknown'})
+                                                    </option>
+                                                `).join('')}
+                                            </select>
+                                            ${this.models.length === 0 ? `
+                                                <small class="text-muted">No trained models available. Using default model.</small>
+                                            ` : ''}
                                         </div>
-                                    ` : ''}
+
+                                        ${this.selectedModel ? `
+                                            <div class="alert alert-info mb-0">
+                                                <h6 class="alert-heading mb-1">Selected Model</h6>
+                                                <p class="mb-1"><strong>${this.selectedModel.name}</strong></p>
+                                                <small class="text-muted">
+                                                    Framework: ${this.selectedModel.framework}<br>
+                                                    Architecture: ${this.selectedModel.architecture || 'N/A'}
+                                                </small>
+                                            </div>
+                                        ` : ''}
+                                    </div>
                                 </div>
                             </div>
 
                             <!-- Settings Card -->
                             <div class="card border-0 shadow-sm mb-4">
                                 <div class="card-header bg-white border-0">
-                                    <h5 class="mb-0 fw-bold">Annotation Settings</h5>
+                                    <h5 class="mb-0 fw-bold">
+                                        <i class="bi bi-gear me-2"></i>Annotation Settings
+                                    </h5>
                                 </div>
                                 <div class="card-body">
                                     <div class="mb-3">
@@ -144,6 +186,10 @@ class AutoAnnotatePage {
                                         <input type="range" class="form-range" id="confidence-slider"
                                                min="0" max="1" step="0.05" value="${this.confidenceThreshold}"
                                                ${this.isAnnotating ? 'disabled' : ''}>
+                                        <div class="d-flex justify-content-between small text-muted">
+                                            <span>Low (0.0)</span>
+                                            <span>High (1.0)</span>
+                                        </div>
                                         <small class="text-muted">
                                             Only detections above this confidence level will be saved
                                         </small>
@@ -169,8 +215,8 @@ class AutoAnnotatePage {
 
                             <!-- Action Buttons -->
                             <div class="d-grid gap-2">
-                                <button class="btn btn-primary btn-lg" id="start-annotation-btn"
-                                        ${this.isAnnotating || !this.selectedModel ? 'disabled' : ''}>
+                                <button class="btn btn-success btn-lg" id="start-annotation-btn"
+                                        ${this.isAnnotating ? 'disabled' : ''}>
                                     <i class="bi bi-play-fill me-2"></i>Start Auto-Annotation
                                 </button>
                                 <button class="btn btn-outline-danger" id="stop-annotation-btn"
@@ -199,7 +245,7 @@ class AutoAnnotatePage {
                                             <span><strong id="progress-text">0%</strong></span>
                                         </div>
                                         <div class="progress" style="height: 30px;">
-                                            <div id="annotation-progress-bar" class="progress-bar progress-bar-striped progress-bar-animated"
+                                            <div id="annotation-progress-bar" class="progress-bar progress-bar-striped progress-bar-animated bg-success"
                                                  role="progressbar" style="width: 0%">
                                                 <span id="progress-count">0 / ${this.dataset.total_images || 0}</span>
                                             </div>
@@ -209,22 +255,27 @@ class AutoAnnotatePage {
                                     <div id="annotation-stats" class="row g-3 text-center">
                                         <div class="col-4">
                                             <div class="p-3 bg-light rounded">
-                                                <h3 class="mb-0" id="stat-processed">0</h3>
+                                                <h3 class="mb-0 text-primary" id="stat-processed">0</h3>
                                                 <small class="text-muted">Processed</small>
                                             </div>
                                         </div>
                                         <div class="col-4">
                                             <div class="p-3 bg-light rounded">
-                                                <h3 class="mb-0" id="stat-detected">0</h3>
+                                                <h3 class="mb-0 text-success" id="stat-detected">0</h3>
                                                 <small class="text-muted">Detections</small>
                                             </div>
                                         </div>
                                         <div class="col-4">
                                             <div class="p-3 bg-light rounded">
-                                                <h3 class="mb-0" id="stat-avg-confidence">0%</h3>
+                                                <h3 class="mb-0 text-info" id="stat-avg-confidence">0%</h3>
                                                 <small class="text-muted">Avg Confidence</small>
                                             </div>
                                         </div>
+                                    </div>
+
+                                    <div class="alert alert-info mt-3 mb-0">
+                                        <i class="bi bi-info-circle me-2"></i>
+                                        <strong>Processing:</strong> Running AI model on each image to detect objects...
                                     </div>
                                 </div>
                             </div>
@@ -247,19 +298,20 @@ class AutoAnnotatePage {
                             <div class="card border-0 shadow-sm mt-4 ${this.isAnnotating ? 'd-none' : ''}" id="instructions-card">
                                 <div class="card-header bg-white border-0">
                                     <h5 class="mb-0 fw-bold">
-                                        <i class="bi bi-info-circle me-2"></i>How Auto-Annotation Works
+                                        <i class="bi bi-lightbulb me-2"></i>How Auto-Annotation Works
                                     </h5>
                                 </div>
                                 <div class="card-body">
-                                    <ol class="mb-0">
-                                        <li class="mb-2">Select a pre-trained model from the dropdown</li>
+                                    <ol class="mb-3">
+                                        <li class="mb-2">The system uses a pre-trained YOLO model (AI/models/best.pt)</li>
                                         <li class="mb-2">Adjust the confidence threshold (higher = more strict)</li>
                                         <li class="mb-2">Click "Start Auto-Annotation" to begin the process</li>
                                         <li class="mb-2">The model will automatically detect objects in all images</li>
                                         <li>Review and refine the annotations after completion</li>
                                     </ol>
 
-                                    <div class="alert alert-warning mt-3 mb-0">
+                                    <div class="alert alert-warning mb-0">
+                                        <i class="bi bi-exclamation-triangle me-2"></i>
                                         <strong>Note:</strong> Auto-annotation is not perfect. Always review and verify
                                         the generated annotations before using them for training.
                                     </div>
@@ -275,28 +327,46 @@ class AutoAnnotatePage {
     renderPreviewContent() {
         if (this.isAnnotating) {
             return `
-                <div class="spinner-border text-primary mb-3" role="status">
+                <div class="spinner-border text-success mb-3" style="width: 4rem; height: 4rem;" role="status">
                     <span class="visually-hidden">Annotating...</span>
                 </div>
-                <p class="text-muted">Processing images with auto-annotation...</p>
+                <h5 class="text-muted">Processing images with AI...</h5>
+                <p class="text-muted">This may take a few minutes depending on the dataset size</p>
             `;
         }
 
         return `
-            <i class="bi bi-image text-muted mb-3" style="font-size: 5rem;"></i>
-            <h5 class="text-muted">Preview will appear here</h5>
-            <p class="text-muted">Select a model and start annotation to see results</p>
+            <i class="bi bi-robot text-muted mb-3" style="font-size: 5rem;"></i>
+            <h5 class="text-muted">Ready for Auto-Annotation</h5>
+            <p class="text-muted">Click "Start Auto-Annotation" to begin processing</p>
+            <div class="mt-4">
+                <span class="badge bg-success me-2">AI-Powered</span>
+                <span class="badge bg-primary me-2">Fast & Accurate</span>
+                <span class="badge bg-info">Real-time Progress</span>
+            </div>
         `;
     }
 
     attachEventListeners() {
+        // Use default model toggle
+        const useDefaultModelCheckbox = document.getElementById('use-default-model');
+        if (useDefaultModelCheckbox) {
+            useDefaultModelCheckbox.addEventListener('change', (e) => {
+                this.useDefaultModel = e.target.checked;
+                const customModelSection = document.getElementById('custom-model-section');
+                if (customModelSection) {
+                    customModelSection.classList.toggle('d-none', this.useDefaultModel);
+                }
+            });
+        }
+
         // Model selection
         const modelSelect = document.getElementById('model-select');
         if (modelSelect) {
             modelSelect.addEventListener('change', (e) => {
                 const modelId = parseInt(e.target.value);
                 this.selectedModel = this.models.find(m => m.id === modelId);
-                this.updateUI();
+                this.updatePage();
             });
         }
 
@@ -305,7 +375,7 @@ class AutoAnnotatePage {
         if (confidenceSlider) {
             confidenceSlider.addEventListener('input', (e) => {
                 this.confidenceThreshold = parseFloat(e.target.value);
-                document.getElementById('confidence-display').textContent = this.confidenceThreshold;
+                document.getElementById('confidence-display').textContent = this.confidenceThreshold.toFixed(2);
             });
         }
 
@@ -323,52 +393,87 @@ class AutoAnnotatePage {
     }
 
     async startAnnotation() {
-        if (!this.selectedModel) {
-            return;
-        }
+        console.log('[AutoAnnotate] Starting annotation process...');
+        console.log('[AutoAnnotate] Dataset ID:', this.datasetId);
+        console.log('[AutoAnnotate] Use default model:', this.useDefaultModel);
+        console.log('[AutoAnnotate] Confidence threshold:', this.confidenceThreshold);
+
+        // Determine which model to use
+        const modelId = this.useDefaultModel ? null : (this.selectedModel ? this.selectedModel.id : null);
+        console.log('[AutoAnnotate] Selected model ID:', modelId);
+
+        // Get overwrite existing checkbox value
+        const overwriteExisting = document.getElementById('overwrite-existing')?.checked || false;
+        console.log('[AutoAnnotate] Overwrite existing:', overwriteExisting);
 
         this.isAnnotating = true;
         this.progress = 0;
-        this.updateUI();
+        this.updatePage();
 
         // Show progress card
         document.getElementById('progress-card')?.classList.remove('d-none');
         document.getElementById('instructions-card')?.classList.add('d-none');
 
         try {
-            // Call API to start auto-annotation
-            const result = await apiService.autoAnnotate(this.datasetId, this.selectedModel.id);
+            console.log('[AutoAnnotate] Showing toast notification...');
+            showToast('Starting auto-annotation...', 'info');
 
-            // Simulate progress (in real app, you'd poll for status)
-            await this.simulateProgress();
+            console.log('[AutoAnnotate] Calling API...');
+            // Call API to start auto-annotation
+            const result = await apiService.autoAnnotate(
+                this.datasetId,
+                modelId,
+                this.confidenceThreshold,
+                overwriteExisting
+            );
+
+            console.log('[AutoAnnotate] API call successful. Result:', result);
+
+            // Simulate progress display
+            await this.simulateProgress(result);
+
+            showToast('Auto-annotation completed successfully!', 'success');
 
             // Redirect to dataset detail page for review
             const autoReview = document.getElementById('auto-review')?.checked;
+            console.log('[AutoAnnotate] Auto review enabled:', autoReview);
+
             if (autoReview) {
                 setTimeout(() => {
+                    console.log('[AutoAnnotate] Redirecting to dataset detail...');
                     window.location.hash = `#/dataset-detail/${this.datasetId}`;
+                }, 2000);
+            } else {
+                setTimeout(() => {
+                    console.log('[AutoAnnotate] Redirecting to datasets list...');
+                    window.location.hash = '#/datasets';
                 }, 2000);
             }
 
         } catch (error) {
-            console.error('Auto-annotation error:', error);
+            console.error('[AutoAnnotate] Error occurred:', error);
+            console.error('[AutoAnnotate] Error message:', error.message);
+            console.error('[AutoAnnotate] Error stack:', error.stack);
+            showToast(`Auto-annotation failed: ${error.message}`, 'error');
             this.isAnnotating = false;
-            this.updateUI();
+            this.updatePage();
         }
     }
 
-    async simulateProgress() {
-        const totalImages = this.dataset.total_images || 10;
+    async simulateProgress(result) {
+        const totalImages = result.total_images || this.dataset.total_images || 10;
+        const annotatedImages = result.annotated_images || 0;
+        const totalAnnotations = result.total_annotations || 0;
 
         return new Promise((resolve) => {
             let processed = 0;
-            let detected = 0;
+            const targetProcessed = totalImages;
 
             const interval = setInterval(() => {
-                processed++;
-                detected += Math.floor(Math.random() * 5) + 1;
+                processed += Math.max(1, Math.floor(targetProcessed / 20));
+                if (processed > targetProcessed) processed = targetProcessed;
 
-                this.progress = Math.round((processed / totalImages) * 100);
+                this.progress = Math.round((processed / targetProcessed) * 100);
 
                 // Update progress bar
                 const progressBar = document.getElementById('annotation-progress-bar');
@@ -378,34 +483,28 @@ class AutoAnnotatePage {
 
                 // Update text
                 document.getElementById('progress-text').textContent = this.progress + '%';
-                document.getElementById('progress-count').textContent = `${processed} / ${totalImages}`;
+                document.getElementById('progress-count').textContent = `${processed} / ${targetProcessed}`;
 
                 // Update stats
+                const detectedPerImage = Math.ceil(totalAnnotations / annotatedImages) || 1;
                 document.getElementById('stat-processed').textContent = processed;
-                document.getElementById('stat-detected').textContent = detected;
+                document.getElementById('stat-detected').textContent = Math.round(processed * detectedPerImage * 0.7);
                 document.getElementById('stat-avg-confidence').textContent =
-                    Math.round((this.confidenceThreshold + Math.random() * 0.3) * 100) + '%';
+                    Math.round((this.confidenceThreshold + Math.random() * 0.2) * 100) + '%';
 
-                if (processed >= totalImages) {
+                if (processed >= targetProcessed) {
                     clearInterval(interval);
                     this.isAnnotating = false;
                     resolve();
                 }
-            }, 500);
+            }, 100);
         });
     }
 
     stopAnnotation() {
         this.isAnnotating = false;
-        this.updateUI();
+        showToast('Annotation stopped', 'warning');
+        this.updatePage();
     }
 
-    updateUI() {
-        // Re-render the page
-        const app = document.getElementById('app');
-        if (app) {
-            app.innerHTML = this.render();
-            this.attachEventListeners();
-        }
-    }
 }

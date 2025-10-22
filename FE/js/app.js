@@ -67,6 +67,11 @@ class App {
     }
 
     render(pageInstance) {
+        // Cleanup previous page instance
+        if (window.currentPageInstance && window.currentPageInstance.cleanup) {
+            window.currentPageInstance.cleanup();
+        }
+
         // Check if it's a class or an instance
         if (typeof pageInstance === 'function') {
             pageInstance = new pageInstance();
@@ -92,6 +97,11 @@ class App {
         // Store for dataset detail page
         if (pageInstance.constructor.name === 'DatasetDetailPage') {
             window.currentDatasetDetailPage = pageInstance;
+        }
+
+        // Store for training page
+        if (pageInstance.constructor.name === 'TrainingPage') {
+            window.trainingPage = pageInstance;
         }
     }
 

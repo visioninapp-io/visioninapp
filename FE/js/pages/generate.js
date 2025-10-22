@@ -260,25 +260,29 @@ class GeneratePage {
                             <ul class="nav nav-tabs mb-4 bg-white p-2 rounded" id="versionTabs" role="tablist">
                                 <li class="nav-item" role="presentation">
                                     <button class="nav-link active" id="basic-tab" data-bs-toggle="tab"
-                                            data-bs-target="#basic" type="button" role="tab">
+                                            data-bs-target="#basic" type="button" role="tab"
+                                            aria-controls="basic" aria-selected="true">
                                         <i class="bi bi-info-circle me-1"></i>Basic Info
                                     </button>
                                 </li>
                                 <li class="nav-item" role="presentation">
                                     <button class="nav-link" id="split-tab" data-bs-toggle="tab"
-                                            data-bs-target="#split" type="button" role="tab">
+                                            data-bs-target="#split" type="button" role="tab"
+                                            aria-controls="split" aria-selected="false">
                                         <i class="bi bi-pie-chart me-1"></i>Data Split
                                     </button>
                                 </li>
                                 <li class="nav-item" role="presentation">
                                     <button class="nav-link" id="preprocessing-tab" data-bs-toggle="tab"
-                                            data-bs-target="#preprocessing" type="button" role="tab">
+                                            data-bs-target="#preprocessing" type="button" role="tab"
+                                            aria-controls="preprocessing" aria-selected="false">
                                         <i class="bi bi-sliders me-1"></i>Preprocessing
                                     </button>
                                 </li>
                                 <li class="nav-item" role="presentation">
                                     <button class="nav-link" id="augmentation-tab" data-bs-toggle="tab"
-                                            data-bs-target="#augmentation" type="button" role="tab">
+                                            data-bs-target="#augmentation" type="button" role="tab"
+                                            aria-controls="augmentation" aria-selected="false">
                                         <i class="bi bi-shuffle me-1"></i>Augmentation
                                     </button>
                                 </li>
@@ -287,22 +291,26 @@ class GeneratePage {
                             <!-- Tab Content -->
                             <div class="tab-content" id="versionTabsContent">
                                 <!-- Basic Info Tab -->
-                                <div class="tab-pane fade show active p-4 bg-white rounded" id="basic" role="tabpanel">
+                                <div class="tab-pane fade show active p-4 bg-white rounded" id="basic"
+                                     role="tabpanel" aria-labelledby="basic-tab">
                                     ${this.renderBasicInfoTab()}
                                 </div>
 
                                 <!-- Data Split Tab -->
-                                <div class="tab-pane fade p-4 bg-white rounded" id="split" role="tabpanel">
+                                <div class="tab-pane fade p-4 bg-white rounded" id="split"
+                                     role="tabpanel" aria-labelledby="split-tab">
                                     ${this.renderDataSplitTab()}
                                 </div>
 
                                 <!-- Preprocessing Tab -->
-                                <div class="tab-pane fade p-4 bg-white rounded" id="preprocessing" role="tabpanel">
+                                <div class="tab-pane fade p-4 bg-white rounded" id="preprocessing"
+                                     role="tabpanel" aria-labelledby="preprocessing-tab">
                                     ${this.renderPreprocessingTab()}
                                 </div>
 
                                 <!-- Augmentation Tab -->
-                                <div class="tab-pane fade p-4 bg-white rounded" id="augmentation" role="tabpanel">
+                                <div class="tab-pane fade p-4 bg-white rounded" id="augmentation"
+                                     role="tabpanel" aria-labelledby="augmentation-tab">
                                     ${this.renderAugmentationTab()}
                                 </div>
                             </div>
@@ -325,12 +333,17 @@ class GeneratePage {
         // Add modal to DOM
         document.body.insertAdjacentHTML('beforeend', modalHTML);
 
+        // Get modal element
+        const modalElement = document.getElementById('createVersionModal');
+
         // Show modal
-        const modal = new bootstrap.Modal(document.getElementById('createVersionModal'));
+        const modal = new bootstrap.Modal(modalElement);
         modal.show();
 
-        // Attach event listeners
-        this.attachModalEventListeners();
+        // Attach event listeners after modal is shown
+        modalElement.addEventListener('shown.bs.modal', () => {
+            this.attachModalEventListeners();
+        }, { once: true });
     }
 
     renderBasicInfoTab() {
@@ -641,15 +654,8 @@ class GeneratePage {
     }
 
     attachModalEventListeners() {
-        // Initialize Bootstrap tabs manually
-        const triggerTabList = document.querySelectorAll('#versionTabs button[data-bs-toggle="tab"]');
-        triggerTabList.forEach(triggerEl => {
-            const tabTrigger = new bootstrap.Tab(triggerEl);
-            triggerEl.addEventListener('click', event => {
-                event.preventDefault();
-                tabTrigger.show();
-            });
-        });
+        // Bootstrap tabs work automatically with data-bs-toggle="tab"
+        // No manual initialization needed
 
         // Split inputs - update preview
         const updateSplitPreview = () => {

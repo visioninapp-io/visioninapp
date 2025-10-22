@@ -29,8 +29,8 @@ class Model(Base):
     name = Column(String, unique=True, index=True)
     description = Column(Text, nullable=True)
 
-    framework = Column(Enum(ModelFramework), default=ModelFramework.PYTORCH)
-    status = Column(Enum(ModelStatus), default=ModelStatus.TRAINING)
+    framework = Column(String(50), default=ModelFramework.PYTORCH.value)
+    status = Column(String(50), default=ModelStatus.TRAINING.value)
 
     version = Column(String, default="1.0")
     architecture = Column(String)  # YOLOv8, Faster R-CNN, etc.
@@ -67,8 +67,8 @@ class ModelConversion(Base):
     id = Column(Integer, primary_key=True, index=True)
     source_model_id = Column(Integer, ForeignKey("models.id"))
 
-    target_framework = Column(Enum(ModelFramework))
-    status = Column(String, default="pending")  # pending, converting, completed, failed
+    target_framework = Column(String(50))
+    status = Column(String(50), default="pending")  # pending, converting, completed, failed
 
     optimization_level = Column(String)  # speed, balanced, size
     precision = Column(String)  # FP32, FP16, INT8

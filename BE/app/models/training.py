@@ -23,7 +23,7 @@ class TrainingJob(Base):
     dataset_id = Column(Integer, ForeignKey("datasets.id"))
     model_id = Column(Integer, ForeignKey("models.id"), nullable=True)
 
-    status = Column(Enum(TrainingStatus), default=TrainingStatus.PENDING)
+    status = Column(String(50), default=TrainingStatus.PENDING.value)
 
     # Training configuration
     architecture = Column(String)  # YOLOv8, Faster R-CNN, etc.

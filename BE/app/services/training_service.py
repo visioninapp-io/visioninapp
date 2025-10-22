@@ -62,7 +62,7 @@ class TrainingEngine:
         """Get database session"""
         return self.db_session_factory()
 
-    def _update_job_status(self, status: str, **kwargs):
+    def _update_job_status(self, status, **kwargs):
         """Update training job status in database"""
         from app.models.training import TrainingJob, TrainingStatus
 
@@ -70,7 +70,11 @@ class TrainingEngine:
         try:
             job = db.query(TrainingJob).filter(TrainingJob.id == self.job_id).first()
             if job:
-                job.status = TrainingStatus(status)
+                # Accept both TrainingStatus enum and string
+                if isinstance(status, str):
+                    job.status = TrainingStatus[status.upper()]
+                else:
+                    job.status = status
                 for key, value in kwargs.items():
                     if hasattr(job, key):
                         setattr(job, key, value)
@@ -178,9 +182,11 @@ class TrainingEngine:
                 - architecture: Model architecture name
                 - hyperparameters: Dict with batch_size, epochs, learning_rate, etc.
         """
+        from app.models.training import TrainingStatus
+
         try:
             # Update status to running
-            self._update_job_status('RUNNING', started_at=datetime.utcnow())
+            self._update_job_status(TrainingStatus.RUNNING, started_at=datetime.utcnow())
 
             # Extract config
             dataset_id = config['dataset_id']
@@ -223,7 +229,7 @@ class TrainingEngine:
                     time.sleep(1)
 
                 if self.is_cancelled:
-                    self._update_job_status('CANCELLED')
+                    self._update_job_status(TrainingStatus.CANCELLED)
                     return
 
                 self.current_epoch = epoch + 1
@@ -237,7 +243,7 @@ class TrainingEngine:
                 for batch_idx, (inputs, labels) in enumerate(train_loader):
                     # Check cancellation during batch
                     if self.is_cancelled:
-                        self._update_job_status('CANCELLED')
+                        self._update_job_status(TrainingStatus.CANCELLED)
                         return
 
                     inputs, labels = inputs.to(self.device), labels.to(self.device)
@@ -294,7 +300,7 @@ class TrainingEngine:
                 )
 
                 self._update_job_status(
-                    'RUNNING',
+                    TrainingStatus.RUNNING,
                     current_epoch=epoch + 1,
                     current_loss=avg_train_loss,
                     current_accuracy=train_accuracy,
@@ -309,12 +315,12 @@ class TrainingEngine:
 
             # Training completed
             self._save_model(config)
-            self._update_job_status('COMPLETED', completed_at=datetime.utcnow())
+            self._update_job_status(TrainingStatus.COMPLETED, completed_at=datetime.utcnow())
 
         except Exception as e:
             error_msg = f"Training failed: {str(e)}"
             print(error_msg)
-            self._update_job_status('FAILED', training_logs=error_msg)
+            self._update_job_status(TrainingStatus.FAILED, training_logs=error_msg)
 
     def _save_model(self, config: Dict):
         """Save trained model to disk"""
@@ -342,9 +348,10 @@ class TrainingEngine:
             # Update model record
             model = db.query(ModelRecord).filter(ModelRecord.id == job.model_id).first()
             if model:
+                from app.models.model import ModelStatus
                 model.file_path = str(model_path)
                 model.file_size = model_path.stat().st_size
-                model.status = 'TRAINED'
+                model.status = ModelStatus.COMPLETED
                 db.commit()
 
         finally:
@@ -352,18 +359,21 @@ class TrainingEngine:
 
     def pause(self):
         """Pause training"""
+        from app.models.training import TrainingStatus
         self.is_paused = True
-        self._update_job_status('PAUSED')
+        self._update_job_status(TrainingStatus.PAUSED)
 
     def resume(self):
         """Resume training"""
+        from app.models.training import TrainingStatus
         self.is_paused = False
-        self._update_job_status('RUNNING')
+        self._update_job_status(TrainingStatus.RUNNING)
 
     def cancel(self):
         """Cancel training"""
+        from app.models.training import TrainingStatus
         self.is_cancelled = True
-        self._update_job_status('CANCELLED')
+        self._update_job_status(TrainingStatus.CANCELLED)
 
 
 class TrainingManager:

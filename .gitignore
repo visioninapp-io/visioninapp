@@ -8,3 +8,22 @@ docs/
 tests/
 
 AI_test/
+
+# LLM
+# --- LLM 폴더 내부 ---
+llm/.venv/
+llm/.pytest_cache/
+llm/.env
+
+# --- models 폴더 내부 ---
+models/*/
+!models/
+
+# --- data 폴더 내부 ---
+data/datasets/*/
+data/models/*/
+data/raw/*/
+data/runs/*/
+
+# --- runs 폴더 내부 ---
+runs/*/

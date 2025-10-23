@@ -8,3 +8,30 @@ docs/
 tests/
 
 AI_test/
+
+# LLM
+# ── Python bytecode / caches ─────────────────────────
+__pycache__/
+*.py[cod]
+*.pyo
+*.pyd
+
+# ── Environments / secrets ───────────────────────────
+.llm/               # 혹시 소문자 폴더도 있을 수 있으니 필요시 유지
+llm/.venv/
+LLM/.venv/
+llm/.pytest_cache/
+LLM/.pytest_cache/
+llm/.env
+LLM/.env
+
+# ── Model / data artifacts ───────────────────────────
+LLM/models/*/
+!LLM/models/            # 폴더 자체는 남기고 하위만 무시
+
+LLM/data/datasets/*/
+LLM/data/models/*/
+LLM/data/raw/*/
+LLM/data/runs/*/
+
+LLM/runs/*/

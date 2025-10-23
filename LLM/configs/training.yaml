@@ -1,0 +1,128 @@
+# ==============================================
+# 🧠 training.yaml
+# ==============================================
+
+meta:
+  project_name: yolo-autolabel-trainer
+  version_tag: v1.0.0
+  description: YOLOv12 automated training workflow
+  author: user
+  date: 2025-10-20
+
+# ----------------------------------------------
+# ⚙️ 1️⃣ 기본 학습 설정
+# ----------------------------------------------
+train:
+  model_name: yolov12n.pt              # base model (fresh 학습 시)
+  epochs: 100
+  batch: 16
+  imgsz: 640
+  workers: 8
+  optimizer: SGD                      # 또는 AdamW
+  lr0: 0.001
+  lrf: 0.01                           # final learning rate fraction
+  weight_decay: 0.0005
+  momentum: 0.937
+  warmup_epochs: 3
+  warmup_bias_lr: 0.1
+  augment: true
+  mosaic: true
+  mixup: false
+  amp: true                           # 자동 혼합정밀도 (AMP)
+  patience: 20                        # 조기 종료 (early stop)
+
+# ----------------------------------------------
+# 🧩 2️⃣ 하이퍼파라미터 탐색(HPO) 설정
+# ----------------------------------------------
+hpo:
+  enabled: true
+  max_trials: 20
+  search_space:
+    lr0: [0.0005, 0.005]
+    batch: [8, 16, 32]
+    momentum: [0.85, 0.95]
+    weight_decay: [0.0001, 0.001]
+    epochs: [50, 100, 150]
+  metric: "mAP50-95"
+  direction: "maximize"
+  sampler: "TPESampler"
+  pruner: "MedianPruner"
+
+# ----------------------------------------------
+# 🧮 3️⃣ 게이트(회귀 방지) 기준
+# ----------------------------------------------
+gate:
+  enabled: true
+  min_mAP: 0.6                # 절대 하한선
+  delta_mAP: -0.02            # 이전 버전 대비 허용 감소 폭
+  min_class_ap: 0.4           # 특정 클래스 하한
+  check_latency: true
+  max_latency_ms: 50          # Jetson 목표 fps 고려
+
+# ----------------------------------------------
+# 🧰 4️⃣ 하드웨어 / 배포 타깃 설정
+# ----------------------------------------------
+hardware:
+  device: "cuda:0"
+  mixed_precision: true
+  cudnn_benchmark: true
+  max_vram_gb: 8
+  # target_profile: null   # configs/targets/ 내에 별도 파일 연결
+
+# ----------------------------------------------
+# 🧩 5️⃣ 데이터 경로 / 버전 관리
+# ----------------------------------------------
+data:
+  dataset_version: dataset@1.0.0
+  yaml_path: data/datasets/dataset@1.0.0/data.yaml
+  cache_images: true
+  augmentations_dir: configs/augs/        # (선택)
+  split_ratio: [0.8, 0.2]                 # train:valid
+
+# ----------------------------------------------
+# 🔁 6️⃣ 증분 학습 / 재학습 옵션
+# ----------------------------------------------
+resume:
+  enable: false
+  last_ckpt: null
+  finetune_base: null
+  freeze_backbone: false
+  lr_factor: 0.5
+
+# ----------------------------------------------
+# 🚀 7️⃣ 내보내기 / TensorRT 변환 설정
+# ----------------------------------------------
+export:
+  enabled: true
+  formats:
+    - onnx
+    - engine
+  engine:
+    half: true
+    int8: true
+    calibration_data: data/datasets/dataset@1.0.0/images/train/
+    max_workspace_size: 2048
+    dynamic_shapes: true
+
+# ----------------------------------------------
+# 🧪 8️⃣ 검증 및 벤치마크 옵션
+# ----------------------------------------------
+eval:
+  conf_thres: 0.25
+  iou_thres: 0.6
+  save_json: true
+  save_confusion_matrix: true
+  benchmark:
+    fps: true
+    vram: true
+    latency: true
+
+# ----------------------------------------------
+# 🪣 9️⃣ 결과 저장 / 레지스트리 연동
+# ----------------------------------------------
+registry:
+  enabled: true
+  save_to: registry/models.json
+  save_metrics: true
+  auto_versioning: true
+  notes: "YOLOv12 training with automatic HPO and TRT export"

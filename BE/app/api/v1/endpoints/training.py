@@ -41,9 +41,9 @@ async def create_training_job(
     current_user: dict = Depends(get_current_user_dev)
 ):
     """Start a new training job"""
-    # Check if name already exists
-    existing = db.query(TrainingJob).filter(TrainingJob.name == job.name).first()
-    if existing:
+    # Check if training job name already exists
+    existing_job = db.query(TrainingJob).filter(TrainingJob.name == job.name).first()
+    if existing_job:
         raise HTTPException(status_code=400, detail="Training job with this name already exists")
 
     # Create training job
@@ -62,19 +62,33 @@ async def create_training_job(
     db.commit()
     db.refresh(db_job)
 
-    # Create associated model
-    model = Model(
-        name=f"{job.name}_model",
-        architecture=job.architecture,
-        framework=ModelFramework.PYTORCH,
-        status=ModelStatus.TRAINING,
-        training_config=job.hyperparameters,
-        hyperparameters=job.hyperparameters,
-        created_by=current_user["uid"]
-    )
-    db.add(model)
-    db.commit()
-    db.refresh(model)
+    # Check if model was already created (by frontend) or needs to be created
+    model_name = f"{job.name}_model"
+    existing_model = db.query(Model).filter(Model.name == model_name).first()
+    
+    if existing_model:
+        # Use the existing model (frontend already created it)
+        model = existing_model
+        # Update status to TRAINING
+        model.status = ModelStatus.TRAINING
+        model.training_config = job.hyperparameters
+        model.hyperparameters = job.hyperparameters
+        db.commit()
+        db.refresh(model)
+    else:
+        # Create new model (backend creates it)
+        model = Model(
+            name=model_name,
+            architecture=job.architecture,
+            framework=ModelFramework.PYTORCH,
+            status=ModelStatus.TRAINING,
+            training_config=job.hyperparameters,
+            hyperparameters=job.hyperparameters,
+            created_by=current_user["uid"]
+        )
+        db.add(model)
+        db.commit()
+        db.refresh(model)
 
     # Link model to training job
     db_job.model_id = model.id

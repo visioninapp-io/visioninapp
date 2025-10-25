@@ -6,3 +6,7 @@
 docs/
 
 tests/
+
+**/__pycache__/
+
+**/*.pt

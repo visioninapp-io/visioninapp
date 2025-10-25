@@ -28,8 +28,11 @@ class AutoAnnotationService:
     def _get_default_model_path(self) -> Path:
         """기본 모델 경로 반환"""
         # AI/models/best.pt 사용
-        project_root = Path(__file__).parent.parent.parent.parent
+        # BE/app/services/auto_annotation_service.py -> go up to project root
+        current_file = Path(__file__).resolve()
+        project_root = current_file.parent.parent.parent.parent
         model_path = project_root / "AI" / "models" / "best.pt"
+        logger.debug(f"Default model path: {model_path}")
         return model_path
 
     def load_model(self, model_path: Optional[str] = None) -> bool:
@@ -49,17 +52,38 @@ class AutoAnnotationService:
             if model_path:
                 self.model_path = model_path
 
-            if not Path(self.model_path).exists():
-                logger.error(f"모델 파일을 찾을 수 없습니다: {self.model_path}")
-                logger.info("AI/scripts/train_yolo.py를 먼저 실행하세요.")
-                return False
-
-            logger.info(f"모델 로드 중: {self.model_path}")
-            self.model = YOLO(str(self.model_path))
+            # 지정된 경로가 있는지 확인
+            model_path_obj = Path(self.model_path) if self.model_path else None
+            
+            # .pth 파일이면 .pt로 변환 시도 또는 경고
+            if model_path_obj and model_path_obj.exists():
+                if model_path_obj.suffix == '.pth':
+                    logger.warning(f"⚠️  PyTorch 모델 (.pth) 감지: {self.model_path}")
+                    logger.warning(f"   YOLO는 .pt 형식만 지원합니다.")
+                    logger.warning(f"   YOLO 아키텍처로 모델을 다시 훈련하거나 YOLOv8n을 사용합니다.")
+                    # .pth는 로드 실패하므로 기본 모델로 fallback
+                    model_path_obj = None
+                elif model_path_obj.suffix == '.pt':
+                    logger.info(f"모델 로드 중: {self.model_path}")
+                    self.model = YOLO(str(self.model_path))
+                    self.is_loaded = True
+                    logger.info(f"✅ 커스텀 모델 로드 완료")
+                    logger.info(f"   클래스 수: {len(self.model.names)}")
+                    return True
+            
+            # 커스텀 모델이 없거나 .pth 파일이면 yolov8n 사용 (자동 다운로드)
+            if not model_path_obj or not model_path_obj.exists():
+                logger.warning(f"커스텀 모델을 찾을 수 없습니다: {self.model_path}")
+            
+            logger.info("기본 YOLOv8n 모델을 사용합니다 (필요시 자동 다운로드)")
+            
+            self.model = YOLO("yolov8n.pt")  # Ultralytics will auto-download if needed
+            self.model_path = "yolov8n.pt"
             self.is_loaded = True
-
-            logger.info(f"✅ 모델 로드 완료")
+            
+            logger.info(f"✅ YOLOv8n 모델 로드 완료")
             logger.info(f"   클래스 수: {len(self.model.names)}")
+            logger.info(f"   참고: YOLO 커스텀 모델을 사용하려면 'yolov8' 아키텍처로 훈련하세요")
 
             return True
 

@@ -1,0 +1,48 @@
+# ---------- Core ----------
+python-dotenv==1.0.1
+pydantic==2.8.2
+numpy==1.26.4
+pandas==2.2.3
+PyYAML==6.0.2
+tqdm==4.66.5
+rich==13.8.1
+requests==2.32.3
+typer==0.12.5
+
+# ---------- LangGraph / LangChain ----------
+langgraph==0.2.20
+langchain==0.3.9
+langchain-core==0.3.26
+langchain-openai==0.2.3
+openai==1.56.1
+
+# ---------- YOLOv12 / Vision ----------
+ultralytics==8.3.78
+opencv-python==4.10.0.84
+
+# ---------- Grounding DINO ----------
+transformers==4.44.2
+huggingface-hub==0.25.2
+diffusers==0.31.0
+sentencepiece==0.2.0
+
+# ---------- Optimization / HPO ----------
+optuna==3.6.1
+ray[tune]==2.37.0
+scikit-learn==1.5.2
+
+# ---------- Export / Deployment ----------
+onnx==1.17.0
+onnxruntime==1.19.0
+polygraphy==0.49.26
+
+# ---------- Utilities ----------
+psutil==6.0.0
+filelock==3.15.4
+jsonschema==4.23.0
+matplotlib==3.9.2
+seaborn==0.13.2
+
+# ---------- Optional (Jupyter / Debug) ----------
+# jupyterlab==4.2.5
+# notebook==7.2.2

@@ -224,6 +224,8 @@ def load_dataset(state: TrainState) -> TrainState:
 
     # 1) data.yaml 경로가 명시되어 있으면 그대로 사용
     yaml_path = data_cfg.get("yaml_path")
+    if state.dataset_version is not None:
+        yaml_path = f"data/datasets/{state.dataset_version}/data.yaml"
     if yaml_path and Path(yaml_path).exists():
         data_yaml = _load_yaml(yaml_path)
         for k in ("train", "val", "names"):

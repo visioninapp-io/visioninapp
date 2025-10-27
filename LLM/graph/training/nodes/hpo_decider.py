@@ -1,6 +1,6 @@
 from __future__ import annotations
 from typing import Any, Dict, Optional
-
+import os
 from graph.training.state import TrainState
 
 # LLM (optional)
@@ -94,7 +94,12 @@ def hpo_decider(state: TrainState) -> TrainState:
     use_hpo: Optional[bool] = None
     if _LLM:
         try:
-            llm = ChatOpenAI(model="gpt-4o-mini", temperature=0)
+            llm = ChatOpenAI(
+                model="gpt-5-mini", 
+                api_key=os.getenv("OPENAI_API_KEY"),
+                openai_api_base=os.getenv("OPENAI_API_BASE"),
+                temperature=1
+            )
             prompt = ChatPromptTemplate.from_template(
                 """
                 당신은 AutoML 의사결정 보조입니다. 아래 사양을 보고
@@ -104,7 +109,7 @@ def hpo_decider(state: TrainState) -> TrainState:
                 - search_space가 비어있거나 max_trials<2면 single_trial 권장
                 - GPU 사용 가능, 데이터가 충분(예: train>=5000)하거나 epochs가 길면 HPO 권장
                 - 임베디드/경량 타깃에서 급한 납기면 single_trial 권장
-                - notes에 사용자가 hpo를 원하는 내용이 포함될 경우 반드시 HPO 사용
+                - notes에 사용자가 hpo를 원하는 내용이 포함될 경우에만 HPO 사용
                 - 출력은 {{"decision": "use_hpo" | "single_trial", "reason": "짧은 설명"}} 만.
 
                 사양:

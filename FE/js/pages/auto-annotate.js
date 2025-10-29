@@ -46,12 +46,22 @@ class AutoAnnotatePage {
 
     async loadModels() {
         try {
-            console.log('[AutoAnnotatePage] Loading models...');
-            const allModels = await apiService.getModels();
-            console.log('[AutoAnnotatePage] All models:', allModels);
-            // Filter for ready models
-            this.models = allModels.filter(m => m.status === 'ready' || m.status === 'completed' || m.status === 'trained');
-            console.log('[AutoAnnotatePage] Filtered models:', this.models);
+            console.log('[AutoAnnotatePage] Loading trained models...');
+            const trainedModels = await apiService.getTrainedModels();
+            console.log('[AutoAnnotatePage] Trained models:', trainedModels);
+            
+            // Transform trained models to match expected format
+            this.models = trainedModels.map(m => ({
+                id: m.model_id,
+                name: m.model_name,
+                model_path: m.relative_path,
+                file_size_mb: m.file_size_mb,
+                framework: 'YOLO',
+                architecture: 'YOLOv8',
+                status: 'trained'
+            }));
+            
+            console.log('[AutoAnnotatePage] Formatted models:', this.models);
         } catch (error) {
             console.error('[AutoAnnotatePage] Error loading models:', error);
             this.models = [];
@@ -143,18 +153,24 @@ class AutoAnnotatePage {
 
                                     <div id="custom-model-section" class="${this.useDefaultModel ? 'd-none' : ''}">
                                         <div class="mb-3">
-                                            <label for="model-select" class="form-label">Select Custom Model</label>
+                                            <label for="model-select" class="form-label">Select Trained Model</label>
                                             <select class="form-select" id="model-select" ${this.isAnnotating ? 'disabled' : ''}>
                                                 <option value="">-- Choose a trained model --</option>
                                                 ${this.models.map(model => `
                                                     <option value="${model.id}">
-                                                        ${model.name} (${model.framework || 'Unknown'})
+                                                        ${model.name} (${model.file_size_mb}MB)
                                                     </option>
                                                 `).join('')}
                                             </select>
                                             ${this.models.length === 0 ? `
-                                                <small class="text-muted">No trained models available. Using default model.</small>
-                                            ` : ''}
+                                                <small class="text-warning">
+                                                    <i class="bi bi-exclamation-triangle me-1"></i>No trained models found. Please train a model first or use the default model.
+                                                </small>
+                                            ` : `
+                                                <small class="text-muted">
+                                                    <i class="bi bi-info-circle me-1"></i>${this.models.length} trained model(s) available
+                                                </small>
+                                            `}
                                         </div>
 
                                         ${this.selectedModel ? `

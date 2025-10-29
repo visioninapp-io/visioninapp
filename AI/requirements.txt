@@ -1,2 +1,25 @@
-ultralytics>=8.2.0
+# AI Service Requirements
+# For GPU server - YOLO training and inference
 
+# Core dependencies
+fastapi==0.104.1
+uvicorn[standard]==0.24.0
+pydantic==2.5.0
+
+# Deep Learning - PyTorch 2.6+ with CUDA 12.6
+# Using latest stable versions
+torch>=2.6.0
+torchvision>=0.21.0
+
+# YOLO - Latest version (supports PyTorch 2.6+)
+ultralytics>=8.3.0
+
+# Utilities
+httpx==0.25.1
+python-multipart==0.0.6
+Pillow==10.1.0
+numpy==1.24.3
+pyyaml==6.0.1
+
+# Optional but recommended
+gpustat==1.1  # GPU monitoring

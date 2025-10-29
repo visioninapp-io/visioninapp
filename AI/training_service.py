@@ -33,6 +33,7 @@ class YOLOTrainingService:
         project: Optional[str] = None,
         exist_ok: bool = True,
         progress_callback: Optional[Callable] = None,
+        device: Optional[str] = None,
         **kwargs
     ) -> Dict[str, Any]:
         """
@@ -47,12 +48,23 @@ class YOLOTrainingService:
             project: Project directory (default: runs/detect)
             exist_ok: Allow overwriting existing run
             progress_callback: Callback function for progress updates
+            device: Device to use (0 for GPU, 'cpu' for CPU, None for auto)
             **kwargs: Additional training parameters
             
         Returns:
             Dictionary with training results
         """
         try:
+            # Fix PyTorch 2.6 weights_only issue
+            import torch
+            if hasattr(torch.serialization, 'add_safe_globals'):
+                # PyTorch 2.6+ - add Ultralytics classes to safe globals
+                try:
+                    from ultralytics.nn.tasks import DetectionModel
+                    torch.serialization.add_safe_globals([DetectionModel])
+                except Exception as e:
+                    logger.warning(f"Could not add safe globals: {e}")
+            
             from model_trainer.integrations.yolo import build_yolo_model
             
             logger.info(f"Starting YOLO training with {self.model_spec}")
@@ -78,8 +90,15 @@ class YOLOTrainingService:
                 train_params['project'] = project
             
             if progress_callback:
+                logger.info("✅ Progress callback provided - will track training progress")
                 train_params['progress_callback'] = progress_callback
                 train_params['tick_interval'] = 1.0  # Progress updates every second
+            else:
+                logger.warning("⚠️ No progress callback provided")
+            
+            # Add device if specified
+            if device is not None:
+                train_params['device'] = device
             
             # Merge additional kwargs
             train_params.update(kwargs)

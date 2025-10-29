@@ -1,6 +1,8 @@
 from fastapi import APIRouter, Depends, HTTPException, status, UploadFile, File
 from sqlalchemy.orm import Session
 from typing import List
+from pathlib import Path
+import os
 from app.core.database import get_db
 from app.core.auth import get_current_user, get_current_user_dev
 from app.models.model import Model, ModelConversion, ModelStatus
@@ -32,6 +34,62 @@ async def get_models(
 
     models = query.offset(skip).limit(limit).all()
     return models
+
+
+@router.get("/trained", response_model=List[dict])
+async def get_trained_models(
+    current_user: dict = Depends(get_current_user_dev)
+):
+    """Get all trained models from AI/uploads/models/ directory"""
+    try:
+        # Path to trained models directory
+        base_path = Path("AI/uploads/models")
+        
+        if not base_path.exists():
+            return []
+        
+        trained_models = []
+        
+        # Iterate through model directories
+        for model_dir in base_path.iterdir():
+            if not model_dir.is_dir():
+                continue
+            
+            # Check for best.pt in weights subdirectory
+            weights_dir = model_dir / "weights"
+            best_pt = weights_dir / "best.pt"
+            
+            if best_pt.exists():
+                # Extract model ID from directory name (e.g., model_25 -> 25)
+                model_name = model_dir.name
+                model_id = None
+                if model_name.startswith("model_"):
+                    try:
+                        model_id = int(model_name.split("_")[1])
+                    except:
+                        pass
+                
+                # Get file stats
+                stats = best_pt.stat()
+                file_size_mb = stats.st_size / (1024 * 1024)
+                modified_time = stats.st_mtime
+                
+                trained_models.append({
+                    "model_id": model_id,
+                    "model_name": model_name,
+                    "model_path": str(best_pt),
+                    "relative_path": f"AI/uploads/models/{model_name}/weights/best.pt",
+                    "file_size_mb": round(file_size_mb, 2),
+                    "modified_at": modified_time
+                })
+        
+        # Sort by model_id descending (newest first)
+        trained_models.sort(key=lambda x: x['model_id'] if x['model_id'] else 0, reverse=True)
+        
+        return trained_models
+        
+    except Exception as e:
+        raise HTTPException(status_code=500, detail=f"Failed to list trained models: {str(e)}")
 
 
 @router.post("/", response_model=ModelResponse, status_code=status.HTTP_201_CREATED)

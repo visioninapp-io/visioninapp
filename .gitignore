@@ -10,3 +10,5 @@ tests/
 **/__pycache__/
 
 **/*.pt
+
+AI/uploads/models/model_*/

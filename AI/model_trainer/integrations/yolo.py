@@ -52,6 +52,11 @@ class YOLOAdapter:
     def _metrics_to_dict(self, metrics_obj: Any) -> Dict[str, Any]:
         if metrics_obj is None:
             return {}
+        
+        # If it's already a dict, return it directly
+        if isinstance(metrics_obj, dict):
+            return metrics_obj
+        
         # Common Ultralytics metrics exposure
         for attr in ("results_dict", "as_dict", "to_dict"):
             v = getattr(metrics_obj, attr, None)
@@ -121,13 +126,96 @@ class YOLOAdapter:
 
             def on_fit_epoch_end(trainer):  # type: ignore
                 try:
+                    print(f"[CALLBACK] on_fit_epoch_end triggered!")
+                    
+                    # Debug: List all trainer attributes
+                    trainer_attrs = [attr for attr in dir(trainer) if not attr.startswith('_')]
+                    print(f"[CALLBACK] Trainer attributes: {trainer_attrs[:20]}...")  # First 20 to avoid spam
+                    
                     epoch = getattr(trainer, "epoch", None)
                     epochs = getattr(trainer, "epochs", None)
+                    
+                    # Extract metrics directly from trainer
+                    metrics = {}
+                    
+                    # Debug: Check what loss-related attributes exist
+                    print(f"[CALLBACK] trainer.tloss = {getattr(trainer, 'tloss', 'NOT FOUND')}")
+                    print(f"[CALLBACK] trainer.loss = {getattr(trainer, 'loss', 'NOT FOUND')}")
+                    print(f"[CALLBACK] trainer.loss_items = {getattr(trainer, 'loss_items', 'NOT FOUND')}")
+                    
+                    # Loss from trainer.tloss (total loss tensor)
+                    tloss = getattr(trainer, "tloss", None)
+                    if tloss is not None:
+                        try:
+                            # tloss is a tensor, convert to float
+                            if hasattr(tloss, 'item'):
+                                metrics['train_loss'] = float(tloss.item())
+                                print(f"[CALLBACK] Extracted train_loss from tloss.item(): {metrics['train_loss']}")
+                            elif hasattr(tloss, 'sum'):
+                                metrics['train_loss'] = float(tloss.sum().item())
+                                print(f"[CALLBACK] Extracted train_loss from tloss.sum(): {metrics['train_loss']}")
+                            else:
+                                metrics['train_loss'] = float(tloss)
+                                print(f"[CALLBACK] Extracted train_loss from tloss: {metrics['train_loss']}")
+                        except Exception as e:
+                            print(f"[CALLBACK] Failed to extract tloss: {e}")
+                    
+                    # Try trainer.loss as alternative
+                    loss = getattr(trainer, "loss", None)
+                    if loss is not None and 'train_loss' not in metrics:
+                        try:
+                            if hasattr(loss, 'item'):
+                                metrics['train_loss'] = float(loss.item())
+                                print(f"[CALLBACK] Extracted train_loss from loss.item(): {metrics['train_loss']}")
+                        except Exception as e:
+                            print(f"[CALLBACK] Failed to extract loss: {e}")
+                    
+                    # Get loss components from trainer.loss_items
+                    loss_items = getattr(trainer, "loss_items", None)
+                    if loss_items is not None:
+                        try:
+                            print(f"[CALLBACK] loss_items type: {type(loss_items)}, len: {len(loss_items) if hasattr(loss_items, '__len__') else 'N/A'}")
+                            # loss_items is typically a tensor with [box_loss, cls_loss, dfl_loss]
+                            if hasattr(loss_items, '__iter__') and len(loss_items) >= 3:
+                                metrics['box_loss'] = float(loss_items[0])
+                                metrics['cls_loss'] = float(loss_items[1])
+                                metrics['dfl_loss'] = float(loss_items[2])
+                                print(f"[CALLBACK] Extracted loss components: box={metrics['box_loss']}, cls={metrics['cls_loss']}, dfl={metrics['dfl_loss']}")
+                        except Exception as e:
+                            print(f"[CALLBACK] Failed to extract loss_items: {e}")
+                    
+                    # Get validation metrics from trainer.metrics
                     metrics_obj = getattr(trainer, "metrics", None)
-                    metrics = self._metrics_to_dict(metrics_obj)
-                    self.last_epoch = int(epoch) if epoch is not None else None
+                    print(f"[CALLBACK] trainer.metrics = {metrics_obj}")
+                    if metrics_obj is not None:
+                        val_metrics = self._metrics_to_dict(metrics_obj)
+                        print(f"[CALLBACK] Extracted val_metrics: {val_metrics}")
+                        metrics.update(val_metrics)
+                    
+                    # Get mAP from validator results if available
+                    validator = getattr(trainer, "validator", None)
+                    print(f"[CALLBACK] trainer.validator = {validator}")
+                    if validator is not None:
+                        results = getattr(validator, "results", None)
+                        print(f"[CALLBACK] validator.results = {results}")
+                        if results is not None:
+                            # results is typically a dict or object with mAP values
+                            if hasattr(results, 'results_dict'):
+                                metrics.update(results.results_dict)
+                                print(f"[CALLBACK] Extracted from results.results_dict")
+                            elif isinstance(results, dict):
+                                metrics.update(results)
+                                print(f"[CALLBACK] Extracted from results dict")
+                    
+                    self.last_epoch = int(epoch) + 1 if epoch is not None else None  # +1 for 1-based indexing
                     self.total_epochs = int(epochs) if epochs is not None else None
                     self.last_metrics = metrics
+                    
+                    print(f"[CALLBACK] ===== EPOCH {self.last_epoch}/{self.total_epochs} =====")
+                    print(f"[CALLBACK] Available metrics: {list(metrics.keys())}")
+                    print(f"[CALLBACK] Metrics values: {metrics}")
+                    print(f"[CALLBACK] Loss: {metrics.get('train_loss', 'N/A')}, mAP50: {metrics.get('metrics/mAP50(B)', 'N/A')}")
+                    
                     try:
                         progress_cb({
                             "event": "epoch_end",
@@ -135,10 +223,15 @@ class YOLOAdapter:
                             "total_epochs": self.total_epochs,
                             "metrics": metrics,
                         })
-                    except Exception:
-                        pass
-                except Exception:
-                    pass
+                        print(f"[CALLBACK] Progress callback executed successfully")
+                    except Exception as e:
+                        print(f"[CALLBACK] Progress callback failed: {e}")
+                        import traceback
+                        traceback.print_exc()
+                except Exception as e:
+                    import traceback
+                    print(f"[CALLBACK] on_fit_epoch_end error: {e}")
+                    print(traceback.format_exc())
 
             def on_train_batch_end(trainer):  # type: ignore
                 try:
@@ -186,10 +279,22 @@ class YOLOAdapter:
 
         if isinstance(user_callbacks, dict):
             callbacks.update(user_callbacks)
+        
+        # Register callbacks using the new Ultralytics API (add_callback method)
+        # NOTE: In newer Ultralytics, callbacks are NOT passed as train() parameter
         if callbacks:
-            args["callbacks"] = callbacks
+            print(f"[YOLO] Registering {len(callbacks)} callbacks: {list(callbacks.keys())}")
+            for event_name, callback_fn in callbacks.items():
+                try:
+                    self._model.add_callback(event_name, callback_fn)
+                    print(f"[YOLO] ✅ Registered callback: {event_name}")
+                except Exception as e:
+                    # Log warning but continue - callback registration is optional
+                    print(f"[YOLO] ⚠️ Could not register callback '{event_name}': {e}")
+        else:
+            print(f"[YOLO] ⚠️ No callbacks to register!")
 
-        # Delegate to ultralytics
+        # Delegate to ultralytics (without callbacks in args)
         result = self._model.train(**args)
         # Capture final metrics and save_dir if available post-train
         try:

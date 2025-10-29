@@ -429,6 +429,7 @@ class TrainingPage {
             console.log('[Training Page] Initializing chart for job', this.selectedJob.id);
             const metrics = await apiService.getTrainingMetrics(this.selectedJob.id);
             console.log('[Training Page] Loaded metrics:', metrics?.length || 0);
+            console.log('[Training Page] Raw metrics data:', metrics);
 
             const ctx = document.getElementById('trainingChart');
             if (!ctx) {
@@ -452,20 +453,29 @@ class TrainingPage {
                 return;
             }
 
+            // Extract chart data
+            const labels = metrics.map((m, idx) => `Epoch ${m.epoch || idx + 1}`);
+            const lossData = metrics.map(m => m.train_loss || 0);
+            const accuracyData = metrics.map(m => (m.train_accuracy || 0));
+            
+            console.log('[Training Page] Chart labels:', labels);
+            console.log('[Training Page] Loss data:', lossData);
+            console.log('[Training Page] Accuracy data:', accuracyData);
+
             this.chart = new Chart(ctx, {
                 type: 'line',
                 data: {
-                    labels: metrics.map((m, idx) => `Epoch ${m.epoch || idx + 1}`),
+                    labels: labels,
                     datasets: [{
                         label: 'Loss',
-                        data: metrics.map(m => m.train_loss || 0),
+                        data: lossData,
                         borderColor: 'rgb(239, 68, 68)',
                         backgroundColor: 'rgba(239, 68, 68, 0.1)',
                         yAxisID: 'y',
                         tension: 0.4
                     }, {
                         label: 'Accuracy (%)',
-                        data: metrics.map(m => (m.train_accuracy || 0)),
+                        data: accuracyData,
                         borderColor: 'rgb(16, 185, 129)',
                         backgroundColor: 'rgba(16, 185, 129, 0.1)',
                         yAxisID: 'y1',
@@ -506,6 +516,7 @@ class TrainingPage {
             });
 
             console.log('[Training Page] Chart initialized successfully');
+            console.log('[Training Page] Chart object:', this.chart);
 
         } catch (error) {
             console.error('[Training Page] Error initializing chart:', error);
@@ -513,17 +524,27 @@ class TrainingPage {
     }
 
     async updateChart() {
-        if (!this.chart || !this.selectedJob) return;
+        if (!this.chart || !this.selectedJob) {
+            console.log('[Training Page] Cannot update chart - chart or selectedJob missing');
+            return;
+        }
 
         try {
             const metrics = await apiService.getTrainingMetrics(this.selectedJob.id);
-            if (!metrics || metrics.length === 0) return;
+            if (!metrics || metrics.length === 0) {
+                console.log('[Training Page] No metrics for chart update');
+                return;
+            }
 
+            console.log(`[Training Page] Updating chart with ${metrics.length} metrics`);
+            
             // Update chart data
             this.chart.data.labels = metrics.map((m, idx) => `Epoch ${m.epoch || idx + 1}`);
             this.chart.data.datasets[0].data = metrics.map(m => m.train_loss || 0);
             this.chart.data.datasets[1].data = metrics.map(m => (m.train_accuracy || 0));
             this.chart.update('none');
+            
+            console.log('[Training Page] Chart updated successfully');
         } catch (error) {
             console.error('[Training Page] Error updating chart:', error);
         }
@@ -574,21 +595,36 @@ class TrainingPage {
                                     <label class="form-label">Model Architecture *</label>
                                     <select class="form-select" id="architecture-select" required>
                                         <option value="">-- Select Architecture --</option>
-                                        <option value="resnet18">ResNet18 (Fast)</option>
-                                        <option value="resnet50">ResNet50</option>
-                                        <option value="mobilenet_v2">MobileNet V2</option>
+                                        <optgroup label="Object Detection (YOLO)">
+                                            <option value="yolov8n">YOLOv8 Nano (Fastest, Smallest)</option>
+                                            <option value="yolov8s">YOLOv8 Small</option>
+                                            <option value="yolov8m">YOLOv8 Medium</option>
+                                            <option value="yolov8l">YOLOv8 Large</option>
+                                            <option value="yolov8x">YOLOv8 XLarge (Most Accurate)</option>
+                                        </optgroup>
+                                        <optgroup label="Image Classification (Not Yet Supported)">
+                                            <option value="resnet18" disabled>ResNet18 (Coming Soon)</option>
+                                            <option value="resnet50" disabled>ResNet50 (Coming Soon)</option>
+                                            <option value="mobilenet_v2" disabled>MobileNet V2 (Coming Soon)</option>
+                                        </optgroup>
                                     </select>
+                                    <small class="text-muted">YOLO for object detection, ResNet/MobileNet for classification</small>
                                 </div>
                                 <div class="row">
-                                    <div class="col-md-4">
+                                    <div class="col-md-3">
                                         <label class="form-label">Epochs</label>
                                         <input type="number" class="form-control" id="epochs" value="20" min="1">
                                     </div>
-                                    <div class="col-md-4">
+                                    <div class="col-md-3">
                                         <label class="form-label">Batch Size</label>
                                         <input type="number" class="form-control" id="batch-size" value="16" min="1">
                                     </div>
-                                    <div class="col-md-4">
+                                    <div class="col-md-3">
+                                        <label class="form-label">Image Size</label>
+                                        <input type="number" class="form-control" id="img-size" value="640" step="32" min="320">
+                                        <small class="text-muted">For YOLO</small>
+                                    </div>
+                                    <div class="col-md-3">
                                         <label class="form-label">Learning Rate</label>
                                         <input type="number" class="form-control" id="learning-rate" value="0.001" step="0.0001">
                                     </div>
@@ -674,6 +710,7 @@ class TrainingPage {
         const hyperparameters = {
             epochs: parseInt(document.getElementById('epochs').value),
             batch_size: parseInt(document.getElementById('batch-size').value),
+            img_size: parseInt(document.getElementById('img-size').value),
             learning_rate: parseFloat(document.getElementById('learning-rate').value),
             num_classes: 10
         };

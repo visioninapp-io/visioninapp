@@ -39,6 +39,9 @@ class Settings(BaseSettings):
     CACHE_TTL: int = 300  # 5 minutes
     ENABLE_CACHE: bool = False  # Set to True when Redis is available
 
+    AI_SERVICE_URL: str = "http://localhost:8001"   # 추후 gpu 서버로 변경
+
+
     class Config:
         env_file = ".env"
         case_sensitive = True

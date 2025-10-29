@@ -1,6 +1,11 @@
 from fastapi import APIRouter, Depends, HTTPException, UploadFile, File, status, Form
+from fastapi.responses import StreamingResponse, Response
 from sqlalchemy.orm import Session
 from typing import List, Optional
+import io
+import zipfile
+import base64
+from datetime import datetime
 from app.core.database import get_db
 from app.core.auth import get_current_user, get_current_user_dev
 from app.core.cache import cache_manager, invalidate_cache
@@ -10,6 +15,7 @@ from app.schemas.dataset import (
     ImageResponse, AnnotationCreate, AnnotationResponse, AutoAnnotationRequest
 )
 from app.utils.file_storage import file_storage
+from app.services.dataset_cache_service import dataset_cache_service
 
 router = APIRouter()
 
@@ -177,6 +183,11 @@ async def delete_dataset(
         raise HTTPException(status_code=404, detail="Dataset not found")
 
     print(f"[DELETE DATASET] Deleting dataset {dataset_id}: {dataset.name}")
+    
+    # Invalidate dataset images cache before deletion
+    dataset_cache_service.invalidate_dataset_cache(dataset_id)
+    print(f"[CACHE] Invalidated images cache for dataset {dataset_id}")
+    
     db.delete(dataset)
     db.commit()
 
@@ -187,30 +198,72 @@ async def delete_dataset(
     return None
 
 
-@router.get("/{dataset_id}/images", response_model=List[ImageResponse])
+@router.get("/{dataset_id}/images")
 async def get_dataset_images(
     dataset_id: int,
-    skip: int = 0,
-    limit: int = 100,
+    page: int = 1,
+    limit: int = 1000,
     db: Session = Depends(get_db),
     current_user: dict = Depends(get_current_user_dev)
 ):
-    """Get all images in a dataset"""
+    """
+    Get images in a dataset with base64 encoding and Redis caching
+    
+    Args:
+        dataset_id: Dataset ID
+        page: Page number (1-based, default: 1)
+        limit: Number of images per page (default: 50)
+    
+    Returns:
+        Dictionary with base64 encoded images and metadata
+        
+    Cache Strategy:
+        - First request: Loads from S3/local storage, encodes to base64, caches in Redis
+        - Subsequent requests: Returns cached data from Redis (very fast)
+        - Cache is automatically invalidated on dataset updates
+    """
+    # Verify dataset exists
     dataset = db.query(Dataset).filter(Dataset.id == dataset_id).first()
     if not dataset:
         raise HTTPException(status_code=404, detail="Dataset not found")
-
-    images = db.query(Image).filter(Image.dataset_id == dataset_id).offset(skip).limit(limit).all()
-
-    # Convert is_annotated from int to bool for response
-    for img in images:
-        img.is_annotated = bool(img.is_annotated)
-
-    print(f"[GET IMAGES] Returning {len(images)} images for dataset {dataset_id}")
-    for img in images:
-        print(f"  - {img.filename}: is_annotated={img.is_annotated}")
-
-    return images
+    
+    # Get all images for this dataset
+    all_images = db.query(Image).filter(Image.dataset_id == dataset_id).all()
+    
+    if not all_images:
+        return {
+            "dataset_id": dataset_id,
+            "page": page,
+            "page_size": limit,
+            "cached": False,
+            "images": [],
+            "total_images": 0,
+            "total_pages": 0
+        }
+    
+    print(f"[GET IMAGES] Dataset {dataset_id}: {len(all_images)} total images, page {page}, limit {limit}")
+    
+    # Use cache service to get base64 encoded images
+    try:
+        result = await dataset_cache_service.get_cached_images(
+            dataset_id=dataset_id,
+            images_db=all_images,
+            page=page,
+            limit=limit
+        )
+        
+        # Add total pages
+        result["total_pages"] = (result["total_images"] + limit - 1) // limit
+        
+        print(f"[GET IMAGES] Returning {len(result['images'])} images (cached: {result['cached']})")
+        
+        return result
+    except Exception as e:
+        print(f"[ERROR] Failed to get images for dataset {dataset_id}: {str(e)}")
+        raise HTTPException(
+            status_code=500,
+            detail=f"Failed to load images from S3: {str(e)}"
+        )
 
 
 @router.post("/upload", status_code=status.HTTP_201_CREATED)
@@ -254,7 +307,7 @@ async def upload_dataset(
         db.commit()
         db.refresh(dataset)
 
-    # Save files to disk and create Image records
+    # Upload files to S3 and create Image records
     try:
         dataset.status = DatasetStatus.UPLOADING
         db.commit()
@@ -281,9 +334,12 @@ async def upload_dataset(
         db.commit()
         db.refresh(dataset)
 
-        # Invalidate datasets cache
+        # Invalidate datasets cache and dataset images cache
         invalidate_cache("datasets")
         print("[CACHE] Invalidated after upload: datasets")
+        
+        dataset_cache_service.invalidate_dataset_cache(dataset.id)
+        print(f"[CACHE] Invalidated images cache for dataset {dataset.id}")
 
         response = {
             "message": f"Successfully uploaded {len(successful_uploads)} images",
@@ -327,7 +383,7 @@ async def upload_images_to_dataset(
         dataset.status = DatasetStatus.UPLOADING
         db.commit()
 
-        # Save images to disk
+        # Upload images to S3
         successful_uploads, failed_uploads = await file_storage.save_images_batch(files, dataset.id)
 
         # Create Image records
@@ -348,6 +404,10 @@ async def upload_images_to_dataset(
         dataset.total_images += len(successful_uploads)
         dataset.status = original_status if len(failed_uploads) == 0 else DatasetStatus.PROCESSING
         db.commit()
+        
+        # Invalidate dataset images cache
+        dataset_cache_service.invalidate_dataset_cache(dataset_id)
+        print(f"[CACHE] Invalidated images cache for dataset {dataset_id}")
 
         response = {
             "message": f"Successfully uploaded {len(successful_uploads)} images",
@@ -628,4 +688,194 @@ async def auto_annotate_dataset(
         raise HTTPException(
             status_code=500,
             detail=f"Auto-annotation failed: {str(e)}"
+        )
+
+
+@router.get("/{dataset_id}/images/{image_id}/download")
+async def download_single_image(
+    dataset_id: int,
+    image_id: int,
+    db: Session = Depends(get_db),
+    current_user: dict = Depends(get_current_user_dev)
+):
+    """
+    Download a single image from a dataset
+    
+    Args:
+        dataset_id: Dataset ID
+        image_id: Image ID
+        
+    Returns:
+        Image file as StreamingResponse
+    """
+    # Verify dataset exists
+    dataset = db.query(Dataset).filter(Dataset.id == dataset_id).first()
+    if not dataset:
+        raise HTTPException(status_code=404, detail="Dataset not found")
+    
+    # Get image record
+    image = db.query(Image).filter(
+        Image.id == image_id,
+        Image.dataset_id == dataset_id
+    ).first()
+    
+    if not image:
+        raise HTTPException(status_code=404, detail="Image not found")
+    
+    try:
+        # Download image from S3
+        image_data = file_storage.download_from_s3(image.file_path)
+        
+        if not image_data:
+            raise HTTPException(
+                status_code=404,
+                detail=f"Image file not found in storage: {image.filename}"
+            )
+        
+        # Determine content type
+        content_type = "image/jpeg"
+        if image.filename.lower().endswith('.png'):
+            content_type = "image/png"
+        elif image.filename.lower().endswith('.gif'):
+            content_type = "image/gif"
+        elif image.filename.lower().endswith('.bmp'):
+            content_type = "image/bmp"
+        
+        # Return as streaming response
+        return StreamingResponse(
+            io.BytesIO(image_data),
+            media_type=content_type,
+            headers={
+                "Content-Disposition": f'attachment; filename="{image.filename}"'
+            }
+        )
+    
+    except Exception as e:
+        print(f"[ERROR] Failed to download image {image_id}: {str(e)}")
+        raise HTTPException(
+            status_code=500,
+            detail=f"Failed to download image: {str(e)}"
+        )
+
+
+@router.get("/{dataset_id}/download")
+async def download_dataset(
+    dataset_id: int,
+    include_annotations: bool = True,
+    db: Session = Depends(get_db),
+    current_user: dict = Depends(get_current_user_dev)
+):
+    """
+    Download entire dataset as a ZIP file
+    
+    Args:
+        dataset_id: Dataset ID
+        include_annotations: Whether to include annotation files (default: True)
+        
+    Returns:
+        ZIP file containing all images and optionally annotations
+    """
+    # Verify dataset exists
+    dataset = db.query(Dataset).filter(Dataset.id == dataset_id).first()
+    if not dataset:
+        raise HTTPException(status_code=404, detail="Dataset not found")
+    
+    # Get all images for this dataset
+    images = db.query(Image).filter(Image.dataset_id == dataset_id).all()
+    
+    if not images:
+        raise HTTPException(
+            status_code=404,
+            detail="No images found in this dataset"
+        )
+    
+    try:
+        # Create in-memory ZIP file
+        zip_buffer = io.BytesIO()
+        
+        with zipfile.ZipFile(zip_buffer, 'w', zipfile.ZIP_DEFLATED) as zip_file:
+            # Add dataset info
+            dataset_info = f"""Dataset: {dataset.name}
+Description: {dataset.description or 'N/A'}
+Total Images: {len(images)}
+Total Classes: {dataset.total_classes}
+Class Names: {', '.join(dataset.class_names) if dataset.class_names else 'N/A'}
+Created: {dataset.created_at}
+"""
+            zip_file.writestr("dataset_info.txt", dataset_info)
+            
+            # Add images
+            failed_images = []
+            for idx, image in enumerate(images):
+                try:
+                    # Download image from S3
+                    image_data = file_storage.download_from_s3(image.file_path)
+                    
+                    if image_data:
+                        # Add image to ZIP
+                        zip_file.writestr(f"images/{image.filename}", image_data)
+                        
+                        # Add annotation if available and requested
+                        if include_annotations and image.is_annotated:
+                            annotations = db.query(Annotation).filter(
+                                Annotation.image_id == image.id
+                            ).all()
+                            
+                            if annotations:
+                                # Create YOLO format annotation
+                                annotation_lines = []
+                                for ann in annotations:
+                                    # YOLO format: class_id x_center y_center width height
+                                    annotation_lines.append(
+                                        f"{ann.class_id} {ann.x_center} {ann.y_center} "
+                                        f"{ann.width} {ann.height}"
+                                    )
+                                
+                                # Save annotation file (same name as image but .txt)
+                                annotation_filename = image.filename.rsplit('.', 1)[0] + '.txt'
+                                zip_file.writestr(
+                                    f"annotations/{annotation_filename}",
+                                    '\n'.join(annotation_lines)
+                                )
+                    else:
+                        failed_images.append(image.filename)
+                        print(f"[WARN] Failed to download image: {image.filename}")
+                
+                except Exception as e:
+                    failed_images.append(image.filename)
+                    print(f"[ERROR] Error processing image {image.filename}: {str(e)}")
+                
+                # Progress logging
+                if (idx + 1) % 100 == 0:
+                    print(f"[DOWNLOAD] Processed {idx + 1}/{len(images)} images")
+            
+            # Add failed images list if any
+            if failed_images:
+                zip_file.writestr(
+                    "failed_images.txt",
+                    "The following images could not be downloaded:\n" + 
+                    '\n'.join(failed_images)
+                )
+        
+        # Prepare response
+        zip_buffer.seek(0)
+        timestamp = datetime.now().strftime("%Y%m%d_%H%M%S")
+        filename = f"{dataset.name}_{timestamp}.zip"
+        
+        print(f"[DOWNLOAD] Dataset {dataset_id} download complete: "
+              f"{len(images) - len(failed_images)}/{len(images)} images")
+        
+        return StreamingResponse(
+            zip_buffer,
+            media_type="application/zip",
+            headers={
+                "Content-Disposition": f'attachment; filename="{filename}"'
+            }
+        )
+    
+    except Exception as e:
+        print(f"[ERROR] Failed to create dataset download: {str(e)}")
+        raise HTTPException(
+            status_code=500,
+            detail=f"Failed to create dataset download: {str(e)}"
         )

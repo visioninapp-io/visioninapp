@@ -38,6 +38,17 @@ class Settings(BaseSettings):
     REDIS_PASSWORD: str = ""
     CACHE_TTL: int = 300  # 5 minutes
     ENABLE_CACHE: bool = False  # Set to True when Redis is available
+    
+    # AWS S3 Configuration
+    AWS_ACCESS_KEY_ID: str = ""
+    AWS_SECRET_ACCESS_KEY: str = ""
+    AWS_REGION: str = "ap-northeast-2"
+    AWS_BUCKET_NAME: str = ""
+    USE_S3_STORAGE: bool = False  # Set to True to use S3 instead of local storage
+    
+    # Image Cache Settings
+    IMAGE_CACHE_TTL: int = 86400  # 24 hours in seconds
+    IMAGE_CACHE_PAGE_SIZE: int = 50  # Number of images per page
 
     class Config:
         env_file = ".env"

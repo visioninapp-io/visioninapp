@@ -21,7 +21,7 @@ _LLM_TEMPLATE = """
 - 사용자가 지정한 값(user_overrides)은 절대 덮어쓰지 말고 그대로 둔다.
 - intent, model_variant, device, precision 등을 참고해 나머지 값을 완성하라.
 - 출력은 JSON 한 줄, 설명이나 추가 텍스트 없이.
-- 
+- batch는 32이하로 설정하라
 
 예시 출력:
 {{
@@ -100,6 +100,7 @@ def param_synthesizer(state: TrainState) -> TrainState:
     user_overrides = dict(state.train_overrides or {})
 
     final = {**train_defaults, **generated, **user_overrides}
+    final["model_name"] = f"{state.model_variant}"
 
     # ----- 5️⃣ 결과 저장 -----
     ctx["param_synthesizer"] = {

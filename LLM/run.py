@@ -23,6 +23,9 @@ from graph.training.nodes.evaluate_trial import evaluate_trial
 from graph.training.nodes.regression_gate import regression_gate
 from graph.training.nodes.human_review import human_review
 from graph.training.nodes.registry_publish import registry_publish
+from graph.training.nodes.onnx_converter import onnx_converter
+from graph.training.nodes.tensor_converter import tensor_converter
+from graph.training.nodes.evaluate_convert_model import evaluate_convert_model
 
 from dotenv import load_dotenv
 load_dotenv()
@@ -56,8 +59,6 @@ def route_mode(state: TrainState) -> Literal["path_fresh", "path_finetune", "pat
     print('[route_mode] move -> path_fresh')
     return "path_fresh"
 
-def _truthy(x: Any) -> bool:
-    return bool(x) and x is not False and x is not None
 
 def route_hpo_or_single(state: TrainState) -> Literal["singel_trial", "use_hpo"]:
     """
@@ -76,6 +77,9 @@ def route_hpo_or_single(state: TrainState) -> Literal["singel_trial", "use_hpo"]
         print("[route_hpo_or_single] forced → single_trial")
         return "single_trial"
     
+    def _truthy(x: Any) -> bool:
+        return bool(x) and x is not False and x is not None
+        
     # 1) 설정 기반 판단
     hpo: Dict[str, Any] = (state.hpo or {})
     enabled     = _truthy(hpo.get("enabled"))
@@ -111,6 +115,21 @@ def route_interrupt_action(state: TrainState) -> Literal["widen_search", "minor_
     print(f"[route_interrupt_action] 알 수 없는 action='{action}' → abort로 폴백")
     return "abort"
 
+def route_onnx_or_tensor(state: TrainState) -> Literal["pure", "onnx", "tensor"]:
+    ctx = state.context or {}
+    qa = ctx.get("query_analyzer", {})
+    parsed = qa.get("parsed", {})
+
+    onnx = bool(parsed.get("onnx", False))
+    tensor = bool(parsed.get("tensorrt", False))
+
+    if tensor==True:
+        return "tensor"
+    if onnx==True:
+        return "onnx"
+    
+    return "pure"
+
 def main(user_query: str, dataset_path: str):
     state = TrainState()
     if CONFIG_PATH and Path(CONFIG_PATH).exists():
@@ -125,7 +144,7 @@ def main(user_query: str, dataset_path: str):
     graph.add_node("query_analyzer", query_analyzer)
     graph.add_node("param_synthesizer", param_synthesizer)
     graph.add_node("selfrag_scorer", selfrag_scorer)
-    graph.add_node("selfrag_decider", selfrag_decider)
+    # graph.add_node("selfrag_decider", selfrag_decider)
     graph.add_node("load_dataset", load_dataset)
     graph.add_node("decide_mode", decide_mode)
     graph.add_node("load_model", load_model)
@@ -138,13 +157,16 @@ def main(user_query: str, dataset_path: str):
     graph.add_node("regression_gate", regression_gate)
     graph.add_node("human_review", human_review)
     graph.add_node("registry_publish", registry_publish)
+    graph.add_node("onnx_converter", onnx_converter)
+    graph.add_node("tensor_converter", tensor_converter)
+    graph.add_node("evaluate_convert_model", evaluate_convert_model)
 
     graph.add_edge(START, "init_context")
 
     graph.add_edge("init_context", "query_analyzer")
     graph.add_edge("query_analyzer", "param_synthesizer")
     graph.add_edge("param_synthesizer", "selfrag_scorer")
-    graph.add_edge("selfrag_scorer", "selfrag_decider")
+    graph.add_edge("selfrag_scorer", "load_dataset")
     # graph.add_conditional_edges(
     #     "selfrag_decider",
     #     route_by_selfrag,
@@ -154,7 +176,7 @@ def main(user_query: str, dataset_path: str):
     #         "fallback": END,
     #     }
     # )
-    graph.add_edge("selfrag_decider", "load_dataset")
+    # graph.add_edge("selfrag_decider", "load_dataset")
     graph.add_edge("load_dataset", "decide_mode")
     graph.add_conditional_edges(
         "decide_mode",
@@ -201,7 +223,19 @@ def main(user_query: str, dataset_path: str):
         }
     )
 
-    graph.add_edge("registry_publish", END)
+    graph.add_conditional_edges(
+        "registry_publish",
+        route_onnx_or_tensor,
+        {
+            "onnx": "onnx_converter",
+            "tensor": "tensor_converter",
+            "pure": END
+        }
+    )
+
+    graph.add_edge("onnx_converter", "evaluate_convert_model")
+    graph.add_edge("tensor_converter", "evaluate_convert_model")
+    graph.add_edge("evaluate_convert_model", END)
 
     train_graph = graph.compile()
 
@@ -214,6 +248,6 @@ def main(user_query: str, dataset_path: str):
 
 if __name__ == "__main__":
     user_query = input("어떤 방식으로 모델을 학습할까요?\n")
-    # dataset_path = "dataset@1.0.0"
-    dataset_path = "rock-paper-scissors"
+    dataset_path = "dataset@1.0.0"
+    # dataset_path = "rock-paper-scissors"
     main(user_query, dataset_path)

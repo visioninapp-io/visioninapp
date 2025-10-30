@@ -58,6 +58,7 @@ def _parse_with_llm(user_query: str) -> Dict[str, Any]:
             - epochs, batch, imgsz에 대한 사용자 언급이 있으면 해당 값을 정수로 사용
             - 긴급/빨리/납기 촉박 등의 표현이 있으면 urgent=true, 없으면 urgent=false.
             - 수치가 있으면 정수로, 없으면 null.
+            - onnx 혹은 tensorRT로 변환을 원하는 경우 해당 값을 true, 해당 내용이 없거나 원하지 않을 경우 false로 설정해라
             - 출력 키만 사용하라.
 
             출력 스키마:
@@ -71,7 +72,10 @@ def _parse_with_llm(user_query: str) -> Dict[str, Any]:
               "use_hpo":null,
               "max_trials":null,
               "urgent":null,
-              "notes":"짧은 요약"}}
+              "onnx":null,
+              "tensorrt":null,
+              "notes":"짧은 요약"
+            }}
 
             사용자 요청: "{query}"
             """

@@ -13,7 +13,7 @@ meta:
 # ⚙️ 1️⃣ 기본 학습 설정
 # ----------------------------------------------
 train:
-  model_name: yolov12n.pt              # base model (fresh 학습 시)
+  model_name: yolo12n.pt              # base model (fresh 학습 시)
   epochs: 100
   batch: 16
   imgsz: 640

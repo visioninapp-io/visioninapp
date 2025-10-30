@@ -1,1 +1,24 @@
+# LLM
+# ── Python bytecode / caches ─────────────────────────
+__pycache__/
+*.py[cod]
+*.pyo
+*.pyd
+
+# ── Environments / secrets ───────────────────────────
+.venv/
+.pytest_cache/
+.env
+
+# ── Model / data artifacts ───────────────────────────
+models/*/
+!models/            # 폴더 자체는 남기고 하위만 무시
+
+data/datasets/*/
+data/models/*/
+data/raw/*/
+data/runs/*/
+
+runs/
+
 *.pt

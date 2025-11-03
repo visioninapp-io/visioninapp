@@ -323,10 +323,16 @@ class TrainingEngine:
             self._update_job_status(TrainingStatus.FAILED, training_logs=error_msg)
 
     def _save_model(self, config: Dict):
-        """Save trained model to disk"""
+        """Save trained model to S3 and create ModelArtifact record"""
         from app.utils.file_storage import file_storage
-        from app.models.model import Model as ModelRecord
+        from app.models.model import Model as ModelRecord, ModelStatus
+        from app.models.model_artifact import ModelArtifact
         from app.models.training import TrainingJob
+        from app.core.config import settings
+        import tempfile
+        import uuid
+        import boto3
+        from pathlib import Path
 
         db = self._get_db()
         try:
@@ -335,25 +341,78 @@ class TrainingEngine:
             if not job or not job.model_id:
                 return
 
-            # Save model state
-            model_dir = file_storage.get_model_directory(job.model_id)
-            model_path = model_dir / "model.pth"
-
-            torch.save({
-                'model_state_dict': self.model.state_dict(),
-                'optimizer_state_dict': self.optimizer.state_dict(),
-                'config': config
-            }, model_path)
-
-            # Update model record
+            # Get model record
             model = db.query(ModelRecord).filter(ModelRecord.id == job.model_id).first()
-            if model:
-                from app.models.model import ModelStatus
-                model.file_path = str(model_path)
-                model.file_size = model_path.stat().st_size
-                model.status = ModelStatus.COMPLETED
-                db.commit()
+            if not model:
+                return
 
+            # Save model state to temporary file
+            with tempfile.NamedTemporaryFile(delete=False, suffix='.pt') as tmp_file:
+                torch.save({
+                    'model_state_dict': self.model.state_dict(),
+                    'optimizer_state_dict': self.optimizer.state_dict(),
+                    'config': config
+                }, tmp_file.name)
+                
+                tmp_path = Path(tmp_file.name)
+                file_size = tmp_path.stat().st_size
+                
+                # Upload to S3
+                s3_client = boto3.client(
+                    's3',
+                    aws_access_key_id=settings.AWS_ACCESS_KEY_ID,
+                    aws_secret_access_key=settings.AWS_SECRET_ACCESS_KEY,
+                    region_name=settings.AWS_REGION
+                )
+                
+                # Generate S3 key
+                unique_filename = f"{uuid.uuid4()}.pt"
+                s3_key = f"models/model_{job.model_id}/artifacts/{unique_filename}"
+                
+                # Upload file
+                with open(tmp_path, 'rb') as f:
+                    s3_client.put_object(
+                        Bucket=settings.AWS_BUCKET_NAME,
+                        Key=s3_key,
+                        Body=f,
+                        ContentType='application/octet-stream'
+                    )
+                
+                print(f"[Training] Model uploaded to S3: {s3_key}")
+                
+                # Clean up temp file
+                tmp_path.unlink()
+            
+            # Mark existing primary artifacts as non-primary
+            db.query(ModelArtifact).filter(
+                ModelArtifact.model_id == job.model_id,
+                ModelArtifact.is_primary == True
+            ).update({"is_primary": False})
+            
+            # Create ModelArtifact record
+            artifact = ModelArtifact(
+                model_id=job.model_id,
+                kind='pt',
+                version='1.0',
+                s3_key=s3_key,
+                file_size=file_size,
+                is_primary=True,
+                created_by=model.created_by
+            )
+            db.add(artifact)
+            
+            # Update model record
+            model.file_path = s3_key
+            model.file_size = file_size
+            model.status = ModelStatus.COMPLETED
+            
+            db.commit()
+            print(f"[Training] Model artifact created: {artifact.id}")
+
+        except Exception as e:
+            print(f"[Training] Failed to save model to S3: {str(e)}")
+            db.rollback()
+            raise
         finally:
             db.close()
 

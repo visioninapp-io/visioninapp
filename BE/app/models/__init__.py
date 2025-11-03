@@ -2,7 +2,9 @@ from app.models.dataset import (
     Dataset, Image, Annotation, DatasetVersion,
     UploadBatch, ExportJob, DatasetStatus, DatasetType
 )
+from app.models.dataset_asset import DatasetAsset
 from app.models.model import Model, ModelConversion
+from app.models.model_artifact import ModelArtifact
 from app.models.training import TrainingJob, TrainingMetric
 from app.models.evaluation import Evaluation
 from app.models.deployment import Deployment, InferenceLog
@@ -12,7 +14,8 @@ from app.models.user import User
 __all__ = [
     "Dataset", "Image", "Annotation", "DatasetVersion",
     "UploadBatch", "ExportJob", "DatasetStatus", "DatasetType",
-    "Model", "ModelConversion",
+    "DatasetAsset",
+    "Model", "ModelConversion", "ModelArtifact",
     "TrainingJob", "TrainingMetric",
     "Evaluation",
     "Deployment", "InferenceLog",

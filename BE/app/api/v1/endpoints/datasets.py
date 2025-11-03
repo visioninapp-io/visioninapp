@@ -1,7 +1,8 @@
-from fastapi import APIRouter, Depends, HTTPException, UploadFile, File, status, Form
-from fastapi.responses import StreamingResponse, Response
+from fastapi import APIRouter, Depends, HTTPException, UploadFile, File, status, Form, Body
+from fastapi.responses import StreamingResponse, Response, RedirectResponse
 from sqlalchemy.orm import Session
 from typing import List, Optional
+from pydantic import BaseModel
 import io
 import zipfile
 import base64
@@ -10,15 +11,59 @@ from app.core.database import get_db
 from app.core.auth import get_current_user, get_current_user_dev
 from app.core.cache import cache_manager, invalidate_cache
 from app.models.dataset import Dataset, Image, Annotation, DatasetStatus
+from app.models.dataset_asset import DatasetAsset
 from app.schemas.dataset import (
     DatasetCreate, DatasetUpdate, DatasetResponse, DatasetStats,
     ImageResponse, AnnotationCreate, AnnotationResponse, AutoAnnotationRequest
 )
+from app.schemas.dataset_asset import (
+    DatasetAssetResponse, UploadCompleteItem as AssetUploadCompleteItem,
+    UploadCompleteBatchRequest as AssetUploadCompleteBatchRequest
+)
 from app.utils.file_storage import file_storage
 from app.services.dataset_cache_service import dataset_cache_service
+from app.services.presigned_url_service import presigned_url_service
+from app.core.config import settings
+import time
 
 router = APIRouter()
 
+
+# ============================================================
+# Pydantic Models for Presigned URL endpoints
+# ============================================================
+
+class UploadCompleteItemLegacy(BaseModel):
+    """Legacy format for backward compatibility"""
+    s3_key: str
+    original_filename: str
+    file_size: int
+    width: Optional[int] = None
+    height: Optional[int] = None
+
+class UploadCompleteBatchRequestLegacy(BaseModel):
+    """Legacy format for backward compatibility"""
+    uploads: List[UploadCompleteItemLegacy]
+
+class BatchUploadUrlRequest(BaseModel):
+    filenames: List[str]
+    content_type: Optional[str] = None
+
+class UploadDatasetRequest(BaseModel):
+    """Dataset upload with Presigned URL generation"""
+    dataset_id: Optional[int] = None
+    name: Optional[str] = None
+    description: Optional[str] = None
+    filenames: List[str]
+    content_type: Optional[str] = None
+
+class BatchDownloadUrlRequest(BaseModel):
+    image_ids: List[int]
+
+
+# ============================================================
+# Dataset Endpoints
+# ============================================================
 
 @router.get("/stats", response_model=DatasetStats)
 async def get_dataset_stats(
@@ -266,100 +311,100 @@ async def get_dataset_images(
         )
 
 
-@router.post("/upload", status_code=status.HTTP_201_CREATED)
-async def upload_dataset(
-    files: List[UploadFile] = File(...),
-    name: Optional[str] = Form(None),
-    description: Optional[str] = Form(None),
-    dataset_id: Optional[int] = Form(None),
+@router.post("/presigned-upload-urls", status_code=status.HTTP_201_CREATED)
+async def generate_presigned_upload_urls(
+    request: UploadDatasetRequest = Body(...),
     db: Session = Depends(get_db),
     current_user: dict = Depends(get_current_user_dev)
 ):
-    """Upload images to create a new dataset or add to existing dataset"""
-
-    # Validate files list
-    if not files or len(files) == 0:
-        raise HTTPException(status_code=400, detail="No files provided")
-
+    """
+    데이터셋 생성 및 업로드용 Presigned URL 발급
+    
+    - dataset_id가 없으면: 새 데이터셋 생성 후 URL 발급
+    - dataset_id가 있으면: 기존 데이터셋에 URL 발급
+    - 클라이언트가 각 URL로 직접 S3에 병렬 업로드
+    - URL 만료 시간: 30분
+    
+    사용 후:
+    1. 받은 Presigned URL로 S3에 직접 PUT 요청 (파일 업로드)
+    2. POST /api/v1/datasets/{dataset_id}/upload-complete-batch 호출 (업로드 완료 알림)
+    """
+    # Validate filenames
+    if not request.filenames or len(request.filenames) == 0:
+        raise HTTPException(status_code=400, detail="At least one filename is required")
+    
+    dataset = None
+    
     # If dataset_id provided, use existing dataset
-    if dataset_id:
-        dataset = db.query(Dataset).filter(Dataset.id == dataset_id).first()
+    if request.dataset_id:
+        dataset = db.query(Dataset).filter(
+            Dataset.id == request.dataset_id,
+            Dataset.created_by == current_user["uid"]
+        ).first()
+        
         if not dataset:
             raise HTTPException(status_code=404, detail="Dataset not found")
     else:
         # Create new dataset
-        if not name:
-            raise HTTPException(status_code=400, detail="Dataset name is required for new dataset")
-
-        existing = db.query(Dataset).filter(Dataset.name == name).first()
+        if not request.name:
+            raise HTTPException(status_code=400, detail="Dataset name is required when creating new dataset")
+        
+        # Check if dataset name already exists for this user
+        existing = db.query(Dataset).filter(
+            Dataset.name == request.name,
+            Dataset.created_by == current_user["uid"]
+        ).first()
+        
         if existing:
             raise HTTPException(status_code=400, detail="Dataset with this name already exists")
-
+        
         dataset = Dataset(
-            name=name,
-            description=description or "",
+            name=request.name,
+            description=request.description or "",
+            dataset_type="object_detection",  # default
             total_images=0,
+            annotated_images=0,
             total_classes=0,
             status=DatasetStatus.UPLOADING,
-            created_by=current_user["uid"]
+            created_by=current_user["uid"],
+            auto_annotation_enabled=False,
+            is_public=False
         )
         db.add(dataset)
         db.commit()
         db.refresh(dataset)
-
-    # Upload files to S3 and create Image records
+    
     try:
-        dataset.status = DatasetStatus.UPLOADING
-        db.commit()
-
-        successful_uploads, failed_uploads = await file_storage.save_images_batch(files, dataset.id)
-
-        # Create Image records for successful uploads
-        for upload in successful_uploads:
-            metadata = upload["metadata"]
-            db_image = Image(
-                dataset_id=dataset.id,
-                filename=metadata["stored_filename"],
-                file_path=metadata["relative_path"],
-                file_size=metadata["file_size"],
-                width=metadata.get("width"),
-                height=metadata.get("height"),
-                is_annotated=0
-            )
-            db.add(db_image)
-
-        # Update dataset counts
-        dataset.total_images += len(successful_uploads)
-        dataset.status = DatasetStatus.READY if len(failed_uploads) == 0 else DatasetStatus.PROCESSING
-        db.commit()
-        db.refresh(dataset)
-
-        # Invalidate datasets cache and dataset images cache
-        invalidate_cache("datasets")
-        print("[CACHE] Invalidated after upload: datasets")
+        # Generate presigned URLs
+        urls = presigned_url_service.generate_batch_upload_urls(
+            dataset_id=dataset.id,
+            filenames=request.filenames,
+            content_type=request.content_type,
+            expiration=1800  # 30분
+        )
         
-        dataset_cache_service.invalidate_dataset_cache(dataset.id)
-        print(f"[CACHE] Invalidated images cache for dataset {dataset.id}")
-
-        response = {
-            "message": f"Successfully uploaded {len(successful_uploads)} images",
-            "dataset_id": dataset.id,
-            "dataset_name": dataset.name,
-            "total_images": dataset.total_images,
-            "successful_uploads": len(successful_uploads),
-            "failed_uploads": len(failed_uploads),
-            "dataset": dataset
+        # Invalidate cache
+        invalidate_cache("datasets")
+        
+        return {
+            "success": True,
+            "message": f"Presigned URLs generated for {len(request.filenames)} files",
+            "dataset": {
+                "id": dataset.id,
+                "name": dataset.name,
+                "description": dataset.description,
+                "status": dataset.status.value if hasattr(dataset.status, 'value') else dataset.status
+            },
+            "urls": urls,
+            "total_count": len(urls)
         }
-
-        if failed_uploads:
-            response["failed_files"] = failed_uploads
-
-        return response
-
     except Exception as e:
-        dataset.status = DatasetStatus.ERROR
-        db.commit()
-        raise HTTPException(status_code=500, detail=f"Upload failed: {str(e)}")
+        if dataset and not request.dataset_id:  # 새로 생성한 데이터셋이면 롤백
+            db.rollback()
+        raise HTTPException(
+            status_code=500,
+            detail=f"Failed to generate upload URLs: {str(e)}"
+        )
 
 
 @router.post("/{dataset_id}/images/upload", status_code=status.HTTP_201_CREATED)
@@ -735,27 +780,32 @@ async def download_dataset(
     current_user: dict = Depends(get_current_user_dev)
 ):
     """
-    Download entire dataset as a ZIP file
+    Download entire dataset as a ZIP file (images + videos)
     
     Args:
         dataset_id: Dataset ID
         include_annotations: Whether to include annotation files (default: True)
         
     Returns:
-        ZIP file containing all images and optionally annotations
+        ZIP file containing all images, videos and optionally annotations
     """
     # Verify dataset exists
     dataset = db.query(Dataset).filter(Dataset.id == dataset_id).first()
     if not dataset:
         raise HTTPException(status_code=404, detail="Dataset not found")
     
-    # Get all images for this dataset
+    # Get all assets (images + videos) from DatasetAsset table
+    assets = db.query(DatasetAsset).filter(
+        DatasetAsset.dataset_id == dataset_id
+    ).all()
+    
+    # Also get images from Image table for backward compatibility
     images = db.query(Image).filter(Image.dataset_id == dataset_id).all()
     
-    if not images:
+    if not assets and not images:
         raise HTTPException(
             status_code=404,
-            detail="No images found in this dataset"
+            detail="No files found in this dataset"
         )
     
     try:
@@ -764,18 +814,81 @@ async def download_dataset(
         
         with zipfile.ZipFile(zip_buffer, 'w', zipfile.ZIP_DEFLATED) as zip_file:
             # Add dataset info
+            total_images = len([a for a in assets if a.kind == 'image']) + len(images)
+            total_videos = len([a for a in assets if a.kind == 'video'])
+            
             dataset_info = f"""Dataset: {dataset.name}
 Description: {dataset.description or 'N/A'}
-Total Images: {len(images)}
+Total Images: {total_images}
+Total Videos: {total_videos}
 Total Classes: {dataset.total_classes}
 Class Names: {', '.join(dataset.class_names) if dataset.class_names else 'N/A'}
 Created: {dataset.created_at}
 """
             zip_file.writestr("dataset_info.txt", dataset_info)
             
-            # Add images
-            failed_images = []
+            # Add assets (images + videos from DatasetAsset)
+            failed_files = []
+            processed_count = 0
+            
+            for idx, asset in enumerate(assets):
+                try:
+                    # Download file from S3
+                    file_data = file_storage.download_from_s3(asset.s3_key)
+                    
+                    if file_data:
+                        # Add file to ZIP in appropriate folder
+                        folder = "images" if asset.kind == 'image' else "videos"
+                        zip_file.writestr(f"{folder}/{asset.original_filename}", file_data)
+                        processed_count += 1
+                        
+                        # Add annotation if available and requested (images only)
+                        if include_annotations and asset.kind == 'image':
+                            # Try to find corresponding Image record for annotations
+                            image_record = None
+                            for img in images:
+                                if img.file_path == asset.s3_key or img.filename == asset.original_filename:
+                                    image_record = img
+                                    break
+                            
+                            if image_record and image_record.is_annotated:
+                                annotations = db.query(Annotation).filter(
+                                    Annotation.image_id == image_record.id
+                                ).all()
+                                
+                                if annotations:
+                                    # Create YOLO format annotation
+                                    annotation_lines = []
+                                    for ann in annotations:
+                                        annotation_lines.append(
+                                            f"{ann.class_id} {ann.x_center} {ann.y_center} "
+                                            f"{ann.width} {ann.height}"
+                                        )
+                                    
+                                    annotation_filename = asset.original_filename.rsplit('.', 1)[0] + '.txt'
+                                    zip_file.writestr(
+                                        f"annotations/{annotation_filename}",
+                                        '\n'.join(annotation_lines)
+                                    )
+                    else:
+                        failed_files.append(asset.original_filename)
+                        print(f"[WARN] Failed to download asset: {asset.original_filename}")
+                
+                except Exception as e:
+                    failed_files.append(asset.original_filename)
+                    print(f"[ERROR] Error processing asset {asset.original_filename}: {str(e)}")
+                
+                # Progress logging
+                if (idx + 1) % 100 == 0:
+                    print(f"[DOWNLOAD] Processed {idx + 1}/{len(assets)} assets")
+            
+            # Also add images from Image table (for backward compatibility with old data)
             for idx, image in enumerate(images):
+                # Skip if already added from DatasetAsset
+                asset_exists = any(asset.s3_key == image.file_path for asset in assets)
+                if asset_exists:
+                    continue
+                
                 try:
                     # Download image from S3
                     image_data = file_storage.download_from_s3(image.file_path)
@@ -783,6 +896,7 @@ Created: {dataset.created_at}
                     if image_data:
                         # Add image to ZIP
                         zip_file.writestr(f"images/{image.filename}", image_data)
+                        processed_count += 1
                         
                         # Add annotation if available and requested
                         if include_annotations and image.is_annotated:
@@ -791,39 +905,32 @@ Created: {dataset.created_at}
                             ).all()
                             
                             if annotations:
-                                # Create YOLO format annotation
                                 annotation_lines = []
                                 for ann in annotations:
-                                    # YOLO format: class_id x_center y_center width height
                                     annotation_lines.append(
                                         f"{ann.class_id} {ann.x_center} {ann.y_center} "
                                         f"{ann.width} {ann.height}"
                                     )
                                 
-                                # Save annotation file (same name as image but .txt)
                                 annotation_filename = image.filename.rsplit('.', 1)[0] + '.txt'
                                 zip_file.writestr(
                                     f"annotations/{annotation_filename}",
                                     '\n'.join(annotation_lines)
                                 )
                     else:
-                        failed_images.append(image.filename)
+                        failed_files.append(image.filename)
                         print(f"[WARN] Failed to download image: {image.filename}")
                 
                 except Exception as e:
-                    failed_images.append(image.filename)
+                    failed_files.append(image.filename)
                     print(f"[ERROR] Error processing image {image.filename}: {str(e)}")
-                
-                # Progress logging
-                if (idx + 1) % 100 == 0:
-                    print(f"[DOWNLOAD] Processed {idx + 1}/{len(images)} images")
             
-            # Add failed images list if any
-            if failed_images:
+            # Add failed files list if any
+            if failed_files:
                 zip_file.writestr(
-                    "failed_images.txt",
-                    "The following images could not be downloaded:\n" + 
-                    '\n'.join(failed_images)
+                    "failed_files.txt",
+                    "The following files could not be downloaded:\n" + 
+                    '\n'.join(failed_files)
                 )
         
         # Prepare response
@@ -832,7 +939,7 @@ Created: {dataset.created_at}
         filename = f"{dataset.name}_{timestamp}.zip"
         
         print(f"[DOWNLOAD] Dataset {dataset_id} download complete: "
-              f"{len(images) - len(failed_images)}/{len(images)} images")
+              f"{processed_count} files processed, {len(failed_files)} failed")
         
         return StreamingResponse(
             zip_buffer,
@@ -848,3 +955,303 @@ Created: {dataset.created_at}
             status_code=500,
             detail=f"Failed to create dataset download: {str(e)}"
         )
+
+
+# ============================================================
+# Presigned URL 기반 업로드/다운로드 엔드포인트
+# ============================================================
+
+@router.post("/{dataset_id}/upload-complete-batch")
+async def confirm_upload_complete_batch(
+    dataset_id: int,
+    request: AssetUploadCompleteBatchRequest,
+    db: Session = Depends(get_db),
+    current_user: dict = Depends(get_current_user_dev)
+):
+    """
+    S3 업로드 완료 알림 - DatasetAsset 테이블에 메타데이터 저장
+    
+    items: [
+        {
+            "s3_key": "datasets/dataset_1/images/xxx.jpg",
+            "original_filename": "photo.jpg",
+            "file_size": 123456,
+            "width": 1920,
+            "height": 1080,
+            "duration_ms": null  # for videos
+        },
+        ...
+    ]
+    
+    - 이미지와 동영상을 자동으로 구분하여 DatasetAsset에 저장
+    - kind는 s3_key의 경로(images/ or videos/)로 자동 판별
+    """
+    # 데이터셋 존재 및 권한 확인
+    dataset = db.query(Dataset).filter(
+        Dataset.id == dataset_id,
+        Dataset.created_by == current_user["uid"]
+    ).first()
+    
+    if not dataset:
+        raise HTTPException(status_code=404, detail="Dataset not found")
+    
+    successful = []
+    failed = []
+    
+    try:
+        for item in request.items:
+            try:
+                s3_key = item.s3_key
+                
+                # S3 파일 존재 확인
+                if not presigned_url_service.check_object_exists(s3_key):
+                    failed.append({
+                        "filename": item.original_filename,
+                        "error": "File not found in S3"
+                    })
+                    continue
+                
+                # kind 자동 판별 (s3_key 경로에서 추출)
+                if '/videos/' in s3_key:
+                    kind = 'video'
+                elif '/images/' in s3_key:
+                    kind = 'image'
+                else:
+                    kind = 'image'  # default
+                
+                # DatasetAsset에 메타데이터 저장
+                asset = DatasetAsset(
+                    dataset_id=dataset_id,
+                    kind=kind,
+                    original_filename=item.original_filename,
+                    s3_key=s3_key,
+                    file_size=item.file_size,
+                    width=item.width,
+                    height=item.height,
+                    duration_ms=item.duration_ms,
+                    created_by=current_user["uid"]
+                )
+                
+                db.add(asset)
+                
+                # 하위 호환성: Image 테이블에도 저장 (이미지만)
+                if kind == 'image':
+                    image = Image(
+                        dataset_id=dataset_id,
+                        filename=item.original_filename,
+                        file_path=s3_key,
+                        file_size=item.file_size,
+                        width=item.width,
+                        height=item.height,
+                        is_annotated=False
+                    )
+                    db.add(image)
+                
+                successful.append({
+                    "filename": item.original_filename,
+                    "s3_key": s3_key,
+                    "kind": kind
+                })
+                
+            except Exception as e:
+                failed.append({
+                    "filename": getattr(item, "original_filename", "unknown"),
+                    "error": str(e)
+                })
+        
+        # 데이터셋 통계 업데이트
+        image_count = db.query(DatasetAsset).filter(
+            DatasetAsset.dataset_id == dataset_id,
+            DatasetAsset.kind == 'image'
+        ).count()
+        
+        dataset.total_images = image_count
+        
+        db.commit()
+        
+        # 캐시 무효화
+        invalidate_cache(f"dataset_{dataset_id}")
+        dataset_cache_service.invalidate_dataset_cache(dataset_id)
+        
+        return {
+            "success": True,
+            "successful_count": len(successful),
+            "failed_count": len(failed),
+            "successful": successful,
+            "failed": failed
+        }
+        
+    except Exception as e:
+        db.rollback()
+        raise HTTPException(
+            status_code=500,
+            detail=f"Failed to process batch upload: {str(e)}"
+        )
+
+
+@router.get("/{dataset_id}/assets", response_model=List[DatasetAssetResponse])
+async def get_dataset_assets(
+    dataset_id: int,
+    kind: Optional[str] = None,  # "image" | "video" | None (all)
+    page: int = 1,
+    limit: int = 100,
+    db: Session = Depends(get_db),
+    current_user: dict = Depends(get_current_user_dev)
+):
+    """
+    데이터셋의 assets(이미지/동영상) 목록 조회
+    
+    - kind: "image", "video", 또는 None(전체)
+    - 페이징 지원
+    """
+    # 데이터셋 권한 확인
+    dataset = db.query(Dataset).filter(
+        Dataset.id == dataset_id,
+        Dataset.created_by == current_user["uid"]
+    ).first()
+    
+    if not dataset:
+        raise HTTPException(status_code=404, detail="Dataset not found")
+    
+    # 쿼리 구성
+    query = db.query(DatasetAsset).filter(DatasetAsset.dataset_id == dataset_id)
+    
+    if kind:
+        query = query.filter(DatasetAsset.kind == kind)
+    
+    # 페이징
+    offset = (page - 1) * limit
+    assets = query.order_by(DatasetAsset.created_at.desc()).offset(offset).limit(limit).all()
+    
+    return assets
+
+
+@router.get("/assets/{asset_id}/presigned-download")
+async def get_asset_download_url(
+    asset_id: int,
+    db: Session = Depends(get_db),
+    current_user: dict = Depends(get_current_user_dev)
+):
+    """
+    DatasetAsset 단건 다운로드용 Presigned URL 발급
+    
+    - 이미지/동영상 모두 지원
+    - URL 만료 시간: 1시간
+    """
+    # Asset 조회
+    asset = db.query(DatasetAsset).filter(DatasetAsset.id == asset_id).first()
+    
+    if not asset:
+        raise HTTPException(status_code=404, detail="Asset not found")
+    
+    # 데이터셋 권한 확인
+    dataset = db.query(Dataset).filter(
+        Dataset.id == asset.dataset_id,
+        Dataset.created_by == current_user["uid"]
+    ).first()
+    
+    if not dataset:
+        raise HTTPException(status_code=403, detail="Access denied")
+    
+    try:
+        # Presigned GET URL 생성
+        url_data = presigned_url_service.generate_download_url(
+            s3_key=asset.s3_key,
+            expiration=3600,
+            filename=asset.original_filename
+        )
+        
+        return {
+            "success": True,
+            "asset_id": asset.id,
+            "original_filename": asset.original_filename,
+            "kind": asset.kind,
+            "download_url": url_data["download_url"],
+            "expires_in": url_data["expires_in"]
+        }
+        
+    except Exception as e:
+        raise HTTPException(
+            status_code=500,
+            detail=f"Failed to generate download URL: {str(e)}"
+        )
+
+
+@router.post("/{dataset_id}/presigned-download-urls-batch")
+async def generate_presigned_download_urls_batch(
+    dataset_id: int,
+    request: BatchDownloadUrlRequest,
+    db: Session = Depends(get_db),
+    current_user: dict = Depends(get_current_user_dev)
+):
+    """
+    이미지 다운로드용 Presigned URL 발급 (단일/배치 모두 처리)
+    
+    - 단일 파일: image_ids에 1개만 전달
+    - 여러 파일: image_ids에 여러 개 전달
+    - 클라이언트가 각 URL로 직접 S3에서 다운로드
+    - URL 만료 시간: 1시간
+    """
+    # 데이터셋 권한 확인
+    dataset = db.query(Dataset).filter(
+        Dataset.id == dataset_id,
+        Dataset.created_by == current_user["uid"]
+    ).first()
+    
+    if not dataset:
+        raise HTTPException(status_code=404, detail="Dataset not found")
+    
+    # 이미지 조회
+    images = db.query(Image).filter(
+        Image.id.in_(request.image_ids),
+        Image.dataset_id == dataset_id
+    ).all()
+    
+    if not images:
+        raise HTTPException(status_code=404, detail="No images found")
+    
+    # 이미지 ID로 매핑
+    image_map = {img.id: img for img in images}
+    
+    # Presigned URL 생성
+    urls = []
+    failed = []
+    
+    for image_id in request.image_ids:
+        image = image_map.get(image_id)
+        
+        if not image:
+            failed.append({
+                "image_id": image_id,
+                "error": "Image not found"
+            })
+            continue
+        
+        try:
+            url_data = presigned_url_service.generate_download_url(
+                s3_key=image.file_path,
+                filename=image.filename,
+                expiration=3600  # 1시간
+            )
+            
+            urls.append({
+                "image_id": image.id,
+                "download_url": url_data["download_url"],
+                "filename": image.filename,
+                "s3_key": image.file_path,
+                "expires_in": url_data["expires_in"],
+                "generation_time": url_data["generation_time"]
+            })
+        except Exception as e:
+            failed.append({
+                "image_id": image_id,
+                "error": str(e)
+            })
+    
+    return {
+        "success": True,
+        "urls": urls,
+        "total_count": len(urls),
+        "failed_count": len(failed),
+        "failed": failed
+    }

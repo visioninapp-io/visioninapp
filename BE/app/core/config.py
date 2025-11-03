@@ -50,6 +50,9 @@ class Settings(BaseSettings):
     IMAGE_CACHE_TTL: int = 86400  # 24 hours in seconds
     IMAGE_CACHE_PAGE_SIZE: int = 50  # Number of images per page
 
+    AI_SERVICE_URL: str = "http://localhost:8001"   # 추후 gpu 서버로 변경
+
+
     class Config:
         env_file = ".env"
         case_sensitive = True

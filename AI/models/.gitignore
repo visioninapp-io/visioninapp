@@ -1,0 +1,16 @@
+# Ignore all model files (they can be large)
+*.pt
+*.pth
+*.onnx
+*.engine
+*.tflite
+
+# Keep README and gitkeep
+!README.md
+!.gitkeep
+!.gitignore
+
+# Ignore training outputs
+runs/
+weights/
+

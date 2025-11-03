@@ -2,8 +2,11 @@ from fastapi import APIRouter, Depends, HTTPException, status
 from sqlalchemy.orm import Session
 from typing import List
 from datetime import datetime, timedelta
+import logging
 from app.core.database import get_db, SessionLocal
 from app.core.auth import get_current_user, get_current_user_dev
+
+logger = logging.getLogger(__name__)
 from app.models.training import TrainingJob, TrainingMetric, TrainingStatus
 from app.models.model import Model, ModelStatus, ModelFramework
 from app.schemas.training import (
@@ -12,6 +15,7 @@ from app.schemas.training import (
     TrainingControlRequest, HyperparameterTuningRequest
 )
 from app.services.training_service import training_manager
+from app.services.ai_client import get_ai_client
 
 router = APIRouter()
 
@@ -24,13 +28,68 @@ async def get_training_jobs(
     db: Session = Depends(get_db),
     current_user: dict = Depends(get_current_user_dev)
 ):
-    """Get all training jobs for current user"""
+    """Get all training jobs for current user (with AI service sync for running YOLO jobs)"""
     query = db.query(TrainingJob).filter(TrainingJob.created_by == current_user["uid"])
 
     if status_filter:
         query = query.filter(TrainingJob.status == status_filter)
 
     jobs = query.offset(skip).limit(limit).all()
+    
+    # Sync running YOLO jobs from AI service
+    ai_client = get_ai_client()
+    for job in jobs:
+        if job.status in [TrainingStatus.RUNNING, TrainingStatus.PENDING] and 'yolo' in job.architecture.lower():
+            try:
+                ai_status = await ai_client.get_training_status(job.id)
+                ai_job_status = ai_status.get('status', '').lower()
+                
+                if ai_job_status == 'running':
+                    job.status = TrainingStatus.RUNNING
+                    current_epoch = ai_status.get('current_epoch', job.current_epoch)
+                    current_loss = ai_status.get('current_loss', job.current_loss)
+                    
+                    map50_value = ai_status.get('current_map50')
+                    current_accuracy = float(map50_value) * 100 if map50_value is not None else job.current_accuracy
+                    
+                    progress = ai_status.get('progress', job.progress_percentage)
+                    
+                    # Update job
+                    job.current_epoch = current_epoch
+                    job.current_loss = current_loss
+                    job.current_accuracy = current_accuracy
+                    job.progress_percentage = progress
+                    
+                    # Create/Update TrainingMetric record for this epoch
+                    if current_epoch and current_epoch > 0:
+                        existing_metric = db.query(TrainingMetric).filter(
+                            TrainingMetric.training_job_id == job.id,
+                            TrainingMetric.epoch == current_epoch
+                        ).first()
+                        
+                        if existing_metric:
+                            existing_metric.train_loss = current_loss
+                            existing_metric.train_accuracy = current_accuracy
+                        else:
+                            new_metric = TrainingMetric(
+                                training_job_id=job.id,
+                                epoch=current_epoch,
+                                train_loss=current_loss,
+                                train_accuracy=current_accuracy
+                            )
+                            db.add(new_metric)
+                elif ai_job_status == 'completed':
+                    job.status = TrainingStatus.COMPLETED
+                    job.progress_percentage = 100.0
+                    job.completed_at = datetime.utcnow()
+                elif ai_job_status == 'failed':
+                    job.status = TrainingStatus.FAILED
+                    job.training_logs = ai_status.get('error', 'Training failed')
+                    job.completed_at = datetime.utcnow()
+            except Exception as e:
+                logger.warning(f"Failed to sync job {job.id} from AI service: {e}")
+    
+    db.commit()
     return jobs
 
 
@@ -41,9 +100,9 @@ async def create_training_job(
     current_user: dict = Depends(get_current_user_dev)
 ):
     """Start a new training job"""
-    # Check if name already exists
-    existing = db.query(TrainingJob).filter(TrainingJob.name == job.name).first()
-    if existing:
+    # Check if training job name already exists
+    existing_job = db.query(TrainingJob).filter(TrainingJob.name == job.name).first()
+    if existing_job:
         raise HTTPException(status_code=400, detail="Training job with this name already exists")
 
     # Create training job
@@ -62,33 +121,87 @@ async def create_training_job(
     db.commit()
     db.refresh(db_job)
 
-    # Create associated model
-    model = Model(
-        name=f"{job.name}_model",
-        architecture=job.architecture,
-        framework=ModelFramework.PYTORCH,
-        status=ModelStatus.TRAINING,
-        training_config=job.hyperparameters,
-        hyperparameters=job.hyperparameters,
-        created_by=current_user["uid"]
-    )
-    db.add(model)
-    db.commit()
-    db.refresh(model)
+    # Check if model was already created (by frontend) or needs to be created
+    model_name = f"{job.name}_model"
+    existing_model = db.query(Model).filter(Model.name == model_name).first()
+    
+    if existing_model:
+        # Use the existing model (frontend already created it)
+        model = existing_model
+        # Update status to TRAINING
+        model.status = ModelStatus.TRAINING
+        model.training_config = job.hyperparameters
+        model.hyperparameters = job.hyperparameters
+        db.commit()
+        db.refresh(model)
+    else:
+        # Create new model (backend creates it)
+        model = Model(
+            name=model_name,
+            architecture=job.architecture,
+            framework=ModelFramework.PYTORCH,
+            status=ModelStatus.TRAINING,
+            training_config=job.hyperparameters,
+            hyperparameters=job.hyperparameters,
+            created_by=current_user["uid"]
+        )
+        db.add(model)
+        db.commit()
+        db.refresh(model)
 
     # Link model to training job
     db_job.model_id = model.id
     db.commit()
     db.refresh(db_job)
 
-    # Start training process in background
+    # Start training process
     try:
-        training_config = {
-            'dataset_id': job.dataset_id,
-            'architecture': job.architecture,
-            'hyperparameters': job.hyperparameters
-        }
-        training_manager.start_training(db_job.id, training_config, SessionLocal)
+        architecture = job.architecture.lower()
+        
+        # Check if this is a YOLO model -> use AI service (GPU server)
+        if 'yolo' in architecture:
+            # Use AI service for YOLO training
+            from app.utils.dataset_utils import prepare_yolo_dataset
+            ai_client = get_ai_client()
+            
+            # Prepare dataset in YOLO format
+            data_yaml_path = prepare_yolo_dataset(job.dataset_id, SessionLocal)
+            
+            if not data_yaml_path:
+                raise Exception("Failed to prepare YOLO dataset")
+            
+            # Submit to AI service
+            hyperparams = job.hyperparameters
+            await ai_client.start_training(
+                job_id=db_job.id,
+                data_yaml=data_yaml_path,
+                model=architecture,  # yolov8n, yolov8s, etc.
+                epochs=hyperparams.get('epochs', 100),
+                imgsz=hyperparams.get('img_size', 640),
+                batch=hyperparams.get('batch_size', 16),
+                project="uploads/models",
+                name=f"model_{model.id}"
+            )
+            
+            db_job.status = TrainingStatus.RUNNING
+            db.commit()
+            
+        else:
+            # PyTorch models (ResNet, MobileNet) - could be moved to AI service too
+            # For now, only YOLO is supported via AI service
+            raise HTTPException(
+                status_code=400,
+                detail=f"Architecture '{job.architecture}' not supported. Currently only YOLO models are supported via AI service. Please use yolov8n, yolov8s, yolov8m, yolov8l, or yolov8x."
+            )
+            
+            # Old code (commented out):
+            # training_config = {
+            #     'dataset_id': job.dataset_id,
+            #     'architecture': job.architecture,
+            #     'hyperparameters': job.hyperparameters
+            # }
+            # training_manager.start_training(db_job.id, training_config, SessionLocal)
+            
     except Exception as e:
         db_job.status = TrainingStatus.FAILED
         db_job.training_logs = f"Failed to start training: {str(e)}"
@@ -104,10 +217,83 @@ async def get_training_job(
     db: Session = Depends(get_db),
     current_user: dict = Depends(get_current_user_dev)
 ):
-    """Get a specific training job"""
+    """Get a specific training job (syncs status from AI service if YOLO)"""
     job = db.query(TrainingJob).filter(TrainingJob.id == job_id).first()
     if not job:
         raise HTTPException(status_code=404, detail="Training job not found")
+    
+    # If job is running/pending and uses YOLO, sync status from AI service
+    if job.status in [TrainingStatus.RUNNING, TrainingStatus.PENDING] and 'yolo' in job.architecture.lower():
+        try:
+            ai_client = get_ai_client()
+            ai_status = await ai_client.get_training_status(job_id)
+            
+            # Update job with latest status from AI service
+            ai_job_status = ai_status.get('status', '').lower()
+            
+            if ai_job_status == 'running':
+                job.status = TrainingStatus.RUNNING
+                current_epoch = ai_status.get('current_epoch', job.current_epoch)
+                current_loss = ai_status.get('current_loss', job.current_loss)
+                
+                # Get mAP50 and convert to percentage (handle None case)
+                map50_value = ai_status.get('current_map50')
+                current_accuracy = float(map50_value) * 100 if map50_value is not None else job.current_accuracy
+                
+                progress = ai_status.get('progress', job.progress_percentage)
+                
+                # Update job
+                job.current_epoch = current_epoch
+                job.current_loss = current_loss
+                job.current_accuracy = current_accuracy
+                job.progress_percentage = progress
+                
+                # Create/Update TrainingMetric record for this epoch
+                if current_epoch and current_epoch > 0:
+                    # Check if metric for this epoch already exists
+                    existing_metric = db.query(TrainingMetric).filter(
+                        TrainingMetric.training_job_id == job_id,
+                        TrainingMetric.epoch == current_epoch
+                    ).first()
+                    
+                    if existing_metric:
+                        # Update existing metric
+                        existing_metric.train_loss = current_loss
+                        existing_metric.train_accuracy = current_accuracy
+                    else:
+                        # Create new metric record
+                        new_metric = TrainingMetric(
+                            training_job_id=job_id,
+                            epoch=current_epoch,
+                            train_loss=current_loss,
+                            train_accuracy=current_accuracy,
+                            val_loss=None,
+                            val_accuracy=None
+                        )
+                        db.add(new_metric)
+                
+                # Log for debugging
+                logger.info(f"[Job {job_id}] Synced from AI: Epoch {current_epoch}, Loss: {current_loss:.4f}, mAP50: {current_accuracy:.2f}%, Progress: {progress:.1f}%")
+                
+                db.commit()
+            elif ai_job_status == 'completed':
+                job.status = TrainingStatus.COMPLETED
+                job.progress_percentage = 100.0
+                job.completed_at = datetime.utcnow()
+                db.commit()
+            elif ai_job_status == 'failed':
+                job.status = TrainingStatus.FAILED
+                job.training_logs = ai_status.get('error', 'Training failed on AI service')
+                job.completed_at = datetime.utcnow()
+                db.commit()
+            elif ai_job_status == 'pending':
+                job.status = TrainingStatus.PENDING
+                db.commit()
+                
+        except Exception as e:
+            # AI service might be down, just return cached DB status
+            logger.warning(f"Failed to sync status from AI service: {e}")
+    
     return job
 
 

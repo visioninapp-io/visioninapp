@@ -530,11 +530,10 @@ async def auto_annotate_dataset(
     db: Session = Depends(get_db),
     current_user: dict = Depends(get_current_user_dev)
 ):
-    """Trigger auto-annotation for a dataset using YOLO model"""
+    """Trigger auto-annotation for a dataset using YOLO model (via AI service)"""
     print(f"[AUTO-ANNOTATE] Received request: dataset_id={request.dataset_id}, model_id={request.model_id}, conf={getattr(request, 'confidence_threshold', 0.25)}")
 
-    from app.services.auto_annotation_service import get_auto_annotation_service
-    from app.utils.file_storage import file_storage
+    from app.services.ai_client import get_ai_client
     from pathlib import Path
 
     # 데이터셋 확인
@@ -561,33 +560,44 @@ async def auto_annotate_dataset(
     db.commit()
 
     try:
-        print("[AUTO-ANNOTATE] Loading auto-annotation service...")
-        # 자동 어노테이션 서비스 로드
-        service = get_auto_annotation_service()
-        print("[AUTO-ANNOTATE] Service loaded successfully")
+        print("[AUTO-ANNOTATE] Connecting to AI service...")
+        ai_client = get_ai_client()
+        
+        # Check AI service health
+        try:
+            health = await ai_client.health_check()
+            print(f"[AUTO-ANNOTATE] AI service available: {health.get('device_name')}")
+        except Exception as e:
+            print(f"[AUTO-ANNOTATE] AI service unavailable: {e}")
+            raise HTTPException(status_code=503, detail="AI service unavailable")
 
         # 모델 경로 결정
-        model_path = None
+        model_path = "AI/models/best.pt"  # Default fallback model
+        
         if request.model_id:
-            print(f"[AUTO-ANNOTATE] Custom model requested: {request.model_id}")
-            # 특정 모델 ID가 지정된 경우
-            from app.models.model import Model
-            model = db.query(Model).filter(Model.id == request.model_id).first()
-            if model and model.file_path:
-                model_path = model.file_path
-                print(f"[AUTO-ANNOTATE] Using custom model: {model_path}")
+            print(f"[AUTO-ANNOTATE] Custom model requested: model_id={request.model_id}")
+            
+            # First, try to find trained model in AI/uploads/models/
+            trained_model_path = Path(f"AI/uploads/models/model_{request.model_id}/weights/best.pt")
+            if trained_model_path.exists():
+                model_path = str(trained_model_path)
+                print(f"[AUTO-ANNOTATE] ✅ Using trained model: {model_path}")
+            else:
+                # Fallback: Try to get model from database
+                print(f"[AUTO-ANNOTATE] Trained model not found, checking database...")
+                from app.models.model import Model
+                model = db.query(Model).filter(Model.id == request.model_id).first()
+                if model and model.file_path:
+                    model_path = model.file_path
+                    print(f"[AUTO-ANNOTATE] ✅ Using DB model path: {model_path}")
+                else:
+                    print(f"[AUTO-ANNOTATE] ⚠️ Model {request.model_id} not found, using default model")
+        else:
+            print(f"[AUTO-ANNOTATE] No model_id specified, using default model")
 
-        # 모델 로드 (model_path가 None이면 기본 경로 사용)
-        print(f"[AUTO-ANNOTATE] Loading model from: {model_path or 'default (AI/models/best.pt)'}")
-        if not service.load_model(model_path):
-            print("[AUTO-ANNOTATE] Failed to load model!")
-            raise HTTPException(
-                status_code=500,
-                detail="Failed to load model. Please ensure AI/models/best.pt exists or train the model first"
-            )
-        print("[AUTO-ANNOTATE] Model loaded successfully")
+        print(f"[AUTO-ANNOTATE] Final model path: {model_path}")
 
-        # Confidence threshold (요청에서 받거나 기본값 0.25)
+        # Confidence threshold
         conf_threshold = getattr(request, 'confidence_threshold', 0.25)
         print(f"[AUTO-ANNOTATE] Using confidence threshold: {conf_threshold}")
 
@@ -606,10 +616,19 @@ async def auto_annotate_dataset(
                 print(f"[AUTO-ANNOTATE] WARNING: Image file not found: {img_path}")
                 continue
 
-            # 추론 실행
-            print(f"[AUTO-ANNOTATE] Running prediction...")
-            annotations = service.predict_image(str(img_path), conf_threshold)
-            print(f"[AUTO-ANNOTATE] Found {len(annotations)} annotations")
+            # 추론 실행 (AI service를 통해)
+            print(f"[AUTO-ANNOTATE] Running prediction via AI service...")
+            try:
+                result = await ai_client.predict(
+                    model_path=model_path,
+                    image_path=str(img_path),
+                    conf=conf_threshold
+                )
+                annotations = result.get('predictions', [])
+                print(f"[AUTO-ANNOTATE] Found {len(annotations)} annotations")
+            except Exception as e:
+                print(f"[AUTO-ANNOTATE] Prediction failed: {e}")
+                continue
 
             # overwrite_existing이 True인 경우 기존 어노테이션 삭제
             if request.overwrite_existing:
@@ -624,16 +643,28 @@ async def auto_annotate_dataset(
             if annotations:
                 # 어노테이션 저장
                 for ann in annotations:
-                    bbox = ann['bbox']
+                    # AI service returns Detection objects, convert to dict if needed
+                    if isinstance(ann, dict):
+                        bbox = ann['bbox']
+                        class_id = ann['class_id']
+                        class_name = ann['class_name']
+                        confidence = ann['confidence']
+                    else:
+                        # Pydantic model from AI service
+                        bbox = ann.bbox
+                        class_id = ann.class_id
+                        class_name = ann.class_name
+                        confidence = ann.confidence
+                    
                     db_annotation = Annotation(
                         image_id=img.id,
-                        class_id=ann['class_id'],
-                        class_name=ann['class_name'],
-                        x_center=bbox['x_center'],
-                        y_center=bbox['y_center'],
-                        width=bbox['width'],
-                        height=bbox['height'],
-                        confidence=ann['confidence'],
+                        class_id=class_id,
+                        class_name=class_name,
+                        x_center=bbox['x_center'] if isinstance(bbox, dict) else bbox.get('x_center'),
+                        y_center=bbox['y_center'] if isinstance(bbox, dict) else bbox.get('y_center'),
+                        width=bbox['width'] if isinstance(bbox, dict) else bbox.get('width'),
+                        height=bbox['height'] if isinstance(bbox, dict) else bbox.get('height'),
+                        confidence=confidence,
                         is_auto_generated=1,
                         is_verified=0
                     )

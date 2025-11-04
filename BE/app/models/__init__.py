@@ -1,3 +1,4 @@
+<<<<<<< HEAD
 from app.models.dataset import (
     Dataset, Image, Annotation, DatasetVersion,
     UploadBatch, ExportJob, DatasetStatus, DatasetType
@@ -22,3 +23,26 @@ __all__ = [
     "MonitoringAlert", "PerformanceMetric", "FeedbackLoop", "EdgeCase",
     "User"
 ]
+=======
+from app.models.dataset import (
+    Dataset, Image, Annotation, DatasetVersion,
+    UploadBatch, ExportJob, DatasetStatus, DatasetType
+)
+from app.models.model import Model, ModelConversion
+from app.models.training import TrainingJob, TrainingMetric
+from app.models.evaluation import Evaluation
+from app.models.deployment import Deployment, InferenceLog
+from app.models.monitoring import MonitoringAlert, PerformanceMetric, FeedbackLoop, EdgeCase
+from app.models.user import User
+
+__all__ = [
+    "Dataset", "Image", "Annotation", "DatasetVersion",
+    "UploadBatch", "ExportJob", "DatasetStatus", "DatasetType",
+    "Model", "ModelConversion",
+    "TrainingJob", "TrainingMetric",
+    "Evaluation",
+    "Deployment", "InferenceLog",
+    "MonitoringAlert", "PerformanceMetric", "FeedbackLoop", "EdgeCase",
+    "User"
+]
+>>>>>>> feature/llm-pipeline

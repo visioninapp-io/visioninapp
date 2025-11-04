@@ -1,3 +1,4 @@
+<<<<<<< HEAD
 # claude
 .claude
 
@@ -12,3 +13,17 @@ tests/
 **/*.pt
 
 AI/uploads/models/model_*/
+=======
+# claude
+.claude
+
+*.png
+
+docs/
+
+tests/
+
+AI_test/
+
+runs/
+>>>>>>> feature/llm-pipeline

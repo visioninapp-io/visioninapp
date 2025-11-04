@@ -4,7 +4,6 @@ from typing import List
 from app.core.database import get_db
 from app.core.auth import get_current_user, get_current_user_dev
 from app.models.evaluation import Evaluation
-from app.models.model import Model
 from app.schemas.evaluation import EvaluationCreate, EvaluationResponse, ModelComparisonResponse
 
 router = APIRouter()
@@ -14,15 +13,15 @@ router = APIRouter()
 async def get_evaluations(
     skip: int = 0,
     limit: int = 100,
-    model_id: int = None,
+    model_version_id: int = None,
     db: Session = Depends(get_db),
     current_user: dict = Depends(get_current_user_dev)
 ):
     """Get all evaluations"""
     query = db.query(Evaluation)
 
-    if model_id:
-        query = query.filter(Evaluation.model_id == model_id)
+    if model_version_id:
+        query = query.filter(Evaluation.model_version_id == model_version_id)
 
     evaluations = query.offset(skip).limit(limit).all()
     return evaluations
@@ -35,26 +34,21 @@ async def create_evaluation(
     current_user: dict = Depends(get_current_user_dev)
 ):
     """Create a new model evaluation"""
-    model = db.query(Model).filter(Model.id == evaluation.model_id).first()
-    if not model:
-        raise HTTPException(status_code=404, detail="Model not found")
+    from app.models.model_version import ModelVersion
+    
+    # ModelVersion 존재 확인
+    model_version = db.query(ModelVersion).filter(ModelVersion.id == evaluation.model_version_id).first()
+    if not model_version:
+        raise HTTPException(status_code=404, detail="Model version not found")
 
-    # TODO: Implement actual evaluation logic
-    # This would run the model on test dataset and calculate metrics
-
-    # For now, create with provided data
+    # Evaluation 생성
     db_evaluation = Evaluation(
-        model_id=evaluation.model_id,
-        name=evaluation.name,
-        description=evaluation.description,
-        test_dataset_name=evaluation.test_dataset_name,
-        test_dataset_size=evaluation.test_dataset_size,
-        precision=0.0,  # Will be calculated
-        recall=0.0,
-        f1_score=0.0,
-        map_50=0.0,
-        class_metrics=[],
-        created_by=current_user["uid"]
+        model_version_id=evaluation.model_version_id,
+        f1_score=evaluation.f1_score,
+        precision=evaluation.precision,
+        recall=evaluation.recall,
+        mAP_50=evaluation.mAP_50,
+        mAP_50_95=evaluation.mAP_50_95
     )
     db.add(db_evaluation)
     db.commit()
@@ -76,71 +70,77 @@ async def get_evaluation(
     return evaluation
 
 
-@router.get("/model/{model_id}", response_model=List[EvaluationResponse])
-async def get_model_evaluations(
-    model_id: int,
+@router.get("/model-version/{model_version_id}", response_model=List[EvaluationResponse])
+async def get_model_version_evaluations(
+    model_version_id: int,
     db: Session = Depends(get_db),
     current_user: dict = Depends(get_current_user_dev)
 ):
-    """Get all evaluations for a specific model"""
-    model = db.query(Model).filter(Model.id == model_id).first()
-    if not model:
-        raise HTTPException(status_code=404, detail="Model not found")
+    """Get all evaluations for a specific model version"""
+    from app.models.model_version import ModelVersion
+    
+    model_version = db.query(ModelVersion).filter(ModelVersion.id == model_version_id).first()
+    if not model_version:
+        raise HTTPException(status_code=404, detail="Model version not found")
 
-    evaluations = db.query(Evaluation).filter(Evaluation.model_id == model_id).all()
+    evaluations = db.query(Evaluation).filter(Evaluation.model_version_id == model_version_id).all()
     return evaluations
 
 
-@router.get("/model/{model_id}/latest", response_model=EvaluationResponse)
+@router.get("/model-version/{model_version_id}/latest", response_model=EvaluationResponse)
 async def get_latest_evaluation(
-    model_id: int,
+    model_version_id: int,
     db: Session = Depends(get_db),
     current_user: dict = Depends(get_current_user_dev)
 ):
-    """Get the latest evaluation for a model"""
-    model = db.query(Model).filter(Model.id == model_id).first()
-    if not model:
-        raise HTTPException(status_code=404, detail="Model not found")
+    """Get the latest evaluation for a model version"""
+    from app.models.model_version import ModelVersion
+    
+    model_version = db.query(ModelVersion).filter(ModelVersion.id == model_version_id).first()
+    if not model_version:
+        raise HTTPException(status_code=404, detail="Model version not found")
 
     evaluation = db.query(Evaluation).filter(
-        Evaluation.model_id == model_id
-    ).order_by(Evaluation.created_at.desc()).first()
+        Evaluation.model_version_id == model_version_id
+    ).order_by(Evaluation.id.desc()).first()
 
     if not evaluation:
-        raise HTTPException(status_code=404, detail="No evaluation found for this model")
+        raise HTTPException(status_code=404, detail="No evaluation found for this model version")
 
     return evaluation
 
 
 @router.post("/compare", response_model=ModelComparisonResponse)
 async def compare_models(
-    model_ids: List[int],
+    model_version_ids: List[int],
     db: Session = Depends(get_db),
     current_user: dict = Depends(get_current_user_dev)
 ):
-    """Compare multiple models"""
-    if len(model_ids) < 2:
-        raise HTTPException(status_code=400, detail="At least 2 models required for comparison")
+    """Compare multiple model versions"""
+    if len(model_version_ids) < 2:
+        raise HTTPException(status_code=400, detail="At least 2 model versions required for comparison")
 
+    from app.models.model_version import ModelVersion
+    
     models_data = []
-    for model_id in model_ids:
-        model = db.query(Model).filter(Model.id == model_id).first()
-        if not model:
-            raise HTTPException(status_code=404, detail=f"Model {model_id} not found")
+    for model_version_id in model_version_ids:
+        model_version = db.query(ModelVersion).filter(ModelVersion.id == model_version_id).first()
+        if not model_version:
+            raise HTTPException(status_code=404, detail=f"Model version {model_version_id} not found")
 
         # Get latest evaluation
         evaluation = db.query(Evaluation).filter(
-            Evaluation.model_id == model_id
-        ).order_by(Evaluation.created_at.desc()).first()
+            Evaluation.model_version_id == model_version_id
+        ).order_by(Evaluation.id.desc()).first()
 
         models_data.append({
-            "model_id": model.id,
-            "model_name": model.name,
-            "version": model.version,
+            "model_version_id": model_version.id,
+            "model_name": model_version.model.name if model_version.model else "Unknown",
+            "version_tag": model_version.version_tag,
             "precision": evaluation.precision if evaluation else None,
             "recall": evaluation.recall if evaluation else None,
             "f1_score": evaluation.f1_score if evaluation else None,
-            "map_50": evaluation.map_50 if evaluation else None
+            "map_50": evaluation.mAP_50 if evaluation else None
         })
 
     return {

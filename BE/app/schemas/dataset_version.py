@@ -149,28 +149,3 @@ class ExportJobResponse(BaseModel):
     class Config:
         from_attributes = True
 
-
-# Batch Upload Schemas
-class UploadBatchCreate(BaseModel):
-    """Create upload batch"""
-    dataset_id: int
-    batch_name: str
-    total_files: int
-
-
-class UploadBatchResponse(BaseModel):
-    """Upload batch response"""
-    id: int
-    dataset_id: int
-    batch_name: str
-    total_files: int
-    successful_uploads: int
-    failed_uploads: int
-    status: str
-    error_messages: List[str]
-    created_at: datetime
-    completed_at: Optional[datetime]
-    created_by: str
-
-    class Config:
-        from_attributes = True

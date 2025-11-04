@@ -20,8 +20,15 @@ class Settings(BaseSettings):
         "*"  # Allow all origins for development
     ]
 
-    # Database
-    DATABASE_URL: str = "sqlite:///./app.db"
+    # Database - MySQL Configuration
+    DATABASE_URL: str = ""  # 환경 변수로 설정하거나 자동으로 구성됨
+    
+    # MySQL Configuration (환경 변수로 설정)
+    MYSQL_USER: str = "root"
+    MYSQL_PASSWORD: str = "password"
+    MYSQL_HOST: str = "localhost"
+    MYSQL_PORT: int = 3306
+    MYSQL_DATABASE: str = "vision_db"
 
     # Security
     SECRET_KEY: str = "your-secret-key-here-change-in-production"

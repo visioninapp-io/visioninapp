@@ -5,11 +5,10 @@ import uuid
 from datetime import datetime
 from app.core.database import get_db
 from app.core.auth import get_current_user, get_current_user_dev
-from app.models.deployment import Deployment, InferenceLog, DeploymentStatus
-from app.models.model import Model
+from app.models.deployment import Deployment
 from app.schemas.deployment import (
     DeploymentCreate, DeploymentUpdate, DeploymentResponse, DeploymentStats,
-    InferenceRequest, InferenceResponse, InferenceLogResponse, PredictionResult
+    InferenceRequest, InferenceResponse, PredictionResult
 )
 
 router = APIRouter()
@@ -21,20 +20,16 @@ async def get_deployment_stats(
     current_user: dict = Depends(get_current_user_dev)
 ):
     """Get overall deployment statistics"""
-    deployments = db.query(Deployment).filter(
-        Deployment.status == DeploymentStatus.ACTIVE
-    ).all()
+    # 호환성 필드가 제거되어 기본값 반환
+    deployments = db.query(Deployment).all()
 
     active_deployments = len(deployments)
-    total_requests = sum(d.total_requests for d in deployments)
-    avg_response_time = sum(d.avg_response_time or 0 for d in deployments) / len(deployments) if deployments else 0
-    uptime_percentage = sum(d.uptime_percentage or 0 for d in deployments) / len(deployments) if deployments else 0
-
+    
     return {
         "active_deployments": active_deployments,
-        "total_requests": total_requests,
-        "avg_response_time": avg_response_time,
-        "uptime_percentage": uptime_percentage
+        "total_requests": 0,  # 호환성 필드 제거됨
+        "avg_response_time": 0.0,  # 호환성 필드 제거됨
+        "uptime_percentage": 0.0  # 호환성 필드 제거됨
     }
 
 
@@ -42,16 +37,11 @@ async def get_deployment_stats(
 async def get_deployments(
     skip: int = 0,
     limit: int = 100,
-    status_filter: str = None,
     db: Session = Depends(get_db),
     current_user: dict = Depends(get_current_user_dev)
 ):
     """Get all deployments"""
     query = db.query(Deployment)
-
-    if status_filter:
-        query = query.filter(Deployment.status == status_filter)
-
     deployments = query.offset(skip).limit(limit).all()
     return deployments
 
@@ -63,24 +53,24 @@ async def create_deployment(
     current_user: dict = Depends(get_current_user_dev)
 ):
     """Create a new deployment"""
-    # Check if model exists
-    model = db.query(Model).filter(Model.id == deployment.model_id).first()
-    if not model:
-        raise HTTPException(status_code=404, detail="Model not found")
+    from app.models.model_version import ModelVersion
+    
+    # Check if model version exists
+    model_version = db.query(ModelVersion).filter(ModelVersion.id == deployment.model_version_id).first()
+    if not model_version:
+        raise HTTPException(status_code=404, detail="Model version not found")
 
     # Check if name already exists
     existing = db.query(Deployment).filter(Deployment.name == deployment.name).first()
     if existing:
         raise HTTPException(status_code=400, detail="Deployment with this name already exists")
 
-    # Generate API key
-    api_key = f"visionai_{uuid.uuid4().hex}"
-
+    # Deployment 생성
     db_deployment = Deployment(
-        **deployment.dict(),
-        api_key=api_key,
-        status=DeploymentStatus.DEPLOYING,
-        created_by=current_user["uid"]
+        model_version_id=deployment.model_version_id,
+        name=deployment.name,
+        target=deployment.target,
+        endpoint_url=deployment.endpoint_url
     )
     db.add(db_deployment)
     db.commit()
@@ -120,7 +110,8 @@ async def update_deployment(
     update_data = deployment_update.dict(exclude_unset=True)
 
     for field, value in update_data.items():
-        setattr(db_deployment, field, value)
+        if hasattr(db_deployment, field):
+            setattr(db_deployment, field, value)
 
     db.commit()
     db.refresh(db_deployment)
@@ -156,9 +147,6 @@ async def run_inference(
     if not deployment:
         raise HTTPException(status_code=404, detail="Deployment not found")
 
-    if deployment.status != DeploymentStatus.ACTIVE:
-        raise HTTPException(status_code=400, detail="Deployment is not active")
-
     # TODO: Implement actual inference logic
     # This would call the deployed model with the image
 
@@ -173,23 +161,6 @@ async def run_inference(
         )
     ]
 
-    # Log inference
-    log = InferenceLog(
-        deployment_id=deployment_id,
-        request_id=request_id,
-        predictions=[p.model_dump() for p in predictions],
-        inference_time=23.5,
-        preprocessing_time=5.2,
-        postprocessing_time=2.1
-    )
-    db.add(log)
-
-    # Update deployment stats
-    deployment.total_requests += 1
-    deployment.requests_today += 1
-
-    db.commit()
-
     return InferenceResponse(
         request_id=request_id,
         predictions=predictions,
@@ -197,26 +168,6 @@ async def run_inference(
         preprocessing_time=5.2,
         postprocessing_time=2.1
     )
-
-
-@router.get("/{deployment_id}/logs", response_model=List[InferenceLogResponse])
-async def get_inference_logs(
-    deployment_id: int,
-    skip: int = 0,
-    limit: int = 100,
-    db: Session = Depends(get_db),
-    current_user: dict = Depends(get_current_user_dev)
-):
-    """Get inference logs for a deployment"""
-    deployment = db.query(Deployment).filter(Deployment.id == deployment_id).first()
-    if not deployment:
-        raise HTTPException(status_code=404, detail="Deployment not found")
-
-    logs = db.query(InferenceLog).filter(
-        InferenceLog.deployment_id == deployment_id
-    ).order_by(InferenceLog.timestamp.desc()).offset(skip).limit(limit).all()
-
-    return logs
 
 
 @router.post("/{deployment_id}/health-check")
@@ -233,15 +184,12 @@ async def health_check(
     # TODO: Implement actual health check
     # Ping the deployment endpoint
 
-    deployment.last_health_check = datetime.utcnow()
-    deployment.health_status = "healthy"
-
     db.commit()
 
     return {
         "deployment_id": deployment_id,
         "health_status": "healthy",
-        "last_check": deployment.last_health_check
+        "last_check": datetime.utcnow()
     }
 
 
@@ -251,17 +199,16 @@ async def start_deployment(
     db: Session = Depends(get_db),
     current_user: dict = Depends(get_current_user_dev)
 ):
-    """Start a paused deployment"""
+    """Start a deployment"""
     deployment = db.query(Deployment).filter(Deployment.id == deployment_id).first()
     if not deployment:
         raise HTTPException(status_code=404, detail="Deployment not found")
 
-    deployment.status = DeploymentStatus.ACTIVE
     deployment.deployed_at = datetime.utcnow()
 
     db.commit()
 
-    return {"message": "Deployment started", "status": deployment.status.value}
+    return {"message": "Deployment started", "deployed_at": deployment.deployed_at}
 
 
 @router.post("/{deployment_id}/stop")
@@ -270,13 +217,12 @@ async def stop_deployment(
     db: Session = Depends(get_db),
     current_user: dict = Depends(get_current_user_dev)
 ):
-    """Stop an active deployment"""
+    """Stop a deployment"""
     deployment = db.query(Deployment).filter(Deployment.id == deployment_id).first()
     if not deployment:
         raise HTTPException(status_code=404, detail="Deployment not found")
 
-    deployment.status = DeploymentStatus.STOPPED
-
+    # status 필드가 없으므로 단순히 응답만 반환
     db.commit()
 
-    return {"message": "Deployment stopped", "status": deployment.status.value}
+    return {"message": "Deployment stopped"}

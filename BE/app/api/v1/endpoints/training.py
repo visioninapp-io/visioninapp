@@ -8,11 +8,11 @@ from app.core.database import get_db, SessionLocal
 from app.core.auth import get_current_user, get_current_user_dev
 
 logger = logging.getLogger(__name__)
-from app.models.training import TrainingJob, TrainingMetric, TrainingStatus
+from app.models.training import TrainingJob, TrainingStatus
 from app.models.model import Model, ModelStatus, ModelFramework
+from app.utils.project_helper import get_or_create_default_project
 from app.schemas.training import (
     TrainingJobCreate, TrainingJobUpdate, TrainingJobResponse,
-    TrainingMetricCreate, TrainingMetricResponse,
     TrainingControlRequest, HyperparameterTuningRequest
 )
 from app.services.training_service import training_manager
@@ -60,25 +60,6 @@ async def get_training_jobs(
                     job.current_loss = current_loss
                     job.current_accuracy = current_accuracy
                     job.progress_percentage = progress
-                    
-                    # Create/Update TrainingMetric record for this epoch
-                    if current_epoch and current_epoch > 0:
-                        existing_metric = db.query(TrainingMetric).filter(
-                            TrainingMetric.training_job_id == job.id,
-                            TrainingMetric.epoch == current_epoch
-                        ).first()
-                        
-                        if existing_metric:
-                            existing_metric.train_loss = current_loss
-                            existing_metric.train_accuracy = current_accuracy
-                        else:
-                            new_metric = TrainingMetric(
-                                training_job_id=job.id,
-                                epoch=current_epoch,
-                                train_loss=current_loss,
-                                train_accuracy=current_accuracy
-                            )
-                            db.add(new_metric)
                 elif ai_job_status == 'completed':
                     job.status = TrainingStatus.COMPLETED
                     job.progress_percentage = 100.0
@@ -137,9 +118,13 @@ async def create_training_job(
         db.refresh(model)
     else:
         # Create new model (backend creates it)
+        # Get or create default project for user
+        default_project = get_or_create_default_project(db, current_user["uid"])
+        
         model = Model(
             name=model_name,
             architecture=job.architecture,
+            project_id=default_project.id,
             framework=ModelFramework.PYTORCH,
             status=ModelStatus.TRAINING,
             training_config=job.hyperparameters,
@@ -249,30 +234,6 @@ async def get_training_job(
                 job.current_accuracy = current_accuracy
                 job.progress_percentage = progress
                 
-                # Create/Update TrainingMetric record for this epoch
-                if current_epoch and current_epoch > 0:
-                    # Check if metric for this epoch already exists
-                    existing_metric = db.query(TrainingMetric).filter(
-                        TrainingMetric.training_job_id == job_id,
-                        TrainingMetric.epoch == current_epoch
-                    ).first()
-                    
-                    if existing_metric:
-                        # Update existing metric
-                        existing_metric.train_loss = current_loss
-                        existing_metric.train_accuracy = current_accuracy
-                    else:
-                        # Create new metric record
-                        new_metric = TrainingMetric(
-                            training_job_id=job_id,
-                            epoch=current_epoch,
-                            train_loss=current_loss,
-                            train_accuracy=current_accuracy,
-                            val_loss=None,
-                            val_accuracy=None
-                        )
-                        db.add(new_metric)
-                
                 # Log for debugging
                 logger.info(f"[Job {job_id}] Synced from AI: Epoch {current_epoch}, Loss: {current_loss:.4f}, mAP50: {current_accuracy:.2f}%, Progress: {progress:.1f}%")
                 
@@ -361,56 +322,6 @@ async def control_training(
 
         db.commit()
         return {"message": message, "status": job.status.value}
-
-
-@router.get("/{job_id}/metrics", response_model=List[TrainingMetricResponse])
-async def get_training_metrics(
-    job_id: int,
-    db: Session = Depends(get_db),
-    current_user: dict = Depends(get_current_user_dev)
-):
-    """Get training metrics history"""
-    job = db.query(TrainingJob).filter(TrainingJob.id == job_id).first()
-    if not job:
-        raise HTTPException(status_code=404, detail="Training job not found")
-
-    metrics = db.query(TrainingMetric).filter(TrainingMetric.training_job_id == job_id).all()
-    return metrics
-
-
-@router.post("/metrics", response_model=TrainingMetricResponse, status_code=status.HTTP_201_CREATED)
-async def create_training_metric(
-    metric: TrainingMetricCreate,
-    db: Session = Depends(get_db),
-    current_user: dict = Depends(get_current_user_dev)
-):
-    """Add a training metric data point"""
-    db_metric = TrainingMetric(**metric.dict())
-    db.add(db_metric)
-
-    # Update training job with latest metrics
-    job = db.query(TrainingJob).filter(TrainingJob.id == metric.training_job_id).first()
-    if job:
-        job.current_epoch = metric.epoch
-        job.current_loss = metric.train_loss
-        job.current_accuracy = metric.train_accuracy
-        job.current_learning_rate = metric.learning_rate
-        job.progress_percentage = (metric.epoch / job.total_epochs) * 100
-
-        # Update metrics history
-        if not job.metrics_history:
-            job.metrics_history = {}
-
-        job.metrics_history[str(metric.epoch)] = {
-            "loss": metric.train_loss,
-            "accuracy": metric.train_accuracy,
-            "val_loss": metric.val_loss,
-            "val_accuracy": metric.val_accuracy
-        }
-
-    db.commit()
-    db.refresh(db_metric)
-    return db_metric
 
 
 @router.post("/hyperparameter-tuning")

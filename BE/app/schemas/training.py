@@ -56,35 +56,6 @@ class TrainingJobResponse(TrainingJobBase):
         protected_namespaces = ()
 
 
-class TrainingMetricCreate(BaseModel):
-    training_job_id: int
-    epoch: int
-    step: Optional[int] = None
-    train_loss: float
-    val_loss: Optional[float] = None
-    train_accuracy: Optional[float] = None
-    val_accuracy: Optional[float] = None
-    learning_rate: Optional[float] = None
-    other_metrics: Optional[Dict[str, Any]] = None
-
-
-class TrainingMetricResponse(BaseModel):
-    id: int
-    training_job_id: int
-    epoch: int
-    step: Optional[int]
-    train_loss: float
-    val_loss: Optional[float]
-    train_accuracy: Optional[float]
-    val_accuracy: Optional[float]
-    learning_rate: Optional[float]
-    other_metrics: Optional[Dict[str, Any]]
-    timestamp: datetime
-
-    class Config:
-        from_attributes = True
-
-
 class TrainingControlRequest(BaseModel):
     action: str = Field(..., description="Action to perform: pause, resume, cancel")
 

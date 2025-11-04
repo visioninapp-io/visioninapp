@@ -86,8 +86,21 @@ def prepare_yolo_dataset(dataset_id: int, db_session_factory) -> Optional[str]:
                         # YOLO format: class_id x_center y_center width height (normalized)
                         f.write(f"{ann.class_id} {ann.x_center} {ann.y_center} {ann.width} {ann.height}\n")
         
-        # Get class names
-        class_names = dataset.class_names if dataset.class_names else []
+        # Get class names from latest dataset version's label ontology
+        from app.models.label_class import LabelClass
+        from app.models.dataset import DatasetVersion
+        
+        latest_version = db.query(DatasetVersion).filter(
+            DatasetVersion.dataset_id == dataset.id
+        ).order_by(DatasetVersion.created_at.desc()).first()
+        
+        class_names = []
+        if latest_version and latest_version.ontology_version:
+            label_classes = db.query(LabelClass).filter(
+                LabelClass.ontology_version_id == latest_version.ontology_version_id
+            ).all()
+            class_names = [lc.display_name for lc in label_classes]
+        
         num_classes = len(class_names) if class_names else 1
         
         # Create data.yaml

@@ -5,184 +5,88 @@ import enum
 from app.core.database import Base
 
 
-class DatasetStatus(str, enum.Enum):
-    CREATED = "created"
-    UPLOADING = "uploading"
-    PROCESSING = "processing"
-    ANNOTATED = "annotated"
-    READY = "ready"
-    ERROR = "error"
-
-
-class DatasetType(str, enum.Enum):
-    OBJECT_DETECTION = "object_detection"
-    CLASSIFICATION = "classification"
-    INSTANCE_SEGMENTATION = "instance_segmentation"
-    SEMANTIC_SEGMENTATION = "semantic_segmentation"
-    KEYPOINT_DETECTION = "keypoint_detection"
+class GeometryType(str, enum.Enum):
+    """어노테이션 형태 타입"""
+    BBOX = "bbox"
+    POLYGON = "polygon"
+    KEYPOINT = "keypoint"
 
 
 class Dataset(Base):
-    __tablename__ = "datasets"
+    """데이터셋 기본 정보 (ERD 기준)"""
+    __tablename__ = "dataset"
 
     id = Column(Integer, primary_key=True, index=True)
-    name = Column(String, unique=True, index=True)
-    description = Column(Text, nullable=True)
-    dataset_type = Column(Enum(DatasetType), default=DatasetType.OBJECT_DETECTION)
-    status = Column(Enum(DatasetStatus), default=DatasetStatus.CREATED)
-
-    total_images = Column(Integer, default=0)
-    annotated_images = Column(Integer, default=0)
-    total_classes = Column(Integer, default=0)
-    class_names = Column(JSON, default=lambda: [])
-    class_colors = Column(JSON, default=lambda: {})  # {class_name: color_hex}
-
-    # Auto-annotation settings
-    auto_annotation_enabled = Column(Integer, default=0)  # boolean as int for SQLite
-    auto_annotation_model_id = Column(Integer, ForeignKey("models.id"), nullable=True)
-
-    # Project settings
-    is_public = Column(Integer, default=0)  # Public datasets can be shared
-
-    created_at = Column(DateTime, default=datetime.utcnow)
-    updated_at = Column(DateTime, default=datetime.utcnow, onupdate=datetime.utcnow)
-    created_by = Column(String, index=True)
+    project_id = Column(Integer, ForeignKey("project.id"), nullable=False, index=True, comment="소속 프로젝트")
+    name = Column(String(255), nullable=False, comment="데이터셋명")
+    description = Column(Text, nullable=True, comment="설명")
+    created_at = Column(DateTime, nullable=False, default=datetime.utcnow, comment="생성일")
 
     # Relationships
-    images = relationship("Image", back_populates="dataset", cascade="all, delete-orphan")
+    project = relationship("Project", back_populates="datasets")
     training_jobs = relationship("TrainingJob", back_populates="dataset")
     versions = relationship("DatasetVersion", back_populates="dataset", cascade="all, delete-orphan")
-    batches = relationship("UploadBatch", back_populates="dataset", cascade="all, delete-orphan")
-
-
-class Image(Base):
-    __tablename__ = "images"
-
-    id = Column(Integer, primary_key=True, index=True)
-    dataset_id = Column(Integer, ForeignKey("datasets.id"))
-
-    filename = Column(String)
-    file_path = Column(String)
-    file_size = Column(Integer)
-    width = Column(Integer)
-    height = Column(Integer)
-
-    is_annotated = Column(Integer, default=0)  # boolean as int
-    annotation_data = Column(JSON, nullable=True)  # YOLO/COCO format annotations
-
-    created_at = Column(DateTime, default=datetime.utcnow)
-
-    # Relationships
-    dataset = relationship("Dataset", back_populates="images")
 
 
 class Annotation(Base):
-    __tablename__ = "annotations"
+    __tablename__ = "annotation"
 
     id = Column(Integer, primary_key=True, index=True)
-    image_id = Column(Integer, ForeignKey("images.id"))
+    asset_id = Column(Integer, ForeignKey("asset.id"), nullable=False, index=True, comment="대상에셋ID")
+    label_class_id = Column(Integer, ForeignKey("label_class.id"), nullable=False, index=True, comment="라벨 클래스ID")
+    model_version_id = Column(Integer, ForeignKey("model_version.id"), nullable=True, index=True, comment="자동 생성 모델 ID")
+    
+    geometry_type = Column(Enum(GeometryType), nullable=False, comment="형태")
+    geometry = Column(JSON, nullable=False, comment="좌표/포인트 데이터")
+    is_normalized = Column(Boolean, nullable=False, default=True, comment="정규화여부")
+    source = Column(Text, nullable=True, comment="생성 주석")  # 'human', 'model'
+    confidence = Column(Float, nullable=False, default=1.0, comment="모델 신뢰도")
+    annotator_name = Column(Text, nullable=False, default="system", comment="라벨러")
+    created_at = Column(DateTime, nullable=False, default=datetime.utcnow, comment="생성")
 
-    class_id = Column(Integer)
-    class_name = Column(String)
-
-    # Bounding box coordinates (normalized 0-1)
-    x_center = Column(Float)
-    y_center = Column(Float)
-    width = Column(Float)
-    height = Column(Float)
-
-    # Polygon points for segmentation (JSON array of [x, y] normalized coordinates)
-    polygon_points = Column(JSON, nullable=True)
-
-    confidence = Column(Float, default=1.0)
-    is_auto_generated = Column(Integer, default=0)  # boolean as int
-    is_verified = Column(Integer, default=0)  # boolean as int
-
-    created_at = Column(DateTime, default=datetime.utcnow)
+    # Relationships
+    asset = relationship("Asset", back_populates="annotations")
+    label_class = relationship("LabelClass", back_populates="annotations")
+    model_version = relationship("ModelVersion", back_populates="annotations")
 
 
 class DatasetVersion(Base):
     """Dataset version with preprocessing and augmentation settings"""
-    __tablename__ = "dataset_versions"
+    __tablename__ = "dataset_version"
 
     id = Column(Integer, primary_key=True, index=True)
-    dataset_id = Column(Integer, ForeignKey("datasets.id"))
-
-    version_number = Column(Integer)  # 1, 2, 3, etc.
-    name = Column(String)  # e.g., "v1-augmented", "v2-grayscale"
-    description = Column(Text, nullable=True)
-
-    # Data split ratios
-    train_split = Column(Float, default=0.7)
-    valid_split = Column(Float, default=0.2)
-    test_split = Column(Float, default=0.1)
-
-    # Preprocessing settings (JSON)
-    preprocessing_config = Column(JSON, default=dict)
-
-    # Augmentation settings (JSON)
-    augmentation_config = Column(JSON, default=dict)
-
-    # Stats after generation
-    total_images = Column(Integer, default=0)
-    train_images = Column(Integer, default=0)
-    valid_images = Column(Integer, default=0)
-    test_images = Column(Integer, default=0)
-
-    # Generation status
-    status = Column(String, default="pending")  # pending, generating, completed, failed
-    generation_progress = Column(Integer, default=0)  # 0-100
-
-    created_at = Column(DateTime, default=datetime.utcnow)
-    completed_at = Column(DateTime, nullable=True)
-    created_by = Column(String)
+    dataset_id = Column(Integer, ForeignKey("dataset.id"), nullable=False, index=True, comment="소속 데이터셋")
+    ontology_version_id = Column(Integer, ForeignKey("label_ontology_version.id"), nullable=False, index=True, comment="온톨로지 버전ID")
+    version_tag = Column(String(50), nullable=False, comment="버전 태그")
+    is_frozen = Column(Boolean, nullable=False, default=False, comment="수정 불가 여부")
+    created_at = Column(DateTime, nullable=False, default=datetime.utcnow, comment="생성일")
 
     # Relationships
     dataset = relationship("Dataset", back_populates="versions")
-
-
-class UploadBatch(Base):
-    """Track batch uploads and their status"""
-    __tablename__ = "upload_batches"
-
-    id = Column(Integer, primary_key=True, index=True)
-    dataset_id = Column(Integer, ForeignKey("datasets.id"))
-
-    batch_name = Column(String)
-    total_files = Column(Integer, default=0)
-    successful_uploads = Column(Integer, default=0)
-    failed_uploads = Column(Integer, default=0)
-
-    status = Column(String, default="uploading")  # uploading, completed, failed
-    error_messages = Column(JSON, default=list)
-
-    created_at = Column(DateTime, default=datetime.utcnow)
-    completed_at = Column(DateTime, nullable=True)
-    created_by = Column(String)
-
-    # Relationships
-    dataset = relationship("Dataset", back_populates="batches")
+    ontology_version = relationship("LabelOntologyVersion", back_populates="dataset_versions")
+    splits = relationship("DatasetSplit", back_populates="dataset_version", cascade="all, delete-orphan")
+    model_versions = relationship("ModelVersion", back_populates="dataset_version")
 
 
 class ExportJob(Base):
     """Track dataset export jobs"""
-    __tablename__ = "export_jobs"
+    __tablename__ = "export_job"
 
     id = Column(Integer, primary_key=True, index=True)
-    dataset_id = Column(Integer, ForeignKey("datasets.id"), nullable=True)
-    version_id = Column(Integer, ForeignKey("dataset_versions.id"), nullable=True)
+    dataset_id = Column(Integer, ForeignKey("dataset.id"), nullable=True)
+    version_id = Column(Integer, ForeignKey("dataset_version.id"), nullable=True)
 
-    export_format = Column(String)  # yolov8, yolov5, coco, pascal_voc, etc.
+    export_format = Column(String(50))  # yolov8, yolov5, coco, pascal_voc, etc.
     include_images = Column(Integer, default=1)  # boolean as int
 
     # File info
-    file_path = Column(String, nullable=True)
+    file_path = Column(String(500), nullable=True)
     file_size = Column(Integer, nullable=True)
-    download_url = Column(String, nullable=True)
+    download_url = Column(String(500), nullable=True)
 
-    status = Column(String, default="pending")  # pending, processing, completed, failed
+    status = Column(String(50), default="pending")  # pending, processing, completed, failed
     error_message = Column(Text, nullable=True)
 
     created_at = Column(DateTime, default=datetime.utcnow)
     completed_at = Column(DateTime, nullable=True)
-    created_by = Column(String)
+    created_by = Column(String(100))

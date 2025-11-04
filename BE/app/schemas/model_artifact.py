@@ -16,6 +16,9 @@ class ModelArtifactCreate(ModelArtifactBase):
     model_id: int
     created_by: str
 
+    class Config:
+        protected_namespaces = ()
+
 
 class ModelArtifactResponse(ModelArtifactBase):
     id: int
@@ -25,6 +28,7 @@ class ModelArtifactResponse(ModelArtifactBase):
 
     class Config:
         from_attributes = True
+        protected_namespaces = ()
 
 
 class ModelUploadRequest(BaseModel):

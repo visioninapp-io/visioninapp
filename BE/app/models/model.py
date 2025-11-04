@@ -23,64 +23,16 @@ class ModelStatus(str, enum.Enum):
 
 
 class Model(Base):
-    __tablename__ = "models"
+    __tablename__ = "model"
 
     id = Column(Integer, primary_key=True, index=True)
-    name = Column(String, unique=True, index=True)
-    description = Column(Text, nullable=True)
-
-    framework = Column(String(50), default=ModelFramework.PYTORCH.value)
-    status = Column(String(50), default=ModelStatus.TRAINING.value)
-
-    version = Column(String, default="1.0")
-    architecture = Column(String)  # YOLOv8, Faster R-CNN, etc.
-
-    file_path = Column(String, nullable=True)
-    file_size = Column(Integer, nullable=True)  # in bytes
-
-    # Training metrics
-    accuracy = Column(Float, nullable=True)
-    precision = Column(Float, nullable=True)
-    recall = Column(Float, nullable=True)
-    f1_score = Column(Float, nullable=True)
-    map_50 = Column(Float, nullable=True)  # mAP@0.5
-    map_50_95 = Column(Float, nullable=True)  # mAP@0.5:0.95
-
-    # Training configuration
-    training_config = Column(JSON, nullable=True)
-    hyperparameters = Column(JSON, nullable=True)
-
-    created_at = Column(DateTime, default=datetime.utcnow)
-    updated_at = Column(DateTime, default=datetime.utcnow, onupdate=datetime.utcnow)
-    created_by = Column(String, index=True)
+    project_id = Column(Integer, ForeignKey("project.id"), nullable=False, index=True, comment="프로젝트ID")
+    name = Column(String(255), nullable=False, comment="모델명")
+    task = Column(Text, nullable=True, comment="작업")  # 'object_detection', 'segmentation'
+    description = Column(Text, nullable=True, comment="설명")
+    created_at = Column(DateTime, nullable=False, default=datetime.utcnow, comment="생성일")
 
     # Relationships
+    project = relationship("Project", back_populates="models")
+    versions = relationship("ModelVersion", back_populates="model", cascade="all, delete-orphan", foreign_keys="ModelVersion.model_id")
     training_job = relationship("TrainingJob", back_populates="model", uselist=False)
-    conversions = relationship("ModelConversion", back_populates="source_model")
-    deployments = relationship("Deployment", back_populates="model")
-    evaluations = relationship("Evaluation", back_populates="model")
-
-
-class ModelConversion(Base):
-    __tablename__ = "model_conversions"
-
-    id = Column(Integer, primary_key=True, index=True)
-    source_model_id = Column(Integer, ForeignKey("models.id"))
-
-    target_framework = Column(String(50))
-    status = Column(String(50), default="pending")  # pending, converting, completed, failed
-
-    optimization_level = Column(String)  # speed, balanced, size
-    precision = Column(String)  # FP32, FP16, INT8
-
-    output_file_path = Column(String, nullable=True)
-    output_file_size = Column(Integer, nullable=True)
-
-    conversion_log = Column(Text, nullable=True)
-    error_message = Column(Text, nullable=True)
-
-    created_at = Column(DateTime, default=datetime.utcnow)
-    completed_at = Column(DateTime, nullable=True)
-
-    # Relationships
-    source_model = relationship("Model", back_populates="conversions")

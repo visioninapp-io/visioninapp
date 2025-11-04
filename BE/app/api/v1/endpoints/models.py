@@ -5,11 +5,11 @@ from pathlib import Path
 import os
 from app.core.database import get_db
 from app.core.auth import get_current_user, get_current_user_dev
-from app.models.model import Model, ModelConversion, ModelStatus
+from app.models.model import Model
+from app.utils.project_helper import get_or_create_default_project
 from app.models.model_artifact import ModelArtifact
 from app.schemas.model import (
-    ModelCreate, ModelUpdate, ModelResponse, ModelListResponse,
-    ModelConversionRequest, ModelConversionResponse
+    ModelCreate, ModelUpdate, ModelResponse, ModelListResponse
 )
 from app.schemas.model_artifact import (
     ModelArtifactResponse, ModelUploadRequest, ModelUploadCompleteRequest
@@ -23,20 +23,15 @@ router = APIRouter()
 async def get_models(
     skip: int = 0,
     limit: int = 100,
-    framework: str = None,
-    status_filter: str = None,
     db: Session = Depends(get_db),
     current_user: dict = Depends(get_current_user_dev)
 ):
     """Get all models for current user"""
-    query = db.query(Model).filter(Model.created_by == current_user["uid"])
-
-    if framework:
-        query = query.filter(Model.framework == framework)
-
-    if status_filter:
-        query = query.filter(Model.status == status_filter)
-
+    # created_by 필드가 없으므로 project 기반으로 필터링
+    from app.utils.project_helper import get_or_create_default_project
+    default_project = get_or_create_default_project(db, current_user["uid"])
+    
+    query = db.query(Model).filter(Model.project_id == default_project.id)
     models = query.offset(skip).limit(limit).all()
     return models
 
@@ -108,9 +103,12 @@ async def create_model(
     if existing:
         raise HTTPException(status_code=400, detail="Model with this name already exists")
 
+    # Get or create default project for user
+    default_project = get_or_create_default_project(db, current_user["uid"])
+
     db_model = Model(
         **model.dict(),
-        created_by=current_user["uid"]
+        project_id=default_project.id
     )
     db.add(db_model)
     db.commit()
@@ -169,69 +167,6 @@ async def delete_model(
     return None
 
 
-@router.post("/convert", response_model=ModelConversionResponse, status_code=status.HTTP_201_CREATED)
-async def convert_model(
-    request: ModelConversionRequest,
-    db: Session = Depends(get_db),
-    current_user: dict = Depends(get_current_user_dev)
-):
-    """Convert model to different format (ONNX, TensorRT, etc.)"""
-    model = db.query(Model).filter(Model.id == request.source_model_id).first()
-    if not model:
-        raise HTTPException(status_code=404, detail="Model not found")
-
-    # Create conversion record
-    conversion = ModelConversion(
-        source_model_id=request.source_model_id,
-        target_framework=request.target_framework,
-        optimization_level=request.optimization_level,
-        precision=request.precision,
-        status="pending"
-    )
-    db.add(conversion)
-    db.commit()
-    db.refresh(conversion)
-
-    # TODO: Implement actual model conversion (async task)
-    # This would use tools like:
-    # - PyTorch -> ONNX: torch.onnx.export()
-    # - ONNX -> TensorRT: trtexec
-    # - TensorFlow -> TFLite, etc.
-
-    return conversion
-
-
-@router.get("/convert/{conversion_id}", response_model=ModelConversionResponse)
-async def get_conversion_status(
-    conversion_id: int,
-    db: Session = Depends(get_db),
-    current_user: dict = Depends(get_current_user_dev)
-):
-    """Get model conversion status"""
-    conversion = db.query(ModelConversion).filter(ModelConversion.id == conversion_id).first()
-    if not conversion:
-        raise HTTPException(status_code=404, detail="Conversion not found")
-    return conversion
-
-
-@router.get("/{model_id}/conversions", response_model=List[ModelConversionResponse])
-async def get_model_conversions(
-    model_id: int,
-    db: Session = Depends(get_db),
-    current_user: dict = Depends(get_current_user_dev)
-):
-    """Get all conversions for a model"""
-    model = db.query(Model).filter(Model.id == model_id).first()
-    if not model:
-        raise HTTPException(status_code=404, detail="Model not found")
-
-    conversions = db.query(ModelConversion).filter(
-        ModelConversion.source_model_id == model_id
-    ).all()
-
-    return conversions
-
-
 @router.post("/{model_id}/presigned-upload")
 async def generate_model_upload_url(
     model_id: int,
@@ -250,10 +185,13 @@ async def generate_model_upload_url(
     1. S3에 파일 업로드 완료
     2. POST /api/v1/models/{model_id}/upload-complete 호출
     """
-    # 모델 존재 및 권한 확인
+    # 모델 존재 및 권한 확인 (project로 확인)
+    from app.utils.project_helper import get_or_create_default_project
+    default_project = get_or_create_default_project(db, current_user["uid"])
+    
     model = db.query(Model).filter(
         Model.id == model_id,
-        Model.created_by == current_user["uid"]
+        Model.project_id == default_project.id
     ).first()
     
     if not model:
@@ -298,10 +236,13 @@ async def confirm_model_upload_complete(
     - 업로드된 파일 정보를 ModelArtifact 테이블에 기록
     - is_primary=True인 경우 기존 primary를 false로 변경
     """
-    # 모델 존재 및 권한 확인
+    # 모델 존재 및 권한 확인 (project로 확인)
+    from app.utils.project_helper import get_or_create_default_project
+    default_project = get_or_create_default_project(db, current_user["uid"])
+    
     model = db.query(Model).filter(
         Model.id == model_id,
-        Model.created_by == current_user["uid"]
+        Model.project_id == default_project.id
     ).first()
     
     if not model:
@@ -312,33 +253,29 @@ async def confirm_model_upload_complete(
         if not presigned_url_service.check_object_exists(request.s3_key):
             raise HTTPException(status_code=404, detail="File not found in S3")
         
-        # is_primary인 경우 기존 primary를 false로 변경
-        if request.is_primary:
-            db.query(ModelArtifact).filter(
-                ModelArtifact.model_id == model_id,
-                ModelArtifact.is_primary == True
-            ).update({"is_primary": False})
+        # ModelVersion 필요 (임시로 첫 번째 버전 사용)
+        from app.models.model_version import ModelVersion
+        model_version = db.query(ModelVersion).filter(
+            ModelVersion.model_id == model_id
+        ).first()
+        
+        if not model_version:
+            raise HTTPException(status_code=404, detail="Model version not found. Please create a model version first.")
         
         # ModelArtifact에 메타데이터 저장
+        # 주의: 실제로는 format, device, precision, storage_uri, sha256, size_bytes 등이 필요
+        # 현재는 임시로 호환성을 위해 기본값 사용
         artifact = ModelArtifact(
-            model_id=model_id,
-            kind=request.kind,
-            version=request.version,
-            s3_key=request.s3_key,
-            file_size=request.file_size,
-            checksum=request.checksum,
-            is_primary=request.is_primary,
-            created_by=current_user["uid"]
+            model_version_id=model_version.id,
+            format=request.kind or "pt",  # kind -> format 매핑
+            device="cpu",  # 기본값
+            precision=1.0,  # 기본값
+            storage_uri=request.s3_key,
+            sha256=request.checksum or "",  # checksum이 없으면 빈 문자열
+            size_bytes=request.file_size
         )
         
         db.add(artifact)
-        
-        # Model 테이블 업데이트 (primary artifact인 경우)
-        if request.is_primary:
-            model.file_path = request.s3_key
-            model.file_size = request.file_size
-            if model.status == ModelStatus.TRAINING:
-                model.status = ModelStatus.COMPLETED
         
         db.commit()
         db.refresh(artifact)
@@ -346,9 +283,8 @@ async def confirm_model_upload_complete(
         return {
             "success": True,
             "artifact_id": artifact.id,
-            "model_id": model_id,
-            "s3_key": artifact.s3_key,
-            "is_primary": artifact.is_primary
+            "model_version_id": model_version.id,
+            "storage_uri": artifact.storage_uri
         }
         
     except HTTPException:
@@ -375,10 +311,19 @@ async def get_model_artifacts(
     if not model:
         raise HTTPException(status_code=404, detail="Model not found")
     
-    # Artifacts 조회
+    # Artifacts 조회 (model_version_id로 조회)
+    from app.models.model_version import ModelVersion
+    model_versions = db.query(ModelVersion).filter(
+        ModelVersion.model_id == model_id
+    ).all()
+    
+    if not model_versions:
+        return []
+    
+    model_version_ids = [mv.id for mv in model_versions]
     artifacts = db.query(ModelArtifact).filter(
-        ModelArtifact.model_id == model_id
-    ).order_by(ModelArtifact.is_primary.desc(), ModelArtifact.created_at.desc()).all()
+        ModelArtifact.model_version_id.in_(model_version_ids)
+    ).order_by(ModelArtifact.created_at.desc()).all()
     
     return artifacts
 
@@ -401,23 +346,29 @@ async def get_artifact_download_url(
     if not artifact:
         raise HTTPException(status_code=404, detail="Artifact not found")
     
-    # 모델 권한 확인
-    model = db.query(Model).filter(
-        Model.id == artifact.model_id,
-        Model.created_by == current_user["uid"]
+    # 모델 권한 확인 (model_version을 통해 확인)
+    from app.models.model_version import ModelVersion
+    from app.utils.project_helper import get_or_create_default_project
+    
+    model_version = db.query(ModelVersion).filter(
+        ModelVersion.id == artifact.model_version_id
     ).first()
     
-    if not model:
+    if not model_version:
+        raise HTTPException(status_code=404, detail="Model version not found")
+    
+    default_project = get_or_create_default_project(db, current_user["uid"])
+    if model_version.model.project_id != default_project.id:
         raise HTTPException(status_code=403, detail="Access denied")
     
     try:
         # 원본 파일명 생성 (모델명_버전.확장자)
-        file_ext = artifact.s3_key.split('.')[-1] if '.' in artifact.s3_key else artifact.kind
-        download_filename = f"{model.name}_v{artifact.version}.{file_ext}"
+        file_ext = artifact.storage_uri.split('.')[-1] if '.' in artifact.storage_uri else artifact.format
+        download_filename = f"{model_version.model.name}_{model_version.version_tag}.{file_ext}"
         
         # Presigned GET URL 생성
         url_data = presigned_url_service.generate_download_url(
-            s3_key=artifact.s3_key,
+            s3_key=artifact.storage_uri,
             expiration=3600,
             filename=download_filename
         )
@@ -425,9 +376,8 @@ async def get_artifact_download_url(
         return {
             "success": True,
             "artifact_id": artifact.id,
-            "model_id": artifact.model_id,
-            "kind": artifact.kind,
-            "version": artifact.version,
+            "model_version_id": artifact.model_version_id,
+            "format": artifact.format,
             "download_url": url_data["download_url"],
             "download_filename": download_filename,
             "expires_in": url_data["expires_in"]
@@ -455,22 +405,29 @@ async def download_model(
     if not model:
         raise HTTPException(status_code=404, detail="Model not found")
     
-    # primary artifact 찾기
-    primary_artifact = db.query(ModelArtifact).filter(
-        ModelArtifact.model_id == model_id,
-        ModelArtifact.is_primary == True
-    ).first()
+    # ModelVersion의 첫 번째 artifact 찾기
+    from app.models.model_version import ModelVersion
+    model_version = db.query(ModelVersion).filter(
+        ModelVersion.model_id == model_id
+    ).order_by(ModelVersion.id.desc()).first()
     
-    if not primary_artifact:
+    if not model_version:
+        raise HTTPException(status_code=404, detail="Model version not found")
+    
+    artifact = db.query(ModelArtifact).filter(
+        ModelArtifact.model_version_id == model_version.id
+    ).order_by(ModelArtifact.created_at.desc()).first()
+    
+    if not artifact:
         raise HTTPException(status_code=404, detail="Model file not available")
     
     # Presigned URL 생성
     try:
-        file_ext = primary_artifact.s3_key.split('.')[-1] if '.' in primary_artifact.s3_key else 'pt'
+        file_ext = artifact.storage_uri.split('.')[-1] if '.' in artifact.storage_uri else artifact.format
         download_filename = f"{model.name}.{file_ext}"
         
         url_data = presigned_url_service.generate_download_url(
-            s3_key=primary_artifact.s3_key,
+            s3_key=artifact.storage_uri,
             expiration=3600,
             filename=download_filename
         )
@@ -478,7 +435,7 @@ async def download_model(
         return {
             "model_id": model.id,
             "name": model.name,
-            "file_path": primary_artifact.s3_key,
+            "storage_uri": artifact.storage_uri,
             "download_url": url_data["download_url"],
             "expires_in": url_data["expires_in"]
         }
@@ -509,13 +466,25 @@ async def predict_with_model(
     if not model:
         raise HTTPException(status_code=404, detail="Model not found")
 
-    # Check if model file exists
-    if not model.file_path:
+    # ModelVersion의 artifact에서 파일 경로 찾기
+    from app.models.model_version import ModelVersion
+    model_version = db.query(ModelVersion).filter(
+        ModelVersion.model_id == model_id
+    ).order_by(ModelVersion.id.desc()).first()
+    
+    if not model_version:
+        raise HTTPException(status_code=404, detail="Model version not found")
+    
+    artifact = db.query(ModelArtifact).filter(
+        ModelArtifact.model_version_id == model_version.id
+    ).order_by(ModelArtifact.created_at.desc()).first()
+    
+    if not artifact:
         raise HTTPException(status_code=404, detail="Model file not available")
 
-    model_path = Path(model.file_path)
+    model_path = Path(artifact.storage_uri)
     if not model_path.exists():
-        raise HTTPException(status_code=404, detail=f"Model file not found at {model.file_path}")
+        raise HTTPException(status_code=404, detail=f"Model file not found at {artifact.storage_uri}")
 
     # Save uploaded image to temporary file
     try:

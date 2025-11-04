@@ -12,33 +12,27 @@ class ClassMetric(BaseModel):
 
 
 class EvaluationCreate(BaseModel):
-    model_id: int
-    name: str
-    description: Optional[str] = None
-    test_dataset_name: Optional[str] = None
-    test_dataset_size: int
+    """Evaluation 생성 스키마"""
+    model_version_id: int = Field(..., description="모델 버전 ID")
+    f1_score: float = Field(..., ge=0, le=1, description="조화평균")
+    precision: float = Field(..., ge=0, le=1, description="정밀도")
+    recall: float = Field(..., ge=0, le=1, description="재현율")
+    mAP_50: float = Field(..., ge=0, le=1, description="평균정확도평균50")
+    mAP_50_95: float = Field(..., ge=0, le=1, description="평균정확도평균95")
 
     class Config:
         protected_namespaces = ()
 
 
 class EvaluationResponse(BaseModel):
+    """Evaluation 응답 스키마"""
     id: int
-    model_id: int
-    name: str
-    description: Optional[str]
+    model_version_id: int
+    f1_score: float
     precision: float
     recall: float
-    f1_score: float
-    map_50: float
-    map_50_95: Optional[float]
-    class_metrics: List[Dict[str, Any]]
-    confusion_matrix: Optional[Dict[str, Any]]
-    test_dataset_size: int
-    test_dataset_name: Optional[str]
-    comparison_data: Optional[Dict[str, Any]]
-    created_at: datetime
-    created_by: str
+    mAP_50: float
+    mAP_50_95: float
 
     class Config:
         from_attributes = True

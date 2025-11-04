@@ -15,18 +15,18 @@ class TrainingStatus(str, enum.Enum):
 
 
 class TrainingJob(Base):
-    __tablename__ = "training_jobs"
+    __tablename__ = "training_job"
 
     id = Column(Integer, primary_key=True, index=True)
-    name = Column(String, unique=True, index=True)
+    name = Column(String(255), unique=True, index=True)
 
-    dataset_id = Column(Integer, ForeignKey("datasets.id"))
-    model_id = Column(Integer, ForeignKey("models.id"), nullable=True)
+    dataset_id = Column(Integer, ForeignKey("dataset.id"))
+    model_id = Column(Integer, ForeignKey("model.id"), nullable=True)
 
     status = Column(String(50), default=TrainingStatus.PENDING.value)
 
     # Training configuration
-    architecture = Column(String)  # YOLOv8, Faster R-CNN, etc.
+    architecture = Column(String(100))  # YOLOv8, Faster R-CNN, etc.
     hyperparameters = Column(JSON)  # epochs, batch_size, learning_rate, etc.
 
     # Progress tracking
@@ -52,34 +52,8 @@ class TrainingJob(Base):
     error_message = Column(Text, nullable=True)
 
     created_at = Column(DateTime, default=datetime.utcnow)
-    created_by = Column(String, index=True)
+    created_by = Column(String(100), index=True)
 
     # Relationships
     dataset = relationship("Dataset", back_populates="training_jobs")
     model = relationship("Model", back_populates="training_job")
-
-
-class TrainingMetric(Base):
-    __tablename__ = "training_metrics"
-
-    id = Column(Integer, primary_key=True, index=True)
-    training_job_id = Column(Integer, ForeignKey("training_jobs.id"))
-
-    epoch = Column(Integer)
-    step = Column(Integer, nullable=True)
-
-    # Loss metrics
-    train_loss = Column(Float)
-    val_loss = Column(Float, nullable=True)
-
-    # Performance metrics
-    train_accuracy = Column(Float, nullable=True)
-    val_accuracy = Column(Float, nullable=True)
-
-    # Learning rate
-    learning_rate = Column(Float, nullable=True)
-
-    # Additional metrics
-    other_metrics = Column(JSON, nullable=True)
-
-    timestamp = Column(DateTime, default=datetime.utcnow)

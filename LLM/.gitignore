@@ -11,7 +11,7 @@ __pycache__/
 .env
 
 # ── Model / data artifacts ───────────────────────────
-models/*/
+runs/yolo-autolabel-trainer/20251030_111345_fc1e30models/*/
 !models/            # 폴더 자체는 남기고 하위만 무시
 
 data/datasets/*/

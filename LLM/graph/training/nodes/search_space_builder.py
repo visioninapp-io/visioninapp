@@ -137,6 +137,17 @@ def search_space_builder(state: TrainState) -> TrainState:
     # 단일 시도 기본값(훈련 섹션)
     defaults = _defaults_from_train_cfg(cfg)
 
+    # overrides (fixed)
+    overrides = (state.train_overrides or {})
+    if overrides:
+        # 핵심 키들만 우선 병합, 필요 시 확장 가능
+        for k in ["optimizer", "epochs", "batch", "imgsz", "workers",
+                  "lr0", "lrf", "weight_decay", "momentum",
+                  "warmup_epochs", "warmup_bias_lr", "augment",
+                  "mosaic", "mixup", "amp", "patience", "model_name"]:
+            if k in overrides and overrides[k] is not None:
+                defaults[k] = overrides[k]
+
     # 정밀도/디바이스는 init_context에서 결정 → 참고용으로 기록
     ctx = state.context or {}
     device = ctx.get("device", "cpu")

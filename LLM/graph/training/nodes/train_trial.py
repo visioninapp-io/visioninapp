@@ -154,6 +154,19 @@ def train_trial(state: TrainState) -> TrainState:
         "save": True,
         # AMP 관리 (버전에 따라 'amp'/'half'/'amp' 키가 다를 수 있어 try로)
     }
+    # train_trial.py 내부, train_args 만든 뒤에 이어서:
+    AUG_KEYS = [
+        "augment", "mosaic", "mixup", "copy_paste",
+        "fliplr", "flipud",
+        "hsv_h", "hsv_s", "hsv_v",
+        "degrees", "translate", "scale", "shear", "perspective",
+        # 필요시 확장: "erasing", "blur", ...
+    ]
+    for k in AUG_KEYS:
+        if k in params:  # params = _merge_train_params(state) 결과
+            train_args[k] = params[k]
+
+    print("[train_trial] train_args: ", json.dumps(train_args, indent=2, ensure_ascii=False))
 
     # AMP/precision 힌트
     if amp:

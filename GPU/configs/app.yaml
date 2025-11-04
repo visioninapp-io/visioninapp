@@ -1,0 +1,17 @@
+paths:
+  data_root: ${LOCAL_DATA_ROOT:/data}
+  models_root: ${LOCAL_MODELS_ROOT:/models}
+
+mq:
+  exchanges:
+    cmd: jobs.cmd
+    events: jobs.events
+  queues:
+    train: gpu.train.q
+    onnx:  gpu.onnx.q
+    trt:   gpu.trt.q
+
+train_defaults:
+  epochs: 100
+  imgsz: 640
+  batch: 16

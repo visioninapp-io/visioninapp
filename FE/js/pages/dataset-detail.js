@@ -44,17 +44,12 @@ class DatasetDetailPage {
             const images = await apiService.getDatasetImages(this.datasetId);
             console.log('Received images:', images);
 
-            // Add base URL for image paths
-            this.images = images.map(img => {
-                // file_path format: "datasets/1/image.jpg"
-                const imageUrl = `http://localhost:8000/uploads/${img.file_path}`;
-                console.log('Image URL:', imageUrl);
-                return {
-                    ...img,
-                    file_url: imageUrl
-                };
-            });
-            console.log('Processed images with URLs:', this.images);
+            // Store images without file_url (will be loaded on demand)
+            this.images = images.map(img => ({
+                ...img,
+                file_url: null // Will be loaded via presigned URL
+            }));
+            console.log('Processed images:', this.images);
         } catch (error) {
             console.error('Error loading images:', error);
             this.images = [];
@@ -268,15 +263,20 @@ class DatasetDetailPage {
             `;
         }
 
+        // Schedule loading of presigned URLs after render
+        setTimeout(() => this.loadImageUrlsForGallery(pageImages), 0);
+
         return `
             <div class="row g-3" id="image-gallery">
                 ${pageImages.map(image => `
                     <div class="col-md-4 col-lg-3">
                         <div class="card h-100 hover-shadow" style="cursor: pointer;"
                              onclick="viewImage(${image.id})">
-                            <img src="${image.file_url}" class="card-img-top" alt="${image.filename}"
+                            <img id="gallery-img-${image.id}"
+                                 src="data:image/svg+xml;base64,PHN2ZyB3aWR0aD0iMjAwIiBoZWlnaHQ9IjIwMCIgeG1sbnM9Imh0dHA6Ly93d3cudzMub3JnLzIwMDAvc3ZnIj48cmVjdCB3aWR0aD0iMjAwIiBoZWlnaHQ9IjIwMCIgZmlsbD0iI2YwZjBmMCIvPjx0ZXh0IHg9IjUwJSIgeT0iNTAlIiBmb250LXNpemU9IjE0IiBmaWxsPSIjOTk5IiB0ZXh0LWFuY2hvcj0ibWlkZGxlIiBkeT0iLjNlbSI+TG9hZGluZy4uLjwvdGV4dD48L3N2Zz4="
+                                 class="card-img-top" alt="${image.filename}"
                                  style="height: 200px; object-fit: cover;"
-                                 onerror="this.src='data:image/svg+xml;base64,PHN2ZyB3aWR0aD0iMjAwIiBoZWlnaHQ9IjIwMCIgeG1sbnM9Imh0dHA6Ly93d3cudzMub3JnLzIwMDAvc3ZnIj48cmVjdCB3aWR0aD0iMjAwIiBoZWlnaHQ9IjIwMCIgZmlsbD0iI2VlZSIvPjx0ZXh0IHg9IjUwJSIgeT0iNTAlIiBmb250LXNpemU9IjE4IiBmaWxsPSIjOTk5IiB0ZXh0LWFuY2hvcj0ibWlkZGxlIiBkeT0iLjNlbSI+SW1hZ2UgTm90IEZvdW5kPC90ZXh0Pjwvc3ZnPg==';">
+                                 data-asset-id="${image.id}">
                             <div class="card-body p-2">
                                 <p class="small mb-1 text-truncate" title="${image.filename}">${image.filename}</p>
                                 <div class="d-flex justify-content-between align-items-center">
@@ -504,6 +504,37 @@ class DatasetDetailPage {
         this.updateGallery();
     }
 
+    async loadImageUrlsForGallery(images) {
+        if (!images || images.length === 0) return;
+
+        console.log(`[DatasetDetail] Loading presigned URLs for ${images.length} images...`);
+
+        // Load URLs in parallel
+        const urlPromises = images.map(async (image) => {
+            try {
+                const response = await apiService.get(`/datasets/assets/${image.id}/presigned-download`);
+
+                if (response && response.download_url) {
+                    const imgElement = document.getElementById(`gallery-img-${image.id}`);
+                    if (imgElement) {
+                        imgElement.src = response.download_url;
+                        // Store URL in image object for later use (e.g., in modal)
+                        image.file_url = response.download_url;
+                    }
+                }
+            } catch (error) {
+                console.error(`[DatasetDetail] Failed to load URL for image ${image.id}:`, error);
+                const imgElement = document.getElementById(`gallery-img-${image.id}`);
+                if (imgElement) {
+                    imgElement.src = 'data:image/svg+xml;base64,PHN2ZyB3aWR0aD0iMjAwIiBoZWlnaHQ9IjIwMCIgeG1sbnM9Imh0dHA6Ly93d3cudzMub3JnLzIwMDAvc3ZnIj48cmVjdCB3aWR0aD0iMjAwIiBoZWlnaHQ9IjIwMCIgZmlsbD0iI2VlZSIvPjx0ZXh0IHg9IjUwJSIgeT0iNTAlIiBmb250LXNpemU9IjE0IiBmaWxsPSIjZGQwMDAwIiB0ZXh0LWFuY2hvcj0ibWlkZGxlIiBkeT0iLjNlbSI+TG9hZCBGYWlsZWQ8L3RleHQ+PC9zdmc+';
+                }
+            }
+        });
+
+        await Promise.all(urlPromises);
+        console.log('[DatasetDetail] All gallery image URLs loaded');
+    }
+
     updateGallery() {
         const gallery = document.getElementById('image-gallery');
         if (gallery) {
@@ -570,7 +601,7 @@ async function viewImage(imageId) {
     }, 100);
 }
 
-function drawImageWithAnnotations(imageData, annotations) {
+async function drawImageWithAnnotations(imageData, annotations) {
     console.log('[DrawImage] Drawing image with annotations');
     const canvas = document.getElementById('annotation-canvas');
     if (!canvas) {
@@ -633,7 +664,27 @@ function drawImageWithAnnotations(imageData, annotations) {
         showToast('Failed to load image', 'error');
     };
 
-    img.src = `http://localhost:8000/${imageData.file_path}`;
+    // Load image from presigned URL
+    try {
+        // Check if we already have the URL cached
+        if (imageData.file_url) {
+            img.src = imageData.file_url;
+        } else {
+            // Load presigned URL
+            const response = await apiService.get(`/datasets/assets/${imageData.id}/presigned-download`);
+            if (response && response.download_url) {
+                img.src = response.download_url;
+                // Cache the URL
+                imageData.file_url = response.download_url;
+            } else {
+                console.error('[DrawImage] No download URL available');
+                showToast('No image URL available', 'error');
+            }
+        }
+    } catch (error) {
+        console.error('[DrawImage] Failed to get presigned URL:', error);
+        showToast('Failed to load image URL', 'error');
+    }
 }
 
 function getColorForClass(classId) {

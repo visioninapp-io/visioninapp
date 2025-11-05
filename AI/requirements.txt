@@ -1,4 +1,3 @@
-<<<<<<< HEAD
 # AI Service Requirements
 # For GPU server - YOLO training and inference
 
@@ -24,7 +23,3 @@ pyyaml==6.0.1
 
 # Optional but recommended
 gpustat==1.1  # GPU monitoring
-=======
-ultralytics>=8.2.0
-
->>>>>>> feature/llm-pipeline

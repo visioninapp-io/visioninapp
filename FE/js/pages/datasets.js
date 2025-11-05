@@ -48,6 +48,12 @@ class DatasetsPage {
         if (app) {
             app.innerHTML = this.render();
             this.attachEventListeners();
+
+            // Load presigned URLs for images after rendering
+            if (this.datasetImages.length > 0) {
+                console.log('[DatasetsPage] Loading presigned URLs after initial render...');
+                this.loadImageUrls();
+            }
         }
     }
 
@@ -238,7 +244,7 @@ class DatasetsPage {
                                             '<option value="">No datasets available</option>' :
                                             this.datasets.map(dataset => `
                                                 <option value="${dataset.id}" ${this.selectedDataset && this.selectedDataset.id === dataset.id ? 'selected' : ''}>
-                                                    ${dataset.name} (${dataset.total_images || 0} images)
+                                                    ${dataset.name} (${dataset.total_assets || dataset.total_images || 0} images)
                                                 </option>
                                             `).join('')
                                         }
@@ -261,6 +267,9 @@ class DatasetsPage {
                                         </button>
                                         <button class="btn btn-success flex-fill" onclick="window.currentPageInstance.triggerAutoAnnotate()" ${!this.selectedDataset ? 'disabled' : ''}>
                                             <i class="bi bi-sparkles me-1"></i> Auto-Annotate
+                                        </button>
+                                        <button class="btn btn-warning flex-fill" onclick="window.currentPageInstance.triggerSelfAnnotate()" ${!this.selectedDataset ? 'disabled' : ''}>
+                                            <i class="bi bi-pencil-square me-1"></i> Self-Annotate
                                         </button>
                                     </div>
                                 </div>
@@ -427,16 +436,17 @@ class DatasetsPage {
     }
 
     renderImageCard(image) {
-        const imageUrl = `http://localhost:8000/${image.file_path}`;
         const isAnnotated = image.is_annotated;
+        const imageId = `image-${image.id}`;
 
         return `
             <div class="col-md-4 col-lg-3">
                 <div class="card border ${isAnnotated ? 'border-success' : ''} hover-shadow">
                     <div class="position-relative">
-                        <img src="${imageUrl}" class="card-img-top" alt="${image.filename}"
+                        <img id="${imageId}" class="card-img-top" alt="${image.filename}"
                              style="height: 200px; object-fit: cover;"
-                             onerror="this.src='https://via.placeholder.com/300x200?text=Image+Not+Found'">
+                             src="https://via.placeholder.com/300x200?text=Loading..."
+                             data-asset-id="${image.id}">
                         ${isAnnotated ? `
                             <span class="position-absolute top-0 end-0 m-2">
                                 <span class="badge bg-success">
@@ -527,7 +537,39 @@ class DatasetsPage {
         if (container) {
             console.log('[DatasetsPage] Updating image grid...');
             container.innerHTML = this.renderImageGrid();
+
+            // Load presigned URLs for all images
+            this.loadImageUrls();
         }
+    }
+
+    async loadImageUrls() {
+        if (this.datasetImages.length === 0) return;
+
+        console.log(`[DatasetsPage] Loading presigned URLs for ${this.datasetImages.length} images...`);
+
+        // Load URLs in parallel
+        const urlPromises = this.datasetImages.map(async (image) => {
+            try {
+                const response = await apiService.get(`/datasets/assets/${image.id}/presigned-download`);
+
+                if (response && response.download_url) {
+                    const imgElement = document.getElementById(`image-${image.id}`);
+                    if (imgElement) {
+                        imgElement.src = response.download_url;
+                    }
+                }
+            } catch (error) {
+                console.error(`[DatasetsPage] Failed to load URL for image ${image.id}:`, error);
+                const imgElement = document.getElementById(`image-${image.id}`);
+                if (imgElement) {
+                    imgElement.src = 'https://via.placeholder.com/300x200?text=Load+Failed';
+                }
+            }
+        });
+
+        await Promise.all(urlPromises);
+        console.log('[DatasetsPage] All image URLs loaded');
     }
 
     async refreshImages() {
@@ -545,6 +587,22 @@ class DatasetsPage {
 
         console.log(`[DatasetsPage] Navigating to auto-annotate for dataset ${this.selectedDataset.id}...`);
         navigateToAutoAnnotate(this.selectedDataset.id);
+    }
+
+    async triggerSelfAnnotate() {
+        if (!this.selectedDataset) {
+            showToast('Please select a dataset first', 'error');
+            return;
+        }
+
+        console.log(`[DatasetsPage] Opening self-annotation modal for dataset ${this.selectedDataset.id}...`);
+        // Show self-annotation modal
+        if (typeof showSelfAnnotationModal === 'function') {
+            showSelfAnnotationModal(this.selectedDataset.id, this.selectedDataset.name);
+        } else {
+            console.error('[DatasetsPage] showSelfAnnotationModal function not found');
+            showToast('Self-annotation feature not loaded', 'error');
+        }
     }
 
     async reloadDatasets(datasetIdToSelect = null) {

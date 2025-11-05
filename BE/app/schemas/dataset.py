@@ -16,6 +16,9 @@ class AnnotationCreate(BaseModel):
     confidence: float = Field(1.0, ge=0, le=1, description="모델 신뢰도")
     annotator_name: Optional[str] = Field("system", description="라벨러")
 
+    class Config:
+        protected_namespaces = ()
+
 
 class AnnotationResponse(BaseModel):
     """Annotation 응답 스키마"""
@@ -33,6 +36,7 @@ class AnnotationResponse(BaseModel):
 
     class Config:
         from_attributes = True
+        protected_namespaces = ()
 
 
 class DatasetBase(BaseModel):

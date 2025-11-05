@@ -15,6 +15,7 @@ from app.models.label_class import LabelClass
 from app.utils.project_helper import get_or_create_default_project
 from app.utils.dataset_helper import (
     get_or_create_dataset_version,
+    create_new_dataset_version,
     get_or_create_dataset_split,
     get_latest_dataset_version,
     get_assets_from_dataset,
@@ -440,10 +441,23 @@ async def generate_presigned_upload_urls(
         db.refresh(dataset)
     
     try:
+        # Get current asset count to determine starting number
+        # This ensures sequential numbering: dataset_name_1, dataset_name_2, etc.
+        assets, total_count = get_assets_from_dataset(
+            db=db,
+            dataset_id=dataset.id,
+            asset_type=None,  # All assets regardless of type
+            page=1,
+            limit=100000  # Get all for counting
+        )
+        start_number = total_count + 1
+        
         # Generate presigned URLs
         urls = presigned_url_service.generate_batch_upload_urls(
             dataset_id=dataset.id,
+            dataset_name=dataset.name,
             filenames=request.filenames,
+            start_number=start_number,
             content_type=request.content_type,
             expiration=1800  # 30분
         )
@@ -488,7 +502,9 @@ async def upload_images_to_dataset(
         successful_uploads, failed_uploads = await file_storage.save_images_batch(files, dataset.id)
 
         # DatasetVersion 및 Split 생성/조회
-        dataset_version = get_or_create_dataset_version(db, dataset.id)
+        # 에셋 추가 시 새 버전 생성
+        from app.utils.dataset_helper import create_new_dataset_version
+        dataset_version = create_new_dataset_version(db, dataset.id)
         dataset_split = get_or_create_dataset_split(
             db,
             dataset_version.id,
@@ -503,8 +519,12 @@ async def upload_images_to_dataset(
             # SHA256 계산
             sha256_hash = calculate_sha256_from_s3(storage_uri)
             
+            # S3 파일명 추출 (datasets/포트홀/images/포트홀_1.jpg → 포트홀_1.jpg)
+            s3_filename = storage_uri.split('/')[-1] if '/' in storage_uri else storage_uri
+            
             asset = Asset(
                 dataset_split_id=dataset_split.id,
+                name=s3_filename,  # ERD의 에셋명 필드 (S3 파일명)
                 type=AssetType.IMAGE,
                 storage_uri=storage_uri,
                 sha256=sha256_hash,
@@ -1114,7 +1134,8 @@ async def confirm_upload_complete_batch(
         raise HTTPException(status_code=404, detail="Dataset not found")
     
     # DatasetVersion 및 Split 생성/조회
-    dataset_version = get_or_create_dataset_version(db, dataset_id)
+    # 에셋 추가 시 새 버전 생성
+    dataset_version = create_new_dataset_version(db, dataset_id)
     dataset_split = get_or_create_dataset_split(
         db, 
         dataset_version.id, 
@@ -1148,21 +1169,26 @@ async def confirm_upload_complete_batch(
                 # SHA256 계산
                 sha256_hash = calculate_sha256_from_s3(s3_key)
                 
-                # 이미 존재하는 Asset 확인 (sha256 기준)
+                # 같은 dataset_split 내에서 이미 존재하는 Asset 확인 (sha256 기준)
                 existing_asset = db.query(Asset).filter(
+                    Asset.dataset_split_id == dataset_split.id,
                     Asset.sha256 == sha256_hash
                 ).first()
                 
                 if existing_asset:
-                    # 이미 존재하는 경우 기존 Asset 사용
+                    # 같은 split 내에 이미 존재하는 경우 기존 Asset 사용
                     asset = existing_asset
-                    # storage_uri가 다를 수 있으므로 업데이트 (같은 파일이 다른 경로에 있을 수 있음)
+                    # storage_uri가 다를 수 있으므로 업데이트
                     if asset.storage_uri != s3_key:
                         asset.storage_uri = s3_key
                 else:
-                    # 새 Asset 생성
+                    # S3 파일명 추출 (datasets/포트홀/images/포트홀_1.jpg → 포트홀_1.jpg)
+                    s3_filename = s3_key.split('/')[-1] if '/' in s3_key else s3_key
+                    
+                    # 새 Asset 생성 (ERD 기준: name 필드에 에셋명 저장)
                     asset = Asset(
                         dataset_split_id=dataset_split.id,
+                        name=s3_filename,  # ERD의 에셋명 필드 (S3 파일명)
                         type=asset_type,
                         storage_uri=s3_key,
                         sha256=sha256_hash,
@@ -1260,12 +1286,14 @@ async def get_dataset_assets(
     # DatasetAssetResponse 형식으로 변환 (API 호환성)
     result = []
     for asset in assets:
-        filename = asset.storage_uri.split('/')[-1] if asset.storage_uri else f"asset_{asset.id}"
+        # 에셋명 사용 (ERD의 name 필드)
+        asset_name = asset.name if asset.name else (asset.storage_uri.split('/')[-1] if asset.storage_uri else f"asset_{asset.id}")
+        
         result.append({
             "id": asset.id,
             "dataset_id": dataset_id,
             "kind": asset.type.value,
-            "original_filename": filename,
+            "original_filename": asset_name,  # API 호환성을 위해 original_filename 필드명 유지
             "s3_key": asset.storage_uri,
             "file_size": asset.bytes,
             "width": asset.width,
@@ -1313,8 +1341,8 @@ async def get_asset_download_url(
         raise HTTPException(status_code=404, detail="Dataset not found")
     
     try:
-        # 파일명 추출
-        filename = asset.storage_uri.split('/')[-1] if asset.storage_uri else f"asset_{asset.id}"
+        # 에셋명 사용 (ERD의 name 필드)
+        filename = asset.name if asset.name else (asset.storage_uri.split('/')[-1] if asset.storage_uri else f"asset_{asset.id}")
         
         # Presigned GET URL 생성
         url_data = presigned_url_service.generate_download_url(
@@ -1389,7 +1417,9 @@ async def generate_presigned_download_urls_batch(
             continue
         
         try:
-            filename = asset.storage_uri.split('/')[-1] if asset.storage_uri else f"asset_{asset.id}"
+            # 에셋명 사용 (ERD의 name 필드)
+            filename = asset.name if asset.name else (asset.storage_uri.split('/')[-1] if asset.storage_uri else f"asset_{asset.id}")
+            
             url_data = presigned_url_service.generate_download_url(
                 s3_key=asset.storage_uri,
                 filename=filename,

@@ -101,6 +101,56 @@ def get_latest_dataset_version(db: Session, dataset_id: int) -> Optional[Dataset
     ).order_by(DatasetVersion.created_at.desc()).first()
 
 
+def create_new_dataset_version(
+    db: Session,
+    dataset_id: int,
+    version_tag: Optional[str] = None
+) -> DatasetVersion:
+    """에셋 추가 시 새 버전 생성"""
+    # Dataset 조회
+    dataset = db.query(Dataset).filter(Dataset.id == dataset_id).first()
+    if not dataset:
+        raise ValueError(f"Dataset {dataset_id} not found")
+    
+    # 버전 태그가 지정되지 않으면 자동 생성
+    if version_tag is None:
+        # 최신 버전 찾기
+        latest_version = get_latest_dataset_version(db, dataset_id)
+        
+        if latest_version:
+            # 버전 태그에서 숫자 추출 (v1.0 -> 1, v2.0 -> 2)
+            import re
+            match = re.search(r'v?(\d+)', latest_version.version_tag)
+            if match:
+                version_num = int(match.group(1))
+                version_tag = f"v{version_num + 1}.0"
+            else:
+                # 숫자를 찾을 수 없으면 기본값
+                version_tag = "v2.0"
+        else:
+            # 첫 번째 버전
+            version_tag = "v1.0"
+    
+    # 온톨로지 버전 찾기 또는 생성
+    ontology = get_or_create_label_ontology_version(
+        db, 
+        dataset.project_id, 
+        version_tag
+    )
+    
+    # 새 DatasetVersion 생성
+    version = DatasetVersion(
+        dataset_id=dataset_id,
+        ontology_version_id=ontology.id,
+        version_tag=version_tag,
+        is_frozen=False
+    )
+    db.add(version)
+    db.flush()
+    
+    return version
+
+
 def format_asset_as_image(asset: Asset) -> dict:
     """Asset을 기존 Image API 응답 형식으로 변환 (하위 호환)"""
     filename = asset.storage_uri.split('/')[-1] if asset.storage_uri else f"asset_{asset.id}"

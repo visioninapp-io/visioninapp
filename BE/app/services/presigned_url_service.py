@@ -8,6 +8,31 @@ from app.utils.content_type_detector import detect_content_type
 from typing import Optional, Dict
 import uuid
 import time
+import re
+
+
+def sanitize_dataset_name_for_s3(name: str) -> str:
+    """
+    데이터셋 이름을 S3 key에 사용 가능하도록 정리
+    
+    Args:
+        name: 원본 데이터셋 이름
+        
+    Returns:
+        S3 key에 사용 가능한 정리된 이름
+    """
+    # 공백을 언더스코어로 변경
+    name = name.replace(' ', '_')
+    # 특수문자를 언더스코어로 변경 (알파벳, 숫자, 하이픈, 점, 언더스코어만 허용)
+    name = re.sub(r'[^\w\-.]', '_', name)
+    # 연속된 언더스코어를 하나로
+    name = re.sub(r'_+', '_', name)
+    # 양쪽 언더스코어 제거
+    name = name.strip('_')
+    # 비어있으면 기본값
+    if not name:
+        name = 'dataset'
+    return name
 
 
 class PresignedURLService:
@@ -34,8 +59,10 @@ class PresignedURLService:
     
     def generate_upload_url(
         self, 
-        dataset_id: int, 
-        filename: str, 
+        dataset_id: int,
+        dataset_name: str,
+        filename: str,
+        asset_number: int,
         content_type: Optional[str] = None,
         expiration: int = 3600,
         asset_kind: Optional[str] = None
@@ -45,7 +72,9 @@ class PresignedURLService:
         
         Args:
             dataset_id: Dataset ID.
+            dataset_name: Dataset name (used in S3 path).
             filename: Original filename.
+            asset_number: Sequential number for the asset (e.g., 1, 2, 3...).
             content_type: MIME type (auto-detected if None).
             expiration: URL expiration in seconds.
             asset_kind: "image" | "video" (auto-detected from content_type if None).
@@ -66,15 +95,20 @@ class PresignedURLService:
             else:
                 asset_kind = 'image'
         
-        # Generate unique filename
+        # Get file extension
         file_ext = filename.split('.')[-1].lower() if '.' in filename else 'jpg'
-        unique_filename = f"{uuid.uuid4()}.{file_ext}"
         
-        # Build S3 key based on asset kind
+        # Sanitize dataset name for S3 path
+        safe_dataset_name = sanitize_dataset_name_for_s3(dataset_name)
+        
+        # Generate filename: {dataset_name}_{number}.{ext}
+        unique_filename = f"{safe_dataset_name}_{asset_number}.{file_ext}"
+        
+        # Build S3 key based on asset kind (format: datasets/{name}/images or videos/)
         if asset_kind == 'video':
-            s3_key = f"datasets/dataset_{dataset_id}/videos/{unique_filename}"
+            s3_key = f"datasets/{safe_dataset_name}/videos/{unique_filename}"
         else:
-            s3_key = f"datasets/dataset_{dataset_id}/images/{unique_filename}"
+            s3_key = f"datasets/{safe_dataset_name}/images/{unique_filename}"
         
         try:
             # Generate presigned URL
@@ -95,7 +129,7 @@ class PresignedURLService:
                 "upload_url": presigned_url,
                 "s3_key": s3_key,
                 "unique_filename": unique_filename,
-                "original_filename": filename,
+                "original_filename": unique_filename,  # S3 파일명과 동일하게 반환
                 "kind": asset_kind,
                 "content_type": content_type,
                 "expires_in": expiration,
@@ -160,7 +194,9 @@ class PresignedURLService:
     def generate_batch_upload_urls(
         self,
         dataset_id: int,
+        dataset_name: str,
         filenames: list[str],
+        start_number: int = 1,
         content_type: Optional[str] = None,
         expiration: int = 3600
     ) -> list[Dict]:
@@ -169,7 +205,9 @@ class PresignedURLService:
         
         Args:
             dataset_id: Dataset ID.
+            dataset_name: Dataset name (used in S3 path).
             filenames: List of original filenames.
+            start_number: Starting number for sequential filenames (default: 1).
             content_type: Optional MIME type (auto-detected per file when None).
             expiration: URL expiration in seconds.
             
@@ -179,6 +217,8 @@ class PresignedURLService:
         start_time = time.time()
         
         results = []
+        current_number = start_number
+        
         for filename in filenames:
             try:
                 # Detect per-file content type
@@ -186,12 +226,15 @@ class PresignedURLService:
                 
                 url_data = self.generate_upload_url(
                     dataset_id=dataset_id,
+                    dataset_name=dataset_name,
                     filename=filename,
+                    asset_number=current_number,
                     content_type=file_content_type,
                     expiration=expiration,
                     asset_kind=None  # auto-detect from content_type
                 )
                 results.append(url_data)
+                current_number += 1
             except Exception as e:
                 results.append({
                     "original_filename": filename,

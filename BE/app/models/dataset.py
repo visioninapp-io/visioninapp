@@ -1,4 +1,4 @@
-from sqlalchemy import Column, Integer, String, DateTime, ForeignKey, Enum, Float, JSON, Text, Boolean
+from sqlalchemy import Column, Integer, String, DateTime, ForeignKey, Enum, Float, JSON, Text, Boolean, UniqueConstraint
 from sqlalchemy.orm import relationship
 from datetime import datetime
 import enum
@@ -26,6 +26,11 @@ class Dataset(Base):
     project = relationship("Project", back_populates="datasets")
     training_jobs = relationship("TrainingJob", back_populates="dataset")
     versions = relationship("DatasetVersion", back_populates="dataset", cascade="all, delete-orphan")
+    
+    # Constraints
+    __table_args__ = (
+        UniqueConstraint('project_id', 'name', name='uq_dataset_project_name'),
+    )
 
 
 class Annotation(Base):

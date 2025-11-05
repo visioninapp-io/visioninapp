@@ -23,7 +23,7 @@ router = APIRouter()
 @router.get("/", response_model=List[TrainingJobResponse])
 async def get_training_jobs(
     skip: int = 0,
-    limit: int = 100,
+    limit: int = 10000,
     status_filter: str = None,
     db: Session = Depends(get_db),
     current_user: dict = Depends(get_current_user_dev)

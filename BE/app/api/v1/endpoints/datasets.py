@@ -132,7 +132,7 @@ async def get_dataset_stats(
 @router.get("/", response_model=List[DatasetResponse])
 async def get_datasets(
     skip: int = 0,
-    limit: int = 100,
+    limit: int = 10000,
     db: Session = Depends(get_db),
     current_user: dict = Depends(get_current_user_dev)
 ):
@@ -324,7 +324,7 @@ async def delete_dataset(
 async def get_dataset_images(
     dataset_id: int,
     page: int = 1,
-    limit: int = 1000,
+    limit: int = 10000,
     db: Session = Depends(get_db),
     current_user: dict = Depends(get_current_user_dev)
 ):
@@ -1249,7 +1249,7 @@ async def get_dataset_assets(
     dataset_id: int,
     kind: Optional[str] = None,  # "image" | "video" | None (all)
     page: int = 1,
-    limit: int = 100,
+    limit: int = 10000,
     db: Session = Depends(get_db),
     current_user: dict = Depends(get_current_user_dev)
 ):
@@ -1448,3 +1448,164 @@ async def generate_presigned_download_urls_batch(
         "failed_count": len(failed),
         "failed": failed
     }
+
+
+# ========== SELF-ANNOTATION LABEL CLASS APIs ==========
+
+@router.get("/{dataset_id}/label-classes")
+async def get_dataset_label_classes(
+    dataset_id: int,
+    db: Session = Depends(get_db),
+    current_user: dict = Depends(get_current_user_dev)
+):
+    """Get all label classes for a dataset (for self-annotation)"""
+    from app.models.label_ontology_version import LabelOntologyVersion
+
+    # Get dataset
+    dataset = db.query(Dataset).filter(Dataset.id == dataset_id).first()
+    if not dataset:
+        raise HTTPException(status_code=404, detail="Dataset not found")
+
+    # Get project's default ontology version
+    # Try to find existing ontology version for this project
+    ontology_version = db.query(LabelOntologyVersion).filter(
+        LabelOntologyVersion.project_id == dataset.project_id
+    ).first()
+
+    # If no ontology version exists, create a default one
+    if not ontology_version:
+        ontology_version = LabelOntologyVersion(
+            project_id=dataset.project_id,
+            version_tag="v1.0",
+            description="Default ontology version for self-annotation"
+        )
+        db.add(ontology_version)
+        db.commit()
+        db.refresh(ontology_version)
+
+    # Get label classes for this ontology version
+    label_classes = db.query(LabelClass).filter(
+        LabelClass.ontology_version_id == ontology_version.id
+    ).all()
+
+    return label_classes
+
+
+@router.post("/{dataset_id}/label-classes", status_code=status.HTTP_201_CREATED)
+async def create_label_class(
+    dataset_id: int,
+    label_class_data: dict = Body(...),
+    db: Session = Depends(get_db),
+    current_user: dict = Depends(get_current_user_dev)
+):
+    """Create a new label class for a dataset (for self-annotation)"""
+    from app.models.label_ontology_version import LabelOntologyVersion
+
+    # Get dataset
+    dataset = db.query(Dataset).filter(Dataset.id == dataset_id).first()
+    if not dataset:
+        raise HTTPException(status_code=404, detail="Dataset not found")
+
+    # Get or create project's default ontology version
+    ontology_version = db.query(LabelOntologyVersion).filter(
+        LabelOntologyVersion.project_id == dataset.project_id
+    ).first()
+
+    if not ontology_version:
+        ontology_version = LabelOntologyVersion(
+            project_id=dataset.project_id,
+            version_tag="v1.0",
+            description="Default ontology version for self-annotation"
+        )
+        db.add(ontology_version)
+        db.commit()
+        db.refresh(ontology_version)
+
+    # Check if label class with this name already exists
+    display_name = label_class_data.get("display_name")
+    if not display_name:
+        raise HTTPException(status_code=400, detail="display_name is required")
+
+    existing_class = db.query(LabelClass).filter(
+        LabelClass.ontology_version_id == ontology_version.id,
+        LabelClass.display_name == display_name
+    ).first()
+
+    if existing_class:
+        # Return existing class instead of creating duplicate
+        return existing_class
+
+    # Create new label class
+    new_label_class = LabelClass(
+        ontology_version_id=ontology_version.id,
+        display_name=display_name,
+        color=label_class_data.get("color", "#FF0000"),
+        shape_type="bbox"  # Default to bbox for self-annotation
+    )
+
+    db.add(new_label_class)
+    db.commit()
+    db.refresh(new_label_class)
+
+    return new_label_class
+
+
+# ========== ANNOTATION CRUD APIs ==========
+
+@router.put("/annotations/{annotation_id}", response_model=AnnotationResponse)
+async def update_annotation(
+    annotation_id: int,
+    annotation_data: AnnotationCreate,
+    db: Session = Depends(get_db),
+    current_user: dict = Depends(get_current_user_dev)
+):
+    """Update an existing annotation"""
+    # Get annotation
+    annotation = db.query(Annotation).filter(Annotation.id == annotation_id).first()
+    if not annotation:
+        raise HTTPException(status_code=404, detail="Annotation not found")
+
+    # Verify asset exists
+    asset = db.query(Asset).filter(Asset.id == annotation_data.asset_id).first()
+    if not asset:
+        raise HTTPException(status_code=404, detail="Asset not found")
+
+    # Verify label class exists
+    label_class = db.query(LabelClass).filter(LabelClass.id == annotation_data.label_class_id).first()
+    if not label_class:
+        raise HTTPException(status_code=404, detail="Label class not found")
+
+    # Update annotation
+    annotation.asset_id = annotation_data.asset_id
+    annotation.label_class_id = annotation_data.label_class_id
+    annotation.model_version_id = annotation_data.model_version_id
+    annotation.geometry_type = annotation_data.geometry_type
+    annotation.geometry = annotation_data.geometry
+    annotation.is_normalized = annotation_data.is_normalized
+    annotation.source = annotation_data.source
+    annotation.confidence = annotation_data.confidence
+    annotation.annotator_name = annotation_data.annotator_name or current_user.get("name", "system")
+
+    db.commit()
+    db.refresh(annotation)
+
+    return annotation
+
+
+@router.delete("/annotations/{annotation_id}", status_code=status.HTTP_204_NO_CONTENT)
+async def delete_annotation(
+    annotation_id: int,
+    db: Session = Depends(get_db),
+    current_user: dict = Depends(get_current_user_dev)
+):
+    """Delete an annotation"""
+    # Get annotation
+    annotation = db.query(Annotation).filter(Annotation.id == annotation_id).first()
+    if not annotation:
+        raise HTTPException(status_code=404, detail="Annotation not found")
+
+    # Delete annotation
+    db.delete(annotation)
+    db.commit()
+
+    return Response(status_code=status.HTTP_204_NO_CONTENT)

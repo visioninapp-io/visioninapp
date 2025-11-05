@@ -20,6 +20,17 @@ class AnnotationCreate(BaseModel):
         protected_namespaces = ()
 
 
+class LabelClassInfo(BaseModel):
+    """Label class 정보 (nested)"""
+    id: int
+    display_name: str
+    color: str
+    shape_type: Optional[str]
+
+    class Config:
+        from_attributes = True
+
+
 class AnnotationResponse(BaseModel):
     """Annotation 응답 스키마"""
     id: int
@@ -33,6 +44,9 @@ class AnnotationResponse(BaseModel):
     confidence: float
     annotator_name: str
     created_at: datetime
+
+    # Nested label_class information
+    label_class: Optional[LabelClassInfo] = None
 
     class Config:
         from_attributes = True

@@ -57,6 +57,52 @@ async function showSelfAnnotationModal(datasetId, datasetName) {
     }, 300);
 }
 
+// Show self-annotation modal for a single image
+async function showSingleImageSelfAnnotation(datasetId, datasetName, imageId) {
+    console.log(`[SelfAnnotation] Opening modal for single image ${imageId} in dataset ${datasetId}`);
+
+    selfAnnotationState.datasetId = datasetId;
+    selfAnnotationState.datasetName = datasetName;
+    selfAnnotationState.annotations = [];
+
+    // Create modal if doesn't exist
+    if (!document.getElementById('selfAnnotationModal')) {
+        createSelfAnnotationModal();
+    }
+
+    // Load only the specified image
+    try {
+        const images = await apiService.getDatasetImages(datasetId);
+        const targetImage = images.find(img => img.id === imageId);
+
+        if (!targetImage) {
+            showToast('Image not found', 'error');
+            return;
+        }
+
+        // Set only this image
+        selfAnnotationState.images = [targetImage];
+        selfAnnotationState.currentImageIndex = 0;
+
+        console.log('[SelfAnnotation] Loaded single image:', targetImage);
+
+    } catch (error) {
+        console.error('[SelfAnnotation] Failed to load image:', error);
+        showToast('Failed to load image', 'error');
+        return;
+    }
+
+    // Show modal
+    const modal = new bootstrap.Modal(document.getElementById('selfAnnotationModal'));
+    modal.show();
+
+    // Load the image after modal is shown
+    setTimeout(async () => {
+        console.log('[SelfAnnotation] Loading single image...');
+        await loadImageToCanvas(0);
+    }, 300);
+}
+
 // Create modal HTML
 function createSelfAnnotationModal() {
     const modalHTML = `
@@ -324,6 +370,12 @@ async function loadImageAnnotations(imageId) {
         const scale = selfAnnotationState.scale || 1;
 
         selfAnnotationState.annotations = annotations.map(ann => {
+            // Check if geometry and bbox exist
+            if (!ann.geometry || !ann.geometry.bbox) {
+                console.warn('[SelfAnnotation] Annotation missing geometry:', ann);
+                return null;
+            }
+
             // Convert normalized coordinates to original image coordinates
             const origX = ann.geometry.bbox.x_center * originalWidth - (ann.geometry.bbox.width * originalWidth / 2);
             const origY = ann.geometry.bbox.y_center * originalHeight - (ann.geometry.bbox.height * originalHeight / 2);
@@ -342,7 +394,7 @@ async function loadImageAnnotations(imageId) {
                 source: ann.source || 'human',
                 saved: true
             };
-        });
+        }).filter(ann => ann !== null);
 
         console.log(`[SelfAnnotation] Loaded ${selfAnnotationState.annotations.length} annotations from backend`);
         redrawCanvas();

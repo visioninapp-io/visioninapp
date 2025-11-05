@@ -439,20 +439,7 @@ class APIService {
 
     async getDatasetLabelClasses(datasetId) {
         console.log(`[API] Fetching label classes for dataset ${datasetId}...`);
-        try {
-            // Get latest version for dataset
-            const versions = await this.get(`/datasets/${datasetId}/versions`);
-            if (versions && versions.length > 0) {
-                const latestVersion = versions[0]; // Assuming sorted by version_number desc
-                // TODO: Need backend API for label classes
-                // For now, return empty array
-                return [];
-            }
-            return [];
-        } catch (error) {
-            console.error(`[API] Failed to fetch label classes:`, error);
-            return [];
-        }
+        return this.get(`/datasets/${datasetId}/label-classes`);
     }
 
     // ========== MODELS ==========

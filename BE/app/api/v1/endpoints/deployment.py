@@ -36,7 +36,7 @@ async def get_deployment_stats(
 @router.get("/", response_model=List[DeploymentResponse])
 async def get_deployments(
     skip: int = 0,
-    limit: int = 100,
+    limit: int = 10000,
     db: Session = Depends(get_db),
     current_user: dict = Depends(get_current_user_dev)
 ):

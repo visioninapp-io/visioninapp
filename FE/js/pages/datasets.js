@@ -73,6 +73,16 @@ class DatasetsPage {
             this.datasets = datasets;
             console.log(`[DatasetsPage] Loaded ${this.datasets.length} datasets:`, this.datasets);
 
+            // Load label classes for each dataset
+            await Promise.all(this.datasets.map(async (dataset) => {
+                try {
+                    dataset.label_classes = await apiService.getDatasetLabelClasses(dataset.id);
+                } catch (error) {
+                    console.error(`[DatasetsPage] Failed to load label classes for dataset ${dataset.id}:`, error);
+                    dataset.label_classes = [];
+                }
+            }));
+
             // Auto-select first dataset if available
             if (this.datasets.length > 0) {
                 // If selected dataset exists, check if it's still in the list
@@ -367,12 +377,12 @@ class DatasetsPage {
                                 </div>
                             </div>
 
-                            ${dataset.class_names && Array.isArray(dataset.class_names) && dataset.class_names.length > 0 ? `
+                            ${dataset.label_classes && dataset.label_classes.length > 0 ? `
                                 <div class="border-top pt-3 mt-3">
-                                    <h6 class="fw-bold mb-2">Classes:</h6>
+                                    <h6 class="fw-bold mb-2">Classes (${dataset.label_classes.length}):</h6>
                                     <div class="d-flex flex-wrap gap-1">
-                                        ${dataset.class_names.map(className =>
-                                            `<span class="badge bg-light text-dark">${className}</span>`
+                                        ${dataset.label_classes.map(labelClass =>
+                                            `<span class="badge" style="background-color: ${labelClass.color}">${labelClass.display_name}</span>`
                                         ).join('')}
                                     </div>
                                 </div>

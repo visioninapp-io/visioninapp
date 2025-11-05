@@ -12,7 +12,7 @@ router = APIRouter()
 @router.get("/", response_model=List[EvaluationResponse])
 async def get_evaluations(
     skip: int = 0,
-    limit: int = 100,
+    limit: int = 10000,
     model_version_id: int = None,
     db: Session = Depends(get_db),
     current_user: dict = Depends(get_current_user_dev)

@@ -3,7 +3,7 @@ from pathlib import Path
 from utils.config import load_config
 from utils.logger import setup_logger
 from mq import MQ, declare_topology, start_consumer_thread
-from s3_client import download_s3, upload_s3, untar
+from s3_client import download_s3, upload_s3, download_s3_folder
 from core.progress import Progress
 from core.trainer import train_yolo
 from core.convert_onnx import to_onnx
@@ -82,6 +82,14 @@ def handle_train(mq: MQ, exchanges: dict, msg: dict):
         progress.send("upload", 95, "uploading model")
         upload_s3(best_pt, bucket, key)
 
+        # 2. results.csv 업로드 (있을 때만)
+        results_csv = os.path.join(out_dir, "train", "results.csv")
+        if os.path.exists(results_csv):
+            metrics_name = msg["output"].get("metrics_name", "results.csv")
+            metrics_key = f"{msg['output']['prefix'].rstrip('/')}/{metrics_name}"
+            progress.send("upload.metrics", 96, f"uploading {metrics_name}")
+            upload_s3(results_csv, bucket, metrics_key)
+
         progress.done({"s3_bucket": bucket, "s3_uri": f"s3://{bucket}/{key}"}, metrics)
 
     except Exception as e:
@@ -157,12 +165,12 @@ def handle_trt(mq: MQ, exchanges: dict, msg: dict):
     _, pub_ch = mq.channel()
     progress = Progress(pub_ch, exchanges["events"], job_id)
     try:
-        # ① PT 모델 다운로드 (기존 ONNX ↘ PT 로 변경)
+        # PT 모델 다운로드 (기존 ONNX -> PT 로 변경)
         progress.send("convert.trt.download", 10, "download model (.pt)")
         tmp_pt = os.path.join(tempfile.gettempdir(), f"{job_id}.pt")
         download_s3(msg["model"]["s3_uri"], tmp_pt)
 
-        # ② 변환 옵션 (precision / imgsz 등)
+        # 변환 옵션 (precision / imgsz 등)
         trt_cfg   = msg.get("trt", {}) or {}
         precision = (trt_cfg.get("precision") or "fp16").lower()   # fp16|fp32|int8
         imgsz     = int(trt_cfg.get("imgsz") or 640)
@@ -171,10 +179,10 @@ def handle_trt(mq: MQ, exchanges: dict, msg: dict):
         progress.send("convert.trt", 60, f"build TensorRT ({precision})")
         out_engine = os.path.join(tempfile.gettempdir(), f"{job_id}.engine")
 
-        # ③ PT → TensorRT 엔진 변환
+        # PT → TensorRT 엔진 변환
         to_tensorrt(tmp_pt, out_engine, precision=precision, imgsz=imgsz, dynamic=dynamic)
 
-        # ④ 업로드 (파일명 커스터마이즈 지원)
+        # 업로드 (파일명 커스터마이즈 지원)
         progress.send("upload", 90, "upload engine")
         bucket     = msg["output"]["s3_bucket"]
         model_name = msg["output"].get("model_name", "best.engine")

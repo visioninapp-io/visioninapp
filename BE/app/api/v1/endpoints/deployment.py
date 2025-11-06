@@ -4,7 +4,7 @@ from typing import List
 import uuid
 from datetime import datetime
 from app.core.database import get_db
-from app.core.auth import get_current_user, get_current_user_dev
+from app.core.auth import get_current_user
 from app.models.deployment import Deployment
 from app.schemas.deployment import (
     DeploymentCreate, DeploymentUpdate, DeploymentResponse, DeploymentStats,
@@ -17,7 +17,7 @@ router = APIRouter()
 @router.get("/stats", response_model=DeploymentStats)
 async def get_deployment_stats(
     db: Session = Depends(get_db),
-    current_user: dict = Depends(get_current_user_dev)
+    current_user: dict = Depends(get_current_user)
 ):
     """Get overall deployment statistics"""
     # 호환성 필드가 제거되어 기본값 반환
@@ -38,7 +38,7 @@ async def get_deployments(
     skip: int = 0,
     limit: int = 10000,
     db: Session = Depends(get_db),
-    current_user: dict = Depends(get_current_user_dev)
+    current_user: dict = Depends(get_current_user)
 ):
     """Get all deployments"""
     query = db.query(Deployment)
@@ -50,7 +50,7 @@ async def get_deployments(
 async def create_deployment(
     deployment: DeploymentCreate,
     db: Session = Depends(get_db),
-    current_user: dict = Depends(get_current_user_dev)
+    current_user: dict = Depends(get_current_user)
 ):
     """Create a new deployment"""
     from app.models.model_version import ModelVersion
@@ -86,7 +86,7 @@ async def create_deployment(
 async def get_deployment(
     deployment_id: int,
     db: Session = Depends(get_db),
-    current_user: dict = Depends(get_current_user_dev)
+    current_user: dict = Depends(get_current_user)
 ):
     """Get a specific deployment"""
     deployment = db.query(Deployment).filter(Deployment.id == deployment_id).first()
@@ -100,7 +100,7 @@ async def update_deployment(
     deployment_id: int,
     deployment_update: DeploymentUpdate,
     db: Session = Depends(get_db),
-    current_user: dict = Depends(get_current_user_dev)
+    current_user: dict = Depends(get_current_user)
 ):
     """Update a deployment"""
     db_deployment = db.query(Deployment).filter(Deployment.id == deployment_id).first()
@@ -122,7 +122,7 @@ async def update_deployment(
 async def delete_deployment(
     deployment_id: int,
     db: Session = Depends(get_db),
-    current_user: dict = Depends(get_current_user_dev)
+    current_user: dict = Depends(get_current_user)
 ):
     """Delete a deployment"""
     deployment = db.query(Deployment).filter(Deployment.id == deployment_id).first()
@@ -174,7 +174,7 @@ async def run_inference(
 async def health_check(
     deployment_id: int,
     db: Session = Depends(get_db),
-    current_user: dict = Depends(get_current_user_dev)
+    current_user: dict = Depends(get_current_user)
 ):
     """Perform health check on deployment"""
     deployment = db.query(Deployment).filter(Deployment.id == deployment_id).first()
@@ -197,7 +197,7 @@ async def health_check(
 async def start_deployment(
     deployment_id: int,
     db: Session = Depends(get_db),
-    current_user: dict = Depends(get_current_user_dev)
+    current_user: dict = Depends(get_current_user)
 ):
     """Start a deployment"""
     deployment = db.query(Deployment).filter(Deployment.id == deployment_id).first()
@@ -215,7 +215,7 @@ async def start_deployment(
 async def stop_deployment(
     deployment_id: int,
     db: Session = Depends(get_db),
-    current_user: dict = Depends(get_current_user_dev)
+    current_user: dict = Depends(get_current_user)
 ):
     """Stop a deployment"""
     deployment = db.query(Deployment).filter(Deployment.id == deployment_id).first()

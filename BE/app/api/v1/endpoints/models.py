@@ -4,7 +4,7 @@ from typing import List
 from pathlib import Path
 import os
 from app.core.database import get_db
-from app.core.auth import get_current_user, get_current_user_dev
+from app.core.auth import get_current_user
 from app.models.model import Model
 from app.utils.project_helper import get_or_create_default_project
 from app.models.model_artifact import ModelArtifact
@@ -24,7 +24,7 @@ async def get_models(
     skip: int = 0,
     limit: int = 10000,
     db: Session = Depends(get_db),
-    current_user: dict = Depends(get_current_user_dev)
+    current_user: dict = Depends(get_current_user)
 ):
     """Get all models for current user"""
     # created_by 필드가 없으므로 project 기반으로 필터링
@@ -38,7 +38,7 @@ async def get_models(
 
 @router.get("/trained", response_model=List[dict])
 async def get_trained_models(
-    current_user: dict = Depends(get_current_user_dev)
+    current_user: dict = Depends(get_current_user)
 ):
     """Get all trained models from AI/uploads/models/ directory"""
     try:
@@ -96,7 +96,7 @@ async def get_trained_models(
 async def create_model(
     model: ModelCreate,
     db: Session = Depends(get_db),
-    current_user: dict = Depends(get_current_user_dev)
+    current_user: dict = Depends(get_current_user)
 ):
     """Create a new model"""
     existing = db.query(Model).filter(Model.name == model.name).first()
@@ -120,7 +120,7 @@ async def create_model(
 async def get_model(
     model_id: int,
     db: Session = Depends(get_db),
-    current_user: dict = Depends(get_current_user_dev)
+    current_user: dict = Depends(get_current_user)
 ):
     """Get a specific model"""
     model = db.query(Model).filter(Model.id == model_id).first()
@@ -134,7 +134,7 @@ async def update_model(
     model_id: int,
     model_update: ModelUpdate,
     db: Session = Depends(get_db),
-    current_user: dict = Depends(get_current_user_dev)
+    current_user: dict = Depends(get_current_user)
 ):
     """Update a model"""
     db_model = db.query(Model).filter(Model.id == model_id).first()
@@ -155,7 +155,7 @@ async def update_model(
 async def delete_model(
     model_id: int,
     db: Session = Depends(get_db),
-    current_user: dict = Depends(get_current_user_dev)
+    current_user: dict = Depends(get_current_user)
 ):
     """Delete a model"""
     model = db.query(Model).filter(Model.id == model_id).first()
@@ -172,7 +172,7 @@ async def generate_model_upload_url(
     model_id: int,
     request: ModelUploadRequest = Body(...),
     db: Session = Depends(get_db),
-    current_user: dict = Depends(get_current_user_dev)
+    current_user: dict = Depends(get_current_user)
 ):
     """
     모델 파일 업로드용 Presigned URL 발급
@@ -228,7 +228,7 @@ async def confirm_model_upload_complete(
     model_id: int,
     request: ModelUploadCompleteRequest = Body(...),
     db: Session = Depends(get_db),
-    current_user: dict = Depends(get_current_user_dev)
+    current_user: dict = Depends(get_current_user)
 ):
     """
     모델 파일 S3 업로드 완료 알림 - ModelArtifact에 메타데이터 저장
@@ -301,7 +301,7 @@ async def confirm_model_upload_complete(
 async def get_model_artifacts(
     model_id: int,
     db: Session = Depends(get_db),
-    current_user: dict = Depends(get_current_user_dev)
+    current_user: dict = Depends(get_current_user)
 ):
     """
     모델의 artifacts 목록 조회 (PT, ONNX, TRT 등)
@@ -332,7 +332,7 @@ async def get_model_artifacts(
 async def get_artifact_download_url(
     artifact_id: int,
     db: Session = Depends(get_db),
-    current_user: dict = Depends(get_current_user_dev)
+    current_user: dict = Depends(get_current_user)
 ):
     """
     ModelArtifact 다운로드용 Presigned URL 발급
@@ -394,7 +394,7 @@ async def get_artifact_download_url(
 async def download_model(
     model_id: int,
     db: Session = Depends(get_db),
-    current_user: dict = Depends(get_current_user_dev)
+    current_user: dict = Depends(get_current_user)
 ):
     """
     Download model file (primary artifact)
@@ -453,7 +453,7 @@ async def predict_with_model(
     file: UploadFile = File(...),
     confidence: float = 0.25,
     db: Session = Depends(get_db),
-    current_user: dict = Depends(get_current_user_dev)
+    current_user: dict = Depends(get_current_user)
 ):
     """Run inference with a .pt model file"""
     from pathlib import Path

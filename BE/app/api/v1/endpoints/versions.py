@@ -2,7 +2,7 @@ from fastapi import APIRouter, Depends, HTTPException, status
 from sqlalchemy.orm import Session
 from typing import List
 from app.core.database import get_db
-from app.core.auth import get_current_user_dev
+from app.core.auth import get_current_user
 from app.models.dataset import Dataset, DatasetVersion
 from app.utils.dataset_helper import (
     create_new_dataset_version,
@@ -22,7 +22,7 @@ async def get_version(
     dataset_id: int,
     version_id: int,
     db: Session = Depends(get_db),
-    current_user: dict = Depends(get_current_user_dev)
+    current_user: dict = Depends(get_current_user)
 ):
     """Get specific dataset version"""
     # Verify dataset exists
@@ -45,7 +45,7 @@ async def get_version(
 async def get_dataset_versions(
     dataset_id: int,
     db: Session = Depends(get_db),
-    current_user: dict = Depends(get_current_user_dev)
+    current_user: dict = Depends(get_current_user)
 ):
     """Get all versions of a dataset"""
     dataset = db.query(Dataset).filter(Dataset.id == dataset_id).first()
@@ -64,7 +64,7 @@ async def create_dataset_version(
     dataset_id: int,
     version_data: DatasetVersionCreate,
     db: Session = Depends(get_db),
-    current_user: dict = Depends(get_current_user_dev)
+    current_user: dict = Depends(get_current_user)
 ):
     """Create a new dataset version"""
     # Verify dataset exists
@@ -99,7 +99,7 @@ async def update_version(
     version_id: int,
     version_update: DatasetVersionUpdate,
     db: Session = Depends(get_db),
-    current_user: dict = Depends(get_current_user_dev)
+    current_user: dict = Depends(get_current_user)
 ):
     """Update dataset version"""
     # Verify dataset exists
@@ -130,7 +130,7 @@ async def delete_version(
     dataset_id: int,
     version_id: int,
     db: Session = Depends(get_db),
-    current_user: dict = Depends(get_current_user_dev)
+    current_user: dict = Depends(get_current_user)
 ):
     """Delete dataset version"""
     # Verify dataset exists

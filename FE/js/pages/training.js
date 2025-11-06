@@ -26,6 +26,15 @@ class TrainingPage {
             this.startConditionalPolling();
 
             console.log('[Training Page] Initialized successfully');
+            
+            // FAB 버튼 생성 (init 완료 후)
+            console.log('[Training Page] About to create FAB button...');
+            try {
+                this.createFAB();
+                console.log('[Training Page] createFAB() call completed');
+            } catch (fabError) {
+                console.error('[Training Page] Error creating FAB button:', fabError);
+            }
         } catch (error) {
             console.error('[Training Page] Initialization error:', error);
             showToast('Failed to load training page: ' + error.message, 'error');
@@ -416,7 +425,11 @@ class TrainingPage {
     }
 
     async afterRender() {
+        console.log('[Training Page] afterRender called');
         await this.initChart();
+        console.log('[Training Page] Chart initialized, creating FAB...');
+        // FAB 버튼 생성 (afterRender 완료 후)
+        this.createFAB();
     }
 
     async initChart() {
@@ -553,9 +566,92 @@ class TrainingPage {
     cleanup() {
         console.log('[Training Page] Cleaning up...');
         this.stopPolling();
+        this.removeFAB();  // FAB 버튼 제거
         if (this.chart) {
             this.chart.destroy();
             this.chart = null;
+        }
+    }
+
+    createFAB() {
+        console.log('[Training Page] Creating FAB button...');
+        
+        // 이미 존재하면 제거
+        const existingFAB = document.getElementById('llm-fab-button');
+        if (existingFAB) {
+            console.log('[Training Page] Removing existing FAB button');
+            existingFAB.remove();
+        }
+
+        // FAB 버튼 생성
+        const fabButton = document.createElement('button');
+        fabButton.id = 'llm-fab-button';
+        fabButton.className = 'btn btn-info rounded-circle shadow-lg';
+        fabButton.innerHTML = '<i class="bi bi-robot fs-4"></i>';
+        fabButton.title = 'LLM 모델 변환';
+        
+        // CSS 스타일 적용
+        fabButton.style.cssText = `
+            position: fixed;
+            bottom: 30px;
+            right: 30px;
+            width: 64px;
+            height: 64px;
+            display: flex;
+            justify-content: center;
+            align-items: center;
+            z-index: 1050;
+            border: none;
+            transition: all 0.3s ease;
+            background: linear-gradient(135deg, #3b82f6, #0ea5e9);
+        `;
+
+        // 호버 효과
+        fabButton.addEventListener('mouseenter', () => {
+            fabButton.style.transform = 'scale(1.1)';
+            fabButton.style.boxShadow = '0 8px 16px rgba(59, 130, 246, 0.4)';
+        });
+
+        fabButton.addEventListener('mouseleave', () => {
+            fabButton.style.transform = 'scale(1)';
+            fabButton.style.boxShadow = '';
+        });
+
+        fabButton.addEventListener('mousedown', () => {
+            fabButton.style.transform = 'scale(0.95)';
+        });
+
+        fabButton.addEventListener('mouseup', () => {
+            fabButton.style.transform = 'scale(1)';
+        });
+
+        // 클릭 이벤트
+        fabButton.onclick = () => {
+            console.log('[Training Page] FAB button clicked');
+            if (typeof showLLMModal === 'function') {
+                showLLMModal();
+            } else {
+                console.warn('showLLMModal function not found');
+                showToast('LLM 모달 기능을 로드하는 중입니다...', 'info');
+            }
+        };
+
+        // 아이콘 색상
+        const icon = fabButton.querySelector('i');
+        if (icon) {
+            icon.style.color = 'white';
+        }
+
+        document.body.appendChild(fabButton);
+        console.log('[Training Page] FAB button created and appended to body');
+    }
+
+    removeFAB() {
+        console.log('[Training Page] Removing FAB button...');
+        const fabButton = document.getElementById('llm-fab-button');
+        if (fabButton) {
+            fabButton.remove();
+            console.log('[Training Page] FAB button removed');
         }
     }
 

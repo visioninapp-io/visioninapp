@@ -5,7 +5,7 @@ from datetime import datetime
 import logging, uuid, re
 
 from app.core.database import get_db, SessionLocal
-from app.core.auth import get_current_user_dev
+from app.core.auth import get_current_user
 from app.core.config import settings
 
 from app.models.training import TrainingJob, TrainingStatus
@@ -34,7 +34,7 @@ def _slugify_model_name(s: str) -> str:
 async def create_training_job(
     job: TrainingJobCreate,
     db: Session = Depends(get_db),
-    current_user: dict = Depends(get_current_user_dev)
+    current_user: dict = Depends(get_current_user)
 ):
     # 이름 중복 방지
     if db.query(TrainingJob).filter(TrainingJob.name == job.name).first():

@@ -9,7 +9,7 @@ import base64
 from datetime import datetime
 import hashlib
 from app.core.database import get_db
-from app.core.auth import get_current_user, get_current_user_dev
+from app.core.auth import get_current_user
 from app.models.dataset import Dataset, Annotation, DatasetVersion
 from app.models.label_class import LabelClass
 from app.utils.project_helper import get_or_create_default_project
@@ -85,7 +85,7 @@ class BatchDownloadUrlRequest(BaseModel):
 @router.get("/stats", response_model=DatasetStats)
 async def get_dataset_stats(
     db: Session = Depends(get_db),
-    current_user: dict = Depends(get_current_user_dev)
+    current_user: dict = Depends(get_current_user)
 ):
     """Get overall dataset statistics for current user"""
     # Get user's default project
@@ -140,7 +140,7 @@ async def get_datasets(
     skip: int = 0,
     limit: int = 10000,
     db: Session = Depends(get_db),
-    current_user: dict = Depends(get_current_user_dev)
+    current_user: dict = Depends(get_current_user)
 ):
     """Get all datasets for current user"""
     # Get user's default project
@@ -189,7 +189,7 @@ async def get_datasets(
 async def create_dataset(
     dataset: DatasetCreate,
     db: Session = Depends(get_db),
-    current_user: dict = Depends(get_current_user_dev)
+    current_user: dict = Depends(get_current_user)
 ):
     """Create a new dataset (ERD 기준)"""
     # Get or create default project for user
@@ -230,7 +230,7 @@ async def create_dataset(
 async def get_dataset(
     dataset_id: int,
     db: Session = Depends(get_db),
-    current_user: dict = Depends(get_current_user_dev)
+    current_user: dict = Depends(get_current_user)
 ):
     """Get a specific dataset with computed fields"""
     dataset = db.query(Dataset).filter(Dataset.id == dataset_id).first()
@@ -271,7 +271,7 @@ async def update_dataset(
     dataset_id: int,
     dataset_update: DatasetUpdate,
     db: Session = Depends(get_db),
-    current_user: dict = Depends(get_current_user_dev)
+    current_user: dict = Depends(get_current_user)
 ):
     """Update a dataset (ERD 기준)"""
     db_dataset = db.query(Dataset).filter(Dataset.id == dataset_id).first()
@@ -311,7 +311,7 @@ async def update_dataset(
 async def delete_dataset(
     dataset_id: int,
     db: Session = Depends(get_db),
-    current_user: dict = Depends(get_current_user_dev)
+    current_user: dict = Depends(get_current_user)
 ):
     """Delete a dataset"""
     dataset = db.query(Dataset).filter(Dataset.id == dataset_id).first()
@@ -332,7 +332,7 @@ async def get_dataset_images(
     page: int = 1,
     limit: int = 10000,
     db: Session = Depends(get_db),
-    current_user: dict = Depends(get_current_user_dev)
+    current_user: dict = Depends(get_current_user)
 ):
     """
     Get images in a dataset with base64 encoding
@@ -390,7 +390,7 @@ async def get_dataset_images(
 async def generate_presigned_upload_urls(
     request: UploadDatasetRequest = Body(...),
     db: Session = Depends(get_db),
-    current_user: dict = Depends(get_current_user_dev)
+    current_user: dict = Depends(get_current_user)
 ):
     """
     데이터셋 생성 및 업로드용 Presigned URL 발급
@@ -493,7 +493,7 @@ async def upload_images_to_dataset(
     dataset_id: int,
     files: List[UploadFile] = File(...),
     db: Session = Depends(get_db),
-    current_user: dict = Depends(get_current_user_dev)
+    current_user: dict = Depends(get_current_user)
 ):
     """Upload images to a specific dataset"""
     dataset = db.query(Dataset).filter(Dataset.id == dataset_id).first()
@@ -517,20 +517,42 @@ async def upload_images_to_dataset(
             DatasetSplitType.UNASSIGNED
         )
 
+        # 현재 dataset의 asset 개수 확인 (순번 부여를 위해)
+        # presigned 방식과 동일하게 dataset_name_{n} 형식으로 파일명 생성
+        assets, total_count = get_assets_from_dataset(
+            db=db,
+            dataset_id=dataset.id,
+            asset_type=None,  # All assets regardless of type
+            page=1,
+            limit=100000  # Get all for counting
+        )
+        start_number = total_count + 1
+
         # Asset 생성
-        for upload in successful_uploads:
+        for idx, upload in enumerate(successful_uploads, start=start_number):
             metadata = upload["metadata"]
             storage_uri = metadata["relative_path"]
             
             # SHA256 계산
             sha256_hash = calculate_sha256_from_s3(storage_uri)
             
-            # S3 파일명 추출 (datasets/포트홀/images/포트홀_1.jpg → 포트홀_1.jpg)
-            s3_filename = storage_uri.split('/')[-1] if '/' in storage_uri else storage_uri
+            # dataset_name 기반으로 순번 파일명 생성 (presigned 방식과 동일)
+            # 원본 파일명에서 확장자 추출
+            original_filename = metadata.get("filename", "")
+            extension = ""
+            if '.' in original_filename:
+                extension = original_filename.split('.')[-1].lower()
+            elif '.' in storage_uri:
+                extension = storage_uri.split('.')[-1].lower()
+            else:
+                extension = "jpg"  # 기본값
+            
+            # dataset_name_{순번}.확장자 형식으로 생성
+            numbered_name = f"{dataset.name}_{idx}.{extension}"
             
             asset = Asset(
                 dataset_split_id=dataset_split.id,
-                name=s3_filename,  # ERD의 에셋명 필드 (S3 파일명)
+                name=numbered_name,  # ERD의 에셋명 필드 (dataset_name_{n} 형식)
                 type=AssetType.IMAGE,
                 storage_uri=storage_uri,
                 sha256=sha256_hash,
@@ -574,7 +596,7 @@ async def get_image_annotations(
     image_id: int,
     min_confidence: Optional[float] = None,
     db: Session = Depends(get_db),
-    current_user: dict = Depends(get_current_user_dev)
+    current_user: dict = Depends(get_current_user)
 ):
     """
     Get all annotations for a specific asset
@@ -603,7 +625,7 @@ async def get_image_annotations(
 async def create_annotation(
     annotation: AnnotationCreate,
     db: Session = Depends(get_db),
-    current_user: dict = Depends(get_current_user_dev)
+    current_user: dict = Depends(get_current_user)
 ):
     """
     Create a new annotation
@@ -640,7 +662,7 @@ async def create_annotation(
 async def auto_annotate_dataset(
     request: AutoAnnotationRequest,
     db: Session = Depends(get_db),
-    current_user: dict = Depends(get_current_user_dev)
+    current_user: dict = Depends(get_current_user)
 ):
     """Trigger auto-annotation for a dataset using YOLO model (via AI service)"""
     print(f"[AUTO-ANNOTATE] Received request: dataset_id={request.dataset_id}, model_id={request.model_id}, conf={getattr(request, 'confidence_threshold', 0.25)}")
@@ -860,7 +882,7 @@ async def download_single_image(
     dataset_id: int,
     image_id: int,
     db: Session = Depends(get_db),
-    current_user: dict = Depends(get_current_user_dev)
+    current_user: dict = Depends(get_current_user)
 ):
     """
     Download a single asset from a dataset
@@ -932,7 +954,7 @@ async def download_dataset(
     dataset_id: int,
     include_annotations: bool = True,
     db: Session = Depends(get_db),
-    current_user: dict = Depends(get_current_user_dev)
+    current_user: dict = Depends(get_current_user)
 ):
     """
     Download entire dataset as a ZIP file (images + videos)
@@ -1114,7 +1136,7 @@ async def confirm_upload_complete_batch(
     dataset_id: int,
     request: AssetUploadCompleteBatchRequest,
     db: Session = Depends(get_db),
-    current_user: dict = Depends(get_current_user_dev)
+    current_user: dict = Depends(get_current_user)
 ):
     """
     S3 업로드 완료 알림 - Asset 테이블에 메타데이터 저장
@@ -1257,7 +1279,7 @@ async def get_dataset_assets(
     page: int = 1,
     limit: int = 10000,
     db: Session = Depends(get_db),
-    current_user: dict = Depends(get_current_user_dev)
+    current_user: dict = Depends(get_current_user)
 ):
     """
     데이터셋의 assets(이미지/동영상) 목록 조회
@@ -1316,7 +1338,7 @@ async def get_dataset_assets(
 async def get_asset_download_url(
     asset_id: int,
     db: Session = Depends(get_db),
-    current_user: dict = Depends(get_current_user_dev)
+    current_user: dict = Depends(get_current_user)
 ):
     """
     Asset 단건 다운로드용 Presigned URL 발급
@@ -1378,7 +1400,7 @@ async def generate_presigned_download_urls_batch(
     dataset_id: int,
     request: BatchDownloadUrlRequest,
     db: Session = Depends(get_db),
-    current_user: dict = Depends(get_current_user_dev)
+    current_user: dict = Depends(get_current_user)
 ):
     """
     Asset 다운로드용 Presigned URL 발급 (단일/배치 모두 처리)
@@ -1462,7 +1484,7 @@ async def generate_presigned_download_urls_batch(
 async def get_dataset_label_classes(
     dataset_id: int,
     db: Session = Depends(get_db),
-    current_user: dict = Depends(get_current_user_dev)
+    current_user: dict = Depends(get_current_user)
 ):
     """Get all label classes for a dataset (for self-annotation)"""
     from app.models.label_ontology_version import LabelOntologyVersion
@@ -1502,7 +1524,7 @@ async def create_label_class(
     dataset_id: int,
     label_class_data: dict = Body(...),
     db: Session = Depends(get_db),
-    current_user: dict = Depends(get_current_user_dev)
+    current_user: dict = Depends(get_current_user)
 ):
     """Create a new label class for a dataset (for self-annotation)"""
     from app.models.label_ontology_version import LabelOntologyVersion
@@ -1563,7 +1585,7 @@ async def update_annotation(
     annotation_id: int,
     annotation_data: AnnotationCreate,
     db: Session = Depends(get_db),
-    current_user: dict = Depends(get_current_user_dev)
+    current_user: dict = Depends(get_current_user)
 ):
     """Update an existing annotation"""
     # Get annotation
@@ -1602,7 +1624,7 @@ async def update_annotation(
 async def delete_annotation(
     annotation_id: int,
     db: Session = Depends(get_db),
-    current_user: dict = Depends(get_current_user_dev)
+    current_user: dict = Depends(get_current_user)
 ):
     """Delete an annotation"""
     # Get annotation

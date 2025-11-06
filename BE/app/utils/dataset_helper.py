@@ -32,6 +32,16 @@ def get_or_create_label_ontology_version(
     return ontology
 
 
+def get_latest_label_ontology_version(
+    db: Session, 
+    project_id: int
+) -> Optional[LabelOntologyVersion]:
+    """프로젝트의 최신 레이블 온톨로지 버전 조회"""
+    return db.query(LabelOntologyVersion).filter(
+        LabelOntologyVersion.project_id == project_id
+    ).order_by(LabelOntologyVersion.created_at.desc()).first()
+
+
 def get_or_create_dataset_version(
     db: Session,
     dataset_id: int,
@@ -43,21 +53,23 @@ def get_or_create_dataset_version(
     if not dataset:
         raise ValueError(f"Dataset {dataset_id} not found")
     
-    # 온톨로지 버전 찾기 또는 생성
-    ontology = get_or_create_label_ontology_version(
-        db, 
-        dataset.project_id, 
-        version_tag
-    )
-    
-    # DatasetVersion 찾기 또는 생성
+    # DatasetVersion 찾기 (version_tag로만 검색)
     version = db.query(DatasetVersion).filter(
         DatasetVersion.dataset_id == dataset_id,
-        DatasetVersion.ontology_version_id == ontology.id,
         DatasetVersion.version_tag == version_tag
     ).first()
     
     if not version:
+        # 최신 온톨로지 버전 조회 (독립적 관리)
+        ontology = get_latest_label_ontology_version(db, dataset.project_id)
+        if not ontology:
+            # 최신 온톨로지 버전이 없으면 기본 버전 생성
+            ontology = get_or_create_label_ontology_version(
+                db, 
+                dataset.project_id, 
+                "v1.0"
+            )
+        
         version = DatasetVersion(
             dataset_id=dataset_id,
             ontology_version_id=ontology.id,
@@ -131,12 +143,15 @@ def create_new_dataset_version(
             # 첫 번째 버전
             version_tag = "v1.0"
     
-    # 온톨로지 버전 찾기 또는 생성
-    ontology = get_or_create_label_ontology_version(
-        db, 
-        dataset.project_id, 
-        version_tag
-    )
+    # 최신 온톨로지 버전 조회 (독립적 관리)
+    ontology = get_latest_label_ontology_version(db, dataset.project_id)
+    if not ontology:
+        # 최신 온톨로지 버전이 없으면 기본 버전 생성
+        ontology = get_or_create_label_ontology_version(
+            db, 
+            dataset.project_id, 
+            "v1.0"
+        )
     
     # 새 DatasetVersion 생성
     version = DatasetVersion(
@@ -215,3 +230,36 @@ def get_assets_from_dataset(
     
     return assets, total_count
 
+
+def enrich_version_response(db: Session, version: DatasetVersion) -> dict:
+    """DatasetVersion에 계산된 필드들을 추가하여 응답 형식으로 변환"""
+    # Get splits with asset counts
+    splits_data = []
+    total_assets = 0
+    
+    splits = db.query(DatasetSplit).filter(
+        DatasetSplit.dataset_version_id == version.id
+    ).all()
+    
+    for split in splits:
+        asset_count = db.query(Asset).filter(
+            Asset.dataset_split_id == split.id
+        ).count()
+        
+        splits_data.append({
+            "split": split.split.value,
+            "ratio": split.ratio,
+            "asset_count": asset_count
+        })
+        total_assets += asset_count
+    
+    return {
+        "id": version.id,
+        "dataset_id": version.dataset_id,
+        "ontology_version_id": version.ontology_version_id,
+        "version_tag": version.version_tag,
+        "is_frozen": version.is_frozen,
+        "created_at": version.created_at,
+        "splits": splits_data,
+        "total_assets": total_assets
+    }

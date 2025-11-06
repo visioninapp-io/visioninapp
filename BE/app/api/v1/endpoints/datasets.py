@@ -313,13 +313,21 @@ async def delete_dataset(
     db: Session = Depends(get_db),
     current_user: dict = Depends(get_current_user)
 ):
-    """Delete a dataset"""
+    """Delete a dataset and its associated files from S3"""
     dataset = db.query(Dataset).filter(Dataset.id == dataset_id).first()
     if not dataset:
         raise HTTPException(status_code=404, detail="Dataset not found")
 
     print(f"[DELETE DATASET] Deleting dataset {dataset_id}: {dataset.name}")
     
+    try:
+        # Delete all files from S3
+        file_storage.delete_dataset_files(dataset.name)
+    except Exception as e:
+        print(f"[WARNING] Failed to delete S3 files for dataset {dataset_id}: {e}")
+        # Continue with database deletion even if S3 deletion fails
+    
+    # Delete from database (cascade will handle related records)
     db.delete(dataset)
     db.commit()
 
@@ -504,8 +512,23 @@ async def upload_images_to_dataset(
         raise HTTPException(status_code=400, detail="No files provided")
 
     try:
-        # Upload images to S3
-        successful_uploads, failed_uploads = await file_storage.save_images_batch(files, dataset.id)
+        # 현재 dataset의 asset 개수 확인 (순번 부여를 위해)
+        assets, total_count = get_assets_from_dataset(
+            db=db,
+            dataset_id=dataset.id,
+            asset_type=None,  # All assets regardless of type
+            page=1,
+            limit=100000  # Get all for counting
+        )
+        start_number = total_count + 1
+
+        # Upload images to S3 with dataset name and sequence numbers
+        successful_uploads, failed_uploads = await file_storage.save_images_batch(
+            files, 
+            dataset.id,
+            dataset.name,  # dataset name for filename generation
+            start_number   # starting sequence number
+        )
 
         # DatasetVersion 및 Split 생성/조회
         # 에셋 추가 시 새 버전 생성
@@ -517,42 +540,21 @@ async def upload_images_to_dataset(
             DatasetSplitType.UNASSIGNED
         )
 
-        # 현재 dataset의 asset 개수 확인 (순번 부여를 위해)
-        # presigned 방식과 동일하게 dataset_name_{n} 형식으로 파일명 생성
-        assets, total_count = get_assets_from_dataset(
-            db=db,
-            dataset_id=dataset.id,
-            asset_type=None,  # All assets regardless of type
-            page=1,
-            limit=100000  # Get all for counting
-        )
-        start_number = total_count + 1
-
         # Asset 생성
-        for idx, upload in enumerate(successful_uploads, start=start_number):
+        for upload in successful_uploads:
             metadata = upload["metadata"]
             storage_uri = metadata["relative_path"]
             
             # SHA256 계산
             sha256_hash = calculate_sha256_from_s3(storage_uri)
             
-            # dataset_name 기반으로 순번 파일명 생성 (presigned 방식과 동일)
-            # 원본 파일명에서 확장자 추출
-            original_filename = metadata.get("filename", "")
-            extension = ""
-            if '.' in original_filename:
-                extension = original_filename.split('.')[-1].lower()
-            elif '.' in storage_uri:
-                extension = storage_uri.split('.')[-1].lower()
-            else:
-                extension = "jpg"  # 기본값
-            
-            # dataset_name_{순번}.확장자 형식으로 생성
-            numbered_name = f"{dataset.name}_{idx}.{extension}"
+            # stored_filename은 이미 dataset_name_sequence_number.extension 형식
+            # 예: pothole_1.jpg
+            stored_filename = metadata.get("stored_filename", "")
             
             asset = Asset(
                 dataset_split_id=dataset_split.id,
-                name=numbered_name,  # ERD의 에셋명 필드 (dataset_name_{n} 형식)
+                name=stored_filename,  # dataset_name_sequence_number.extension 형식
                 type=AssetType.IMAGE,
                 storage_uri=storage_uri,
                 sha256=sha256_hash,
@@ -1637,3 +1639,82 @@ async def delete_annotation(
     db.commit()
 
     return Response(status_code=status.HTTP_204_NO_CONTENT)
+
+
+# ========== LABEL FILE APIs (S3) ==========
+
+class LabelUploadUrlRequest(BaseModel):
+    """Label 업로드용 Presigned URL 요청"""
+    filename: str
+
+
+@router.post("/{dataset_id}/labels/presigned-upload-url")
+async def get_label_presigned_upload_url(
+    dataset_id: int,
+    request: LabelUploadUrlRequest,
+    db: Session = Depends(get_db),
+    current_user: dict = Depends(get_current_user)
+):
+    """
+    Label 파일 업로드용 Presigned URL 발급
+
+    - Label 파일은 datasets/{dataset_name}/labels/{base_filename}.txt 경로에 저장
+    - 이미지 파일명과 매핑 (예: image1.jpg -> image1.txt)
+    - 프론트엔드가 Presigned URL로 직접 S3에 업로드
+    - URL 만료 시간: 1시간
+    """
+    # 데이터셋 확인
+    dataset = db.query(Dataset).filter(Dataset.id == dataset_id).first()
+    if not dataset:
+        raise HTTPException(status_code=404, detail="Dataset not found")
+
+    # Presigned URL 생성
+    try:
+        url_data = presigned_url_service.generate_label_upload_url(
+            dataset_name=dataset.name,
+            image_filename=request.filename
+        )
+        return url_data
+    except Exception as e:
+        raise HTTPException(
+            status_code=500,
+            detail=f"Label upload URL 생성 실패: {str(e)}"
+        )
+
+
+@router.delete("/{dataset_id}/labels/{image_filename}")
+async def delete_label_file(
+    dataset_id: int,
+    image_filename: str,
+    db: Session = Depends(get_db),
+    current_user: dict = Depends(get_current_user)
+):
+    """
+    S3에서 Label 파일 삭제
+
+    - Label 파일명은 이미지 파일명에서 파생 (예: image1.jpg -> image1.txt)
+    - datasets/{dataset_name}/labels/{base_filename}.txt 경로에서 삭제
+    """
+    # 데이터셋 확인
+    dataset = db.query(Dataset).filter(Dataset.id == dataset_id).first()
+    if not dataset:
+        raise HTTPException(status_code=404, detail="Dataset not found")
+
+    # Label 파일 삭제
+    try:
+        success = presigned_url_service.delete_label_file(
+            dataset_name=dataset.name,
+            image_filename=image_filename
+        )
+        if success:
+            return {"message": "Label 파일 삭제 완료", "filename": image_filename}
+        else:
+            raise HTTPException(
+                status_code=500,
+                detail="Label 파일 삭제 실패"
+            )
+    except Exception as e:
+        raise HTTPException(
+            status_code=500,
+            detail=f"Label 파일 삭제 실패: {str(e)}"
+        )

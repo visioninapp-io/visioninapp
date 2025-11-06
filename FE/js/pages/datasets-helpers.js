@@ -152,7 +152,7 @@ async function handleUpload() {
         return;
     }
 
-    console.log('[DatasetsPage] Starting upload...', {
+    console.log('[DatasetsPage] Starting presigned URL upload...', {
         datasetId,
         newDatasetName,
         filesCount: files.length
@@ -161,41 +161,39 @@ async function handleUpload() {
     document.getElementById('upload-progress').classList.remove('d-none');
     document.getElementById('start-upload-btn').disabled = true;
 
+    const progressBar = document.getElementById('upload-progress-bar');
+    const statusText = document.getElementById('upload-status');
+
     try {
-        const formData = new FormData();
+        // Progress callback for tracking upload progress
+        const onProgress = (current, total) => {
+            const percent = Math.round((current / total) * 100);
+            progressBar.style.width = percent + '%';
+            statusText.textContent = `Uploading... ${current}/${total} files (${percent}%)`;
+        };
 
-        Array.from(files).forEach(file => {
-            formData.append('files', file);
-        });
+        // Use presigned URL upload method
+        const result = await apiService.uploadWithPresignedUrl(
+            files,
+            datasetId || null,
+            newDatasetName || null,
+            newDatasetDescription || null,
+            onProgress
+        );
 
-        if (datasetId) {
-            formData.append('dataset_id', datasetId);
-        } else {
-            formData.append('name', newDatasetName);
-            if (newDatasetDescription) {
-                formData.append('description', newDatasetDescription);
-            }
-        }
-
-        let progress = 0;
-        const progressBar = document.getElementById('upload-progress-bar');
-        const statusText = document.getElementById('upload-status');
-
-        const progressInterval = setInterval(() => {
-            progress += 10;
-            if (progress >= 90) clearInterval(progressInterval);
-            progressBar.style.width = progress + '%';
-            statusText.textContent = `Uploading... ${progress}%`;
-        }, 500);
-
-        const result = await apiService.uploadDataset(formData);
         console.log('[DatasetsPage] Upload result:', result);
 
-        clearInterval(progressInterval);
         progressBar.style.width = '100%';
         statusText.textContent = 'Upload complete!';
 
-        showToast('Dataset uploaded successfully!', 'success');
+        const successCount = result.successful_count || 0;
+        const failedCount = result.failed_count || 0;
+
+        if (failedCount > 0) {
+            showToast(`Upload completed with warnings: ${successCount} succeeded, ${failedCount} failed`, 'warning');
+        } else {
+            showToast(`Dataset uploaded successfully! ${successCount} files uploaded.`, 'success');
+        }
 
         // Close modal
         const modal = bootstrap.Modal.getInstance(document.getElementById('uploadDatasetModal'));
@@ -210,6 +208,8 @@ async function handleUpload() {
         console.error('[DatasetsPage] Upload error:', error);
         showToast('Upload failed: ' + error.message, 'error');
         document.getElementById('start-upload-btn').disabled = false;
+        progressBar.style.width = '0%';
+        statusText.textContent = 'Upload failed';
     }
 }
 

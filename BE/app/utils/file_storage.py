@@ -8,7 +8,6 @@ from pathlib import Path
 from typing import List, Optional
 from fastapi import UploadFile
 from PIL import Image
-import uuid
 import boto3
 from botocore.exceptions import ClientError
 
@@ -92,6 +91,8 @@ class FileStorage:
         self,
         file: UploadFile,
         dataset_id: int,
+        dataset_name: str,
+        sequence_number: int,
         validate_content: bool = True
     ) -> dict:
         """
@@ -100,6 +101,8 @@ class FileStorage:
         Args:
             file: Uploaded file
             dataset_id: Dataset ID to associate with
+            dataset_name: Dataset name for filename generation (e.g., "pothole")
+            sequence_number: Sequence number for filename (e.g., 1, 2, 3...)
             validate_content: Whether to validate image content using PIL
 
         Returns:
@@ -110,12 +113,22 @@ class FileStorage:
         if not is_valid:
             raise ValueError(error_msg)
 
-        # Generate unique filename
-        file_ext = Path(file.filename).suffix.lower()
-        unique_filename = f"{uuid.uuid4()}{file_ext}"
-
-        # S3 key: datasets/dataset_X/images/filename.jpg
-        s3_key = f"datasets/dataset_{dataset_id}/images/{unique_filename}"
+        # Get file extension from original filename
+        original_filename = file.filename
+        file_ext = Path(original_filename).suffix.lower()
+        if not file_ext:
+            file_ext = '.jpg'  # 기본값
+        
+        # Sanitize dataset name for S3 path (remove special characters)
+        safe_dataset_name = dataset_name.replace('\\', '_').replace('/', '_').replace(' ', '_')
+        
+        # Generate filename: dataset_name_sequence_number.extension
+        # 예: pothole_1.jpg, pothole_2.jpg, ...
+        safe_filename = f"{safe_dataset_name}_{sequence_number}{file_ext}"
+        
+        # S3 key: datasets/dataset_name/images/dataset_name_sequence_number.extension
+        # 예: datasets/pothole/images/pothole_1.jpg
+        s3_key = f"datasets/{safe_dataset_name}/images/{safe_filename}"
 
         # Read file contents
         try:
@@ -140,11 +153,11 @@ class FileStorage:
 
             # Determine content type
             content_type = 'image/jpeg'
-            if file_ext in ['.png']:
+            if file_ext == '.png':
                 content_type = 'image/png'
-            elif file_ext in ['.gif']:
+            elif file_ext == '.gif':
                 content_type = 'image/gif'
-            elif file_ext in ['.bmp']:
+            elif file_ext == '.bmp':
                 content_type = 'image/bmp'
             elif file_ext in ['.tiff', '.tif']:
                 content_type = 'image/tiff'
@@ -162,13 +175,13 @@ class FileStorage:
             # Get file size
             file_size = len(contents)
 
-            # Relative path for database (same format as before for compatibility)
-            relative_path = f"datasets/dataset_{dataset_id}/images/{unique_filename}"
+            # Relative path for database: datasets/dataset_name/images/dataset_name_sequence_number.extension
+            relative_path = s3_key
 
             return {
-                "filename": file.filename,
-                "stored_filename": unique_filename,
-                "file_path": f"datasets/dataset_{dataset_id}/images/{unique_filename}",  # Full S3 path
+                "filename": file.filename,  # 원본 파일명
+                "stored_filename": safe_filename,  # dataset_name_sequence_number.extension 형식
+                "file_path": s3_key,  # Full S3 path
                 "relative_path": relative_path,
                 "file_size": file_size,
                 "width": width,
@@ -186,10 +199,18 @@ class FileStorage:
     async def save_images_batch(
         self,
         files: List[UploadFile],
-        dataset_id: int
+        dataset_id: int,
+        dataset_name: str,
+        start_number: int = 1
     ) -> tuple[List[dict], List[dict]]:
         """
-        Save multiple images in batch
+        Save multiple images in batch with sequential numbering
+
+        Args:
+            files: List of uploaded files
+            dataset_id: Dataset ID to associate with
+            dataset_name: Dataset name for filename generation
+            start_number: Starting sequence number (default: 1)
 
         Returns:
             (successful_uploads, failed_uploads)
@@ -197,9 +218,15 @@ class FileStorage:
         successful = []
         failed = []
 
-        for file in files:
+        for idx, file in enumerate(files, start=start_number):
             try:
-                metadata = await self.save_image(file, dataset_id)
+                metadata = await self.save_image(
+                    file, 
+                    dataset_id, 
+                    dataset_name, 
+                    idx,
+                    validate_content=True
+                )
                 successful.append({
                     "filename": file.filename,
                     "metadata": metadata
@@ -246,31 +273,40 @@ class FileStorage:
             print(f"[S3] Unexpected error downloading {s3_key}: {e}")
             return None
 
-    def delete_dataset_files(self, dataset_id: int):
-        """Delete all files associated with a dataset from S3"""
+    def delete_dataset_files(self, dataset_name: str):
+        """
+        Delete all files associated with a dataset from S3
+        
+        Args:
+            dataset_name: Dataset name (e.g., "pothole")
+        """
         try:
+            # Sanitize dataset name for S3 path
+            safe_dataset_name = dataset_name.replace('\\', '_').replace('/', '_').replace(' ', '_')
+            
             # S3에서 dataset의 모든 파일 삭제
-            prefix = f"datasets/dataset_{dataset_id}/"
+            # 새로운 형식: datasets/{dataset_name}/
+            prefix = f"datasets/{safe_dataset_name}/"
             
             # 해당 prefix로 시작하는 모든 객체 조회
-            response = self.s3_client.list_objects_v2(
-                Bucket=settings.AWS_BUCKET_NAME,
-                Prefix=prefix
-            )
+            objects_to_delete = []
+            paginator = self.s3_client.get_paginator('list_objects_v2')
             
-            if 'Contents' in response:
-                # 삭제할 객체 목록 생성
-                objects_to_delete = [{'Key': obj['Key']} for obj in response['Contents']]
-                
-                if objects_to_delete:
-                    # 일괄 삭제
+            for page in paginator.paginate(Bucket=settings.AWS_BUCKET_NAME, Prefix=prefix):
+                if 'Contents' in page:
+                    objects_to_delete.extend([{'Key': obj['Key']} for obj in page['Contents']])
+            
+            if objects_to_delete:
+                # 일괄 삭제 (최대 1000개씩)
+                for i in range(0, len(objects_to_delete), 1000):
+                    batch = objects_to_delete[i:i+1000]
                     self.s3_client.delete_objects(
                         Bucket=settings.AWS_BUCKET_NAME,
-                        Delete={'Objects': objects_to_delete}
+                        Delete={'Objects': batch}
                     )
-                    print(f"[S3] Deleted {len(objects_to_delete)} files for dataset {dataset_id}")
+                print(f"[S3] Deleted {len(objects_to_delete)} files for dataset '{dataset_name}' (prefix: {prefix})")
             else:
-                print(f"[S3] No files found for dataset {dataset_id}")
+                print(f"[S3] No files found for dataset '{dataset_name}' (prefix: {prefix})")
                 
         except ClientError as e:
             print(f"[S3] Error deleting dataset files: {e}")

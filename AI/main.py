@@ -21,6 +21,7 @@ logger = logging.getLogger(__name__)
 # Import AI services
 from training_service import YOLOTrainingService
 from inference_service import YOLOInferenceService
+from conversion_service import ModelConversionService
 
 app = FastAPI(
     title="AI Training & Inference Service",
@@ -40,6 +41,7 @@ app.add_middleware(
 # In-memory job tracking (use Redis in production)
 training_jobs: Dict[str, Dict[str, Any]] = {}
 inference_cache: Dict[str, YOLOInferenceService] = {}
+conversion_service = ModelConversionService()
 
 # ============================================================================
 # Request/Response Models
@@ -95,6 +97,43 @@ class InferenceResponse(BaseModel):
     predictions: List[Detection]
     count: int
     inference_time: float
+
+class ConversionRequest(BaseModel):
+    """Model conversion request"""
+    model_path: str = Field(..., description="Path to source .pt model file")
+    target_format: str = Field(..., description="Target format (onnx, tensorrt)")
+    output_dir: Optional[str] = Field(default=None, description="Output directory (optional)")
+    
+    # ONNX-specific options
+    imgsz: int = Field(default=640, ge=320, le=1280, description="Input image size")
+    batch_size: int = Field(default=1, ge=1, le=32, description="Batch size")
+    dynamic: bool = Field(default=False, description="Enable dynamic shapes (ONNX)")
+    simplify: bool = Field(default=True, description="Simplify ONNX model")
+    opset: int = Field(default=17, ge=11, le=20, description="ONNX opset version")
+    
+    # TensorRT-specific options
+    precision: str = Field(default="fp16", description="TensorRT precision (fp32, fp16, int8)")
+    workspace: int = Field(default=4, ge=1, le=16, description="TensorRT workspace size (GB)")
+    int8_calibration_data: Optional[str] = Field(default=None, description="Path to calibration data for INT8")
+
+class ConversionResponse(BaseModel):
+    """Model conversion response"""
+    success: bool
+    message: str
+    output_path: Optional[str] = None
+    conversion_time: Optional[float] = None
+    model_info: Optional[Dict[str, Any]] = None
+    error: Optional[str] = None
+
+class ModelInfoResponse(BaseModel):
+    """Model information response"""
+    model_path: str
+    model_size_mb: float
+    classes: int
+    class_names: List[str]
+    supported_formats: List[str]
+    supported_precisions: List[str]
+    recommended_settings: Dict[str, Any]
 
 # ============================================================================
 # Health Check
@@ -413,6 +452,166 @@ async def list_models():
         })
     
     return {"models": models}
+
+# ============================================================================
+# Model Conversion Endpoints
+# ============================================================================
+
+@app.post("/api/v1/convert", response_model=ConversionResponse)
+async def convert_model(request: ConversionRequest):
+    """Convert a YOLO model to ONNX or TensorRT format"""
+    try:
+        logger.info(f"Starting model conversion: {request.model_path} -> {request.target_format}")
+        
+        # Prepare conversion options
+        conversion_options = {
+            "imgsz": request.imgsz,
+            "batch_size": request.batch_size,
+        }
+        
+        # Add format-specific options
+        if request.target_format.lower() == "onnx":
+            conversion_options.update({
+                "dynamic": request.dynamic,
+                "simplify": request.simplify,
+                "opset": request.opset
+            })
+        elif request.target_format.lower() in ["tensorrt", "trt"]:
+            conversion_options.update({
+                "precision": request.precision,
+                "workspace": request.workspace,
+                "int8_calibration_data": request.int8_calibration_data
+            })
+        
+        # Perform conversion
+        result = conversion_service.convert_model(
+            model_path=request.model_path,
+            target_format=request.target_format,
+            output_dir=request.output_dir,
+            **conversion_options
+        )
+        
+        if result["success"]:
+            return ConversionResponse(
+                success=True,
+                message=f"Model successfully converted to {request.target_format}",
+                output_path=result["output_path"],
+                conversion_time=result["conversion_time"],
+                model_info=result["model_info"]
+            )
+        else:
+            return ConversionResponse(
+                success=False,
+                message="Conversion failed",
+                error=result["error"]
+            )
+            
+    except Exception as e:
+        logger.error(f"Conversion endpoint error: {e}")
+        return ConversionResponse(
+            success=False,
+            message="Conversion failed",
+            error=str(e)
+        )
+
+@app.get("/api/v1/models/{model_name}/info", response_model=ModelInfoResponse)
+async def get_model_info(model_name: str):
+    """Get information about a model for conversion planning"""
+    try:
+        # Check if model exists in models directory
+        model_path = Path("models") / model_name
+        if not model_path.exists():
+            # Try without .pt extension
+            if not model_name.endswith('.pt'):
+                model_path = Path("models") / f"{model_name}.pt"
+                if not model_path.exists():
+                    raise HTTPException(status_code=404, detail=f"Model not found: {model_name}")
+        
+        # Get model information
+        info = conversion_service.get_conversion_info(model_path)
+        
+        if "error" in info:
+            raise HTTPException(status_code=500, detail=info["error"])
+        
+        return ModelInfoResponse(**info)
+        
+    except HTTPException:
+        raise
+    except Exception as e:
+        logger.error(f"Model info error: {e}")
+        raise HTTPException(status_code=500, detail=str(e))
+
+@app.post("/api/v1/convert/batch")
+async def convert_models_batch(
+    model_paths: List[str],
+    target_format: str,
+    output_dir: Optional[str] = None,
+    conversion_options: Dict[str, Any] = {}
+):
+    """Convert multiple models to the specified format"""
+    try:
+        logger.info(f"Starting batch conversion: {len(model_paths)} models -> {target_format}")
+        
+        results = conversion_service.batch_convert(
+            model_paths=model_paths,
+            target_format=target_format,
+            output_dir=output_dir,
+            **conversion_options
+        )
+        
+        successful = sum(1 for r in results if r.get("success", False))
+        
+        return {
+            "success": True,
+            "message": f"Batch conversion completed: {successful}/{len(results)} successful",
+            "results": results,
+            "summary": {
+                "total": len(results),
+                "successful": successful,
+                "failed": len(results) - successful
+            }
+        }
+        
+    except Exception as e:
+        logger.error(f"Batch conversion error: {e}")
+        return {
+            "success": False,
+            "message": "Batch conversion failed",
+            "error": str(e)
+        }
+
+@app.get("/api/v1/convert/formats")
+async def get_supported_formats():
+    """Get list of supported conversion formats and options"""
+    return {
+        "supported_formats": conversion_service.supported_formats,
+        "supported_precisions": conversion_service.supported_precisions,
+        "format_options": {
+            "onnx": {
+                "description": "Open Neural Network Exchange format",
+                "options": {
+                    "imgsz": "Input image size (320-1280)",
+                    "batch_size": "Batch size (1-32)",
+                    "dynamic": "Enable dynamic shapes",
+                    "simplify": "Simplify ONNX graph",
+                    "opset": "ONNX opset version (11-20)"
+                },
+                "use_cases": ["Cross-platform deployment", "Edge devices", "ONNX Runtime"]
+            },
+            "tensorrt": {
+                "description": "NVIDIA TensorRT optimized format",
+                "options": {
+                    "imgsz": "Input image size (320-1280)",
+                    "batch_size": "Batch size (1-32)",
+                    "precision": "Precision mode (fp32, fp16, int8)",
+                    "workspace": "GPU workspace size in GB (1-16)",
+                    "int8_calibration_data": "Calibration data path for INT8"
+                },
+                "use_cases": ["NVIDIA GPU deployment", "High-performance inference", "Production servers"],
+                "requirements": ["NVIDIA GPU", "TensorRT installed", "CUDA compatible"]
+            }
+        }
+    }
 
 # ============================================================================
 # Startup/Shutdown

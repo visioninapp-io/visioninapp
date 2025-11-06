@@ -909,13 +909,23 @@ async function saveAllAnnotations() {
         console.log(`[SelfAnnotation] Save complete: ${successCount} success, ${failCount} failed`);
 
         if (successCount > 0) {
-            // Upload label file to S3
+            // Upload label files to S3 for all images that had annotations saved
+            const uploadedImages = new Set();
             try {
-                await uploadLabelsToS3();
-                showToast(`Saved ${successCount} annotation(s) and uploaded labels to S3`, 'success');
+                for (const [imageId, annotations] of selfAnnotationState.imageAnnotations.entries()) {
+                    const savedAnnotations = annotations.filter(ann => ann.saved);
+                    if (savedAnnotations.length > 0) {
+                        const imageData = selfAnnotationState.images.find(img => img.id === imageId);
+                        if (imageData) {
+                            await uploadLabelsForImage(imageData, savedAnnotations);
+                            uploadedImages.add(imageId);
+                        }
+                    }
+                }
+                showToast(`Saved ${successCount} annotation(s) and uploaded ${uploadedImages.size} label file(s) to S3`, 'success');
             } catch (labelError) {
                 console.error('[SelfAnnotation] Failed to upload labels to S3:', labelError);
-                showToast(`Saved ${successCount} annotation(s) but failed to upload labels to S3`, 'warning');
+                showToast(`Saved ${successCount} annotation(s) but failed to upload some labels to S3`, 'warning');
             }
 
             // Update current image display
@@ -933,26 +943,15 @@ async function saveAllAnnotations() {
     }
 }
 
-// Upload labels to S3 for current image
-async function uploadLabelsToS3() {
+// Upload labels to S3 for a specific image with given annotations
+async function uploadLabelsForImage(imageData, annotations) {
     try {
-        const currentImage = selfAnnotationState.currentImage;
-        if (!currentImage) {
-            console.warn('[SelfAnnotation] No current image for label upload');
+        if (!imageData || !annotations || annotations.length === 0) {
+            console.warn('[SelfAnnotation] Invalid image or annotations for label upload');
             return;
         }
 
-        // Get all saved annotations for current image
-        const annotations = selfAnnotationState.annotations.filter(ann =>
-            ann.saved && ann.imageId === currentImage.id
-        );
-
-        if (annotations.length === 0) {
-            console.log('[SelfAnnotation] No annotations to upload for labels');
-            return;
-        }
-
-        console.log(`[SelfAnnotation] Uploading labels for ${currentImage.filename} (${annotations.length} annotations)`);
+        console.log(`[SelfAnnotation] Uploading labels for ${imageData.filename} (${annotations.length} annotations)`);
 
         // Get label classes mapping
         const labelClasses = await apiService.get(`/datasets/${selfAnnotationState.datasetId}/label-classes`);
@@ -964,27 +963,72 @@ async function uploadLabelsToS3() {
             });
         }
 
+        // Convert display coordinates to normalized coordinates
+        // Use stored dimensions from when annotations were created
+        const normalizedAnnotations = annotations.map(ann => {
+            // Get original dimensions (stored when annotation was created)
+            const originalWidth = ann.originalWidth || imageData.width || 1000;
+            const originalHeight = ann.originalHeight || imageData.height || 1000;
+            const scale = ann.scale || 1;
+
+            // Convert from display coordinates back to original image coordinates
+            const origX = ann.x / scale;
+            const origY = ann.y / scale;
+            const origWidth = ann.width / scale;
+            const origHeight = ann.height / scale;
+
+            // Normalize to 0-1 range
+            return {
+                className: ann.className,
+                x: origX / originalWidth,
+                y: origY / originalHeight,
+                width: origWidth / originalWidth,
+                height: origHeight / originalHeight
+            };
+        });
+
+        console.log(`[SelfAnnotation] Normalized annotations:`, normalizedAnnotations);
+
         // Convert annotations to YOLO format
-        const labelContent = convertToYOLO(annotations, labelClassesMap);
+        const labelContent = convertToYOLO(normalizedAnnotations, labelClassesMap);
 
         if (!labelContent) {
             console.warn('[SelfAnnotation] No valid label content generated');
             return;
         }
 
+        console.log(`[SelfAnnotation] Label content generated (${labelContent.split('\n').length} lines):`, labelContent);
+
         // Upload to S3
         await apiService.uploadLabel(
             selfAnnotationState.datasetId,
-            currentImage.filename,
+            imageData.filename,
             labelContent
         );
 
-        console.log(`[SelfAnnotation] Successfully uploaded labels for ${currentImage.filename}`);
+        console.log(`[SelfAnnotation] Successfully uploaded labels for ${imageData.filename}`);
 
     } catch (error) {
         console.error('[SelfAnnotation] Failed to upload labels to S3:', error);
         throw error;
     }
+}
+
+// Upload labels to S3 for current image (called after individual annotation edits)
+async function uploadLabelsToS3() {
+    const currentImage = selfAnnotationState.currentImage;
+    if (!currentImage) {
+        console.warn('[SelfAnnotation] No current image for label upload');
+        return;
+    }
+
+    const annotations = selfAnnotationState.annotations.filter(ann => ann.saved);
+    if (annotations.length === 0) {
+        console.log('[SelfAnnotation] No saved annotations to upload for current image');
+        return;
+    }
+
+    await uploadLabelsForImage(currentImage, annotations);
 }
 
 // Create or get label classes for the given class names
@@ -1057,9 +1101,13 @@ async function nextImage() {
 function saveCurrentAnnotationsToFrontend() {
     if (selfAnnotationState.currentImage) {
         const imageId = selfAnnotationState.currentImage.id;
-        // Store a copy of annotations for this image
-        selfAnnotationState.imageAnnotations.set(imageId, [...selfAnnotationState.annotations]);
-        console.log(`[SelfAnnotation] Saved ${selfAnnotationState.annotations.length} annotations for image ${imageId} to frontend`);
+        // Store a copy of annotations for this image, ensuring imageId is set
+        const annotationsWithImageId = selfAnnotationState.annotations.map(ann => ({
+            ...ann,
+            imageId: imageId
+        }));
+        selfAnnotationState.imageAnnotations.set(imageId, annotationsWithImageId);
+        console.log(`[SelfAnnotation] Saved ${annotationsWithImageId.length} annotations for image ${imageId} to frontend`);
     }
 }
 

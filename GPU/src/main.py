@@ -29,7 +29,7 @@ def handle_train(mq: MQ, exchanges: dict, msg: dict):
         "job_id": "abc12345",
         "dataset": {
             "s3_prefix": "datasets/myset/",  // S3 내 prefix (끝 슬래시 권장)
-            "name": "myset"                  // 로컬 폴더명 (생략 가능)
+            "name": "myset"
         },
         "output": {
             "s3_bucket": "visioninapp-bucket",

@@ -2,7 +2,7 @@ from fastapi import APIRouter, Depends, HTTPException, status
 from sqlalchemy.orm import Session
 from typing import List
 from app.core.database import get_db
-from app.core.auth import get_current_user, get_current_user_dev
+from app.core.auth import get_current_user
 from app.models.evaluation import Evaluation
 from app.schemas.evaluation import EvaluationCreate, EvaluationResponse, ModelComparisonResponse
 
@@ -15,7 +15,7 @@ async def get_evaluations(
     limit: int = 10000,
     model_version_id: int = None,
     db: Session = Depends(get_db),
-    current_user: dict = Depends(get_current_user_dev)
+    current_user: dict = Depends(get_current_user)
 ):
     """Get all evaluations"""
     query = db.query(Evaluation)
@@ -31,7 +31,7 @@ async def get_evaluations(
 async def create_evaluation(
     evaluation: EvaluationCreate,
     db: Session = Depends(get_db),
-    current_user: dict = Depends(get_current_user_dev)
+    current_user: dict = Depends(get_current_user)
 ):
     """Create a new model evaluation"""
     from app.models.model_version import ModelVersion
@@ -61,7 +61,7 @@ async def create_evaluation(
 async def get_evaluation(
     evaluation_id: int,
     db: Session = Depends(get_db),
-    current_user: dict = Depends(get_current_user_dev)
+    current_user: dict = Depends(get_current_user)
 ):
     """Get a specific evaluation"""
     evaluation = db.query(Evaluation).filter(Evaluation.id == evaluation_id).first()
@@ -74,7 +74,7 @@ async def get_evaluation(
 async def get_model_version_evaluations(
     model_version_id: int,
     db: Session = Depends(get_db),
-    current_user: dict = Depends(get_current_user_dev)
+    current_user: dict = Depends(get_current_user)
 ):
     """Get all evaluations for a specific model version"""
     from app.models.model_version import ModelVersion
@@ -91,7 +91,7 @@ async def get_model_version_evaluations(
 async def get_latest_evaluation(
     model_version_id: int,
     db: Session = Depends(get_db),
-    current_user: dict = Depends(get_current_user_dev)
+    current_user: dict = Depends(get_current_user)
 ):
     """Get the latest evaluation for a model version"""
     from app.models.model_version import ModelVersion
@@ -114,7 +114,7 @@ async def get_latest_evaluation(
 async def compare_models(
     model_version_ids: List[int],
     db: Session = Depends(get_db),
-    current_user: dict = Depends(get_current_user_dev)
+    current_user: dict = Depends(get_current_user)
 ):
     """Compare multiple model versions"""
     if len(model_version_ids) < 2:
@@ -170,7 +170,7 @@ async def compare_models(
 async def delete_evaluation(
     evaluation_id: int,
     db: Session = Depends(get_db),
-    current_user: dict = Depends(get_current_user_dev)
+    current_user: dict = Depends(get_current_user)
 ):
     """Delete an evaluation"""
     evaluation = db.query(Evaluation).filter(Evaluation.id == evaluation_id).first()

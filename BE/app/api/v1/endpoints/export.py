@@ -3,7 +3,7 @@ from fastapi.responses import FileResponse
 from sqlalchemy.orm import Session
 from typing import List
 from app.core.database import get_db
-from app.core.auth import get_current_user_dev
+from app.core.auth import get_current_user
 from app.models.dataset import Dataset, DatasetVersion, ExportJob
 from app.schemas.dataset_version import ExportJobCreate, ExportJobResponse
 from pathlib import Path
@@ -16,7 +16,7 @@ async def get_export_jobs(
     skip: int = 0,
     limit: int = 10000,
     db: Session = Depends(get_db),
-    current_user: dict = Depends(get_current_user_dev)
+    current_user: dict = Depends(get_current_user)
 ):
     """Get all export jobs for current user"""
     # For now, return all export jobs (can filter by created_by later)
@@ -29,7 +29,7 @@ async def create_export_job(
     export_request: ExportJobCreate,
     background_tasks: BackgroundTasks,
     db: Session = Depends(get_db),
-    current_user: dict = Depends(get_current_user_dev)
+    current_user: dict = Depends(get_current_user)
 ):
     """Create a new export job"""
     # Verify dataset or version exists
@@ -76,7 +76,7 @@ async def create_export_job(
 async def get_export_job(
     export_id: int,
     db: Session = Depends(get_db),
-    current_user: dict = Depends(get_current_user_dev)
+    current_user: dict = Depends(get_current_user)
 ):
     """Get specific export job"""
     job = db.query(ExportJob).filter(ExportJob.id == export_id).first()
@@ -90,7 +90,7 @@ async def get_export_job(
 async def download_export(
     export_id: int,
     db: Session = Depends(get_db),
-    current_user: dict = Depends(get_current_user_dev)
+    current_user: dict = Depends(get_current_user)
 ):
     """Download exported dataset"""
     job = db.query(ExportJob).filter(ExportJob.id == export_id).first()
@@ -114,7 +114,7 @@ async def download_export(
 async def delete_export_job(
     export_id: int,
     db: Session = Depends(get_db),
-    current_user: dict = Depends(get_current_user_dev)
+    current_user: dict = Depends(get_current_user)
 ):
     """Delete export job and its file"""
     job = db.query(ExportJob).filter(ExportJob.id == export_id).first()

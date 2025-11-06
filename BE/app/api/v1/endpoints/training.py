@@ -1,78 +1,34 @@
 from fastapi import APIRouter, Depends, HTTPException, status
 from sqlalchemy.orm import Session
 from typing import List
-from datetime import datetime, timedelta
-import logging
-from app.core.database import get_db, SessionLocal
-from app.core.auth import get_current_user, get_current_user_dev
+from datetime import datetime
+import logging, uuid, re
 
-logger = logging.getLogger(__name__)
+from app.core.database import get_db, SessionLocal
+from app.core.auth import get_current_user_dev
+from app.core.config import settings
+
 from app.models.training import TrainingJob, TrainingStatus
 from app.models.model import Model, ModelStatus, ModelFramework
 from app.utils.project_helper import get_or_create_default_project
-from app.schemas.training import (
-    TrainingJobCreate, TrainingJobUpdate, TrainingJobResponse,
-    TrainingControlRequest, HyperparameterTuningRequest
-)
-from app.services.training_service import training_manager
-from app.services.ai_client import get_ai_client
 
+from app.schemas.training import (
+    TrainingJobCreate, TrainingJobUpdate, TrainingJobResponse
+)
+from app.rabbitmq.producer import send_train_request
+
+logger = logging.getLogger(__name__)
 router = APIRouter()
 
+def _norm_prefix(p: str) -> str:
+    return p if p.endswith("/") else p + "/"
 
-@router.get("/", response_model=List[TrainingJobResponse])
-async def get_training_jobs(
-    skip: int = 0,
-    limit: int = 100,
-    status_filter: str = None,
-    db: Session = Depends(get_db),
-    current_user: dict = Depends(get_current_user_dev)
-):
-    """Get all training jobs for current user (with AI service sync for running YOLO jobs)"""
-    query = db.query(TrainingJob).filter(TrainingJob.created_by == current_user["uid"])
-
-    if status_filter:
-        query = query.filter(TrainingJob.status == status_filter)
-
-    jobs = query.offset(skip).limit(limit).all()
-    
-    # Sync running YOLO jobs from AI service
-    ai_client = get_ai_client()
-    for job in jobs:
-        if job.status in [TrainingStatus.RUNNING, TrainingStatus.PENDING] and 'yolo' in job.architecture.lower():
-            try:
-                ai_status = await ai_client.get_training_status(job.id)
-                ai_job_status = ai_status.get('status', '').lower()
-                
-                if ai_job_status == 'running':
-                    job.status = TrainingStatus.RUNNING
-                    current_epoch = ai_status.get('current_epoch', job.current_epoch)
-                    current_loss = ai_status.get('current_loss', job.current_loss)
-                    
-                    map50_value = ai_status.get('current_map50')
-                    current_accuracy = float(map50_value) * 100 if map50_value is not None else job.current_accuracy
-                    
-                    progress = ai_status.get('progress', job.progress_percentage)
-                    
-                    # Update job
-                    job.current_epoch = current_epoch
-                    job.current_loss = current_loss
-                    job.current_accuracy = current_accuracy
-                    job.progress_percentage = progress
-                elif ai_job_status == 'completed':
-                    job.status = TrainingStatus.COMPLETED
-                    job.progress_percentage = 100.0
-                    job.completed_at = datetime.utcnow()
-                elif ai_job_status == 'failed':
-                    job.status = TrainingStatus.FAILED
-                    job.training_logs = ai_status.get('error', 'Training failed')
-                    job.completed_at = datetime.utcnow()
-            except Exception as e:
-                logger.warning(f"Failed to sync job {job.id} from AI service: {e}")
-    
-    db.commit()
-    return jobs
-
+def _slugify_model_name(s: str) -> str:
+    # "YOLOv8n" -> "yolov8n", 공백/특수문자 제거(언더스코어로 대체)
+    s = (s or "").strip().lower()
+    s = re.sub(r"\s+", "-", s)
+    s = re.sub(r"[^a-z0-9\-_\.]", "", s)
+    return s or "model"
 
 @router.post("/", response_model=TrainingJobResponse, status_code=status.HTTP_201_CREATED)
 async def create_training_job(
@@ -80,287 +36,87 @@ async def create_training_job(
     db: Session = Depends(get_db),
     current_user: dict = Depends(get_current_user_dev)
 ):
-    """Start a new training job"""
-    # Check if training job name already exists
-    existing_job = db.query(TrainingJob).filter(TrainingJob.name == job.name).first()
-    if existing_job:
+    # 이름 중복 방지
+    if db.query(TrainingJob).filter(TrainingJob.name == job.name).first():
         raise HTTPException(status_code=400, detail="Training job with this name already exists")
 
-    # Create training job
-    total_epochs = job.hyperparameters.get("epochs", 100)
+    # DB Job 생성
+    hp = {**job.hyperparameters, "dataset_name": job.dataset_name, "dataset_s3_prefix": job.dataset_s3_prefix}
+    total_epochs = hp.get("epochs", 20)
 
     db_job = TrainingJob(
         name=job.name,
-        dataset_id=job.dataset_id,
-        architecture=job.architecture,
-        hyperparameters=job.hyperparameters,
+        dataset_id=None,  # dataset_id 미사용
+        architecture=job.architecture or hp.get("model", "yolov8n"),  # 조회용/백업용
+        hyperparameters=hp,
         total_epochs=total_epochs,
         status=TrainingStatus.PENDING,
         created_by=current_user["uid"]
     )
-    db.add(db_job)
-    db.commit()
-    db.refresh(db_job)
+    db.add(db_job); db.commit(); db.refresh(db_job)
 
-    # Check if model was already created (by frontend) or needs to be created
+    # Model 생성/연결
     model_name = f"{job.name}_model"
-    existing_model = db.query(Model).filter(Model.name == model_name).first()
-    
-    if existing_model:
-        # Use the existing model (frontend already created it)
-        model = existing_model
-        # Update status to TRAINING
+    model = db.query(Model).filter(Model.name == model_name).first()
+    if model:
         model.status = ModelStatus.TRAINING
-        model.training_config = job.hyperparameters
-        model.hyperparameters = job.hyperparameters
-        db.commit()
-        db.refresh(model)
+        model.training_config = hp
+        model.hyperparameters = hp
+        db.commit(); db.refresh(model)
     else:
-        # Create new model (backend creates it)
-        # Get or create default project for user
         default_project = get_or_create_default_project(db, current_user["uid"])
-        
         model = Model(
             name=model_name,
-            architecture=job.architecture,
+            architecture=db_job.architecture,
             project_id=default_project.id,
             framework=ModelFramework.PYTORCH,
             status=ModelStatus.TRAINING,
-            training_config=job.hyperparameters,
-            hyperparameters=job.hyperparameters,
+            training_config=hp,
+            hyperparameters=hp,
             created_by=current_user["uid"]
         )
-        db.add(model)
-        db.commit()
-        db.refresh(model)
+        db.add(model); db.commit(); db.refresh(model)
 
-    # Link model to training job
     db_job.model_id = model.id
-    db.commit()
-    db.refresh(db_job)
+    db.commit(); db.refresh(db_job)
 
-    # Start training process
+    # 외부용 job_id(문자열) 생성 & 저장
+    job_id_str = uuid.uuid4().hex[:8]
+    db_job.hyperparameters["external_job_id"] = job_id_str
+    db.commit(); db.refresh(db_job)
+
+    # payload 구성
     try:
-        architecture = job.architecture.lower()
-        
-        # Check if this is a YOLO model -> use AI service (GPU server)
-        if 'yolo' in architecture:
-            # Use AI service for YOLO training
-            from app.utils.dataset_utils import prepare_yolo_dataset
-            ai_client = get_ai_client()
-            
-            # Prepare dataset in YOLO format
-            data_yaml_path = prepare_yolo_dataset(job.dataset_id, SessionLocal)
-            
-            if not data_yaml_path:
-                raise Exception("Failed to prepare YOLO dataset")
-            
-            # Submit to AI service
-            hyperparams = job.hyperparameters
-            await ai_client.start_training(
-                job_id=db_job.id,
-                data_yaml=data_yaml_path,
-                model=architecture,  # yolov8n, yolov8s, etc.
-                epochs=hyperparams.get('epochs', 100),
-                imgsz=hyperparams.get('img_size', 640),
-                batch=hyperparams.get('batch_size', 16),
-                project="uploads/models",
-                name=f"model_{model.id}"
-            )
-            
-            db_job.status = TrainingStatus.RUNNING
-            db.commit()
-            
-        else:
-            # PyTorch models (ResNet, MobileNet) - could be moved to AI service too
-            # For now, only YOLO is supported via AI service
-            raise HTTPException(
-                status_code=400,
-                detail=f"Architecture '{job.architecture}' not supported. Currently only YOLO models are supported via AI service. Please use yolov8n, yolov8s, yolov8m, yolov8l, or yolov8x."
-            )
-            
-            # Old code (commented out):
-            # training_config = {
-            #     'dataset_id': job.dataset_id,
-            #     'architecture': job.architecture,
-            #     'hyperparameters': job.hyperparameters
-            # }
-            # training_manager.start_training(db_job.id, training_config, SessionLocal)
-            
+        s3_prefix = _norm_prefix(job.dataset_s3_prefix)
+        dataset_name = job.dataset_name
+        model_key = _slugify_model_name(hp.get("model") or db_job.architecture)
+
+        payload = {
+            "job_id": job_id_str,
+            "dataset": {
+                "s3_prefix": s3_prefix,
+                "name": dataset_name
+            },
+            "output": {
+                "prefix": f"models/{model_key}",
+                "model_name": f"{dataset_name}.pt"
+            },
+            "hyperparams": {
+                "model": model_key,
+                "epochs": hp.get("epochs", 20),
+                "batch":  hp.get("batch", 8),
+                "imgsz":  hp.get("imgsz", hp.get("img_size", 640))
+            }
+        }
+
+        send_train_request(payload)
+
+        db_job.status = TrainingStatus.RUNNING
+        db.commit(); db.refresh(db_job)
+        return db_job
+
     except Exception as e:
         db_job.status = TrainingStatus.FAILED
-        db_job.training_logs = f"Failed to start training: {str(e)}"
+        db_job.training_logs = f"Failed to start training: {e}"
         db.commit()
         raise HTTPException(status_code=500, detail=str(e))
-
-    return db_job
-
-
-@router.get("/{job_id}", response_model=TrainingJobResponse)
-async def get_training_job(
-    job_id: int,
-    db: Session = Depends(get_db),
-    current_user: dict = Depends(get_current_user_dev)
-):
-    """Get a specific training job (syncs status from AI service if YOLO)"""
-    job = db.query(TrainingJob).filter(TrainingJob.id == job_id).first()
-    if not job:
-        raise HTTPException(status_code=404, detail="Training job not found")
-    
-    # If job is running/pending and uses YOLO, sync status from AI service
-    if job.status in [TrainingStatus.RUNNING, TrainingStatus.PENDING] and 'yolo' in job.architecture.lower():
-        try:
-            ai_client = get_ai_client()
-            ai_status = await ai_client.get_training_status(job_id)
-            
-            # Update job with latest status from AI service
-            ai_job_status = ai_status.get('status', '').lower()
-            
-            if ai_job_status == 'running':
-                job.status = TrainingStatus.RUNNING
-                current_epoch = ai_status.get('current_epoch', job.current_epoch)
-                current_loss = ai_status.get('current_loss', job.current_loss)
-                
-                # Get mAP50 and convert to percentage (handle None case)
-                map50_value = ai_status.get('current_map50')
-                current_accuracy = float(map50_value) * 100 if map50_value is not None else job.current_accuracy
-                
-                progress = ai_status.get('progress', job.progress_percentage)
-                
-                # Update job
-                job.current_epoch = current_epoch
-                job.current_loss = current_loss
-                job.current_accuracy = current_accuracy
-                job.progress_percentage = progress
-                
-                # Log for debugging
-                logger.info(f"[Job {job_id}] Synced from AI: Epoch {current_epoch}, Loss: {current_loss:.4f}, mAP50: {current_accuracy:.2f}%, Progress: {progress:.1f}%")
-                
-                db.commit()
-            elif ai_job_status == 'completed':
-                job.status = TrainingStatus.COMPLETED
-                job.progress_percentage = 100.0
-                job.completed_at = datetime.utcnow()
-                db.commit()
-            elif ai_job_status == 'failed':
-                job.status = TrainingStatus.FAILED
-                job.training_logs = ai_status.get('error', 'Training failed on AI service')
-                job.completed_at = datetime.utcnow()
-                db.commit()
-            elif ai_job_status == 'pending':
-                job.status = TrainingStatus.PENDING
-                db.commit()
-                
-        except Exception as e:
-            # AI service might be down, just return cached DB status
-            logger.warning(f"Failed to sync status from AI service: {e}")
-    
-    return job
-
-
-@router.put("/{job_id}", response_model=TrainingJobResponse)
-async def update_training_job(
-    job_id: int,
-    job_update: TrainingJobUpdate,
-    db: Session = Depends(get_db),
-    current_user: dict = Depends(get_current_user_dev)
-):
-    """Update training job status and metrics"""
-    db_job = db.query(TrainingJob).filter(TrainingJob.id == job_id).first()
-    if not db_job:
-        raise HTTPException(status_code=404, detail="Training job not found")
-
-    update_data = job_update.dict(exclude_unset=True)
-
-    for field, value in update_data.items():
-        setattr(db_job, field, value)
-
-    db.commit()
-    db.refresh(db_job)
-    return db_job
-
-
-@router.post("/{job_id}/control")
-async def control_training(
-    job_id: int,
-    control: TrainingControlRequest,
-    db: Session = Depends(get_db),
-    current_user: dict = Depends(get_current_user_dev)
-):
-    """Control training job (pause, resume, cancel)"""
-    job = db.query(TrainingJob).filter(TrainingJob.id == job_id).first()
-    if not job:
-        raise HTTPException(status_code=404, detail="Training job not found")
-
-    try:
-        if control.action == "pause":
-            training_manager.pause_training(job_id)
-            message = "Training paused"
-        elif control.action == "resume":
-            training_manager.resume_training(job_id)
-            message = "Training resumed"
-        elif control.action == "cancel":
-            training_manager.cancel_training(job_id)
-            message = "Training cancelled"
-        else:
-            raise HTTPException(status_code=400, detail="Invalid action")
-
-        return {"message": message, "status": job.status.value}
-
-    except ValueError as e:
-        # Job not in active jobs - update database only
-        if control.action == "pause":
-            job.status = TrainingStatus.PAUSED
-            message = "Training paused"
-        elif control.action == "resume":
-            job.status = TrainingStatus.RUNNING
-            message = "Training resumed"
-        elif control.action == "cancel":
-            job.status = TrainingStatus.CANCELLED
-            message = "Training cancelled"
-
-        db.commit()
-        return {"message": message, "status": job.status.value}
-
-
-@router.post("/hyperparameter-tuning")
-async def start_hyperparameter_tuning(
-    request: HyperparameterTuningRequest,
-    db: Session = Depends(get_db),
-    current_user: dict = Depends(get_current_user_dev)
-):
-    """Start hyperparameter tuning process"""
-    # TODO: Implement hyperparameter tuning with Optuna or similar
-    # This would create multiple training jobs with different hyperparameters
-
-    return {
-        "message": "Hyperparameter tuning started",
-        "dataset_id": request.dataset_id,
-        "architecture": request.architecture,
-        "n_trials": request.n_trials,
-        "search_space": request.search_space
-    }
-
-
-@router.get("/{job_id}/progress")
-async def get_training_progress(
-    job_id: int,
-    db: Session = Depends(get_db),
-    current_user: dict = Depends(get_current_user_dev)
-):
-    """Get real-time training progress"""
-    job = db.query(TrainingJob).filter(TrainingJob.id == job_id).first()
-    if not job:
-        raise HTTPException(status_code=404, detail="Training job not found")
-
-    return {
-        "job_id": job.id,
-        "status": job.status.value,
-        "current_epoch": job.current_epoch,
-        "total_epochs": job.total_epochs,
-        "progress_percentage": job.progress_percentage,
-        "current_loss": job.current_loss,
-        "current_accuracy": job.current_accuracy,
-        "estimated_completion": job.estimated_completion,
-        "metrics_history": job.metrics_history
-    }

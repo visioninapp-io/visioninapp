@@ -22,7 +22,7 @@ router = APIRouter()
 @router.get("/", response_model=List[ModelListResponse])
 async def get_models(
     skip: int = 0,
-    limit: int = 100,
+    limit: int = 10000,
     db: Session = Depends(get_db),
     current_user: dict = Depends(get_current_user_dev)
 ):

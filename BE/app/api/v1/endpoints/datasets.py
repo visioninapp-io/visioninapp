@@ -2,7 +2,7 @@ from fastapi import APIRouter, Depends, HTTPException, UploadFile, File, status,
 from fastapi.responses import StreamingResponse, Response, RedirectResponse
 from sqlalchemy.orm import Session
 from typing import List, Optional
-from pydantic import BaseModel
+from pydantic import BaseModel, field_validator
 import io
 import zipfile
 import base64
@@ -15,6 +15,7 @@ from app.models.label_class import LabelClass
 from app.utils.project_helper import get_or_create_default_project
 from app.utils.dataset_helper import (
     get_or_create_dataset_version,
+    create_new_dataset_version,
     get_or_create_dataset_split,
     get_latest_dataset_version,
     get_assets_from_dataset,
@@ -66,6 +67,12 @@ class UploadDatasetRequest(BaseModel):
     description: Optional[str] = None
     filenames: List[str]
     content_type: Optional[str] = None
+
+    @field_validator("description", mode="before")
+    def ensure_str(cls, v):
+        if v is None:
+            return None
+        return str(v)
 
 class BatchDownloadUrlRequest(BaseModel):
     asset_ids: List[int]
@@ -131,7 +138,7 @@ async def get_dataset_stats(
 @router.get("/", response_model=List[DatasetResponse])
 async def get_datasets(
     skip: int = 0,
-    limit: int = 100,
+    limit: int = 10000,
     db: Session = Depends(get_db),
     current_user: dict = Depends(get_current_user_dev)
 ):
@@ -323,7 +330,7 @@ async def delete_dataset(
 async def get_dataset_images(
     dataset_id: int,
     page: int = 1,
-    limit: int = 1000,
+    limit: int = 10000,
     db: Session = Depends(get_db),
     current_user: dict = Depends(get_current_user_dev)
 ):
@@ -440,10 +447,23 @@ async def generate_presigned_upload_urls(
         db.refresh(dataset)
     
     try:
+        # Get current asset count to determine starting number
+        # This ensures sequential numbering: dataset_name_1, dataset_name_2, etc.
+        assets, total_count = get_assets_from_dataset(
+            db=db,
+            dataset_id=dataset.id,
+            asset_type=None,  # All assets regardless of type
+            page=1,
+            limit=100000  # Get all for counting
+        )
+        start_number = total_count + 1
+        
         # Generate presigned URLs
         urls = presigned_url_service.generate_batch_upload_urls(
             dataset_id=dataset.id,
+            dataset_name=dataset.name,
             filenames=request.filenames,
+            start_number=start_number,
             content_type=request.content_type,
             expiration=1800  # 30분
         )
@@ -488,7 +508,9 @@ async def upload_images_to_dataset(
         successful_uploads, failed_uploads = await file_storage.save_images_batch(files, dataset.id)
 
         # DatasetVersion 및 Split 생성/조회
-        dataset_version = get_or_create_dataset_version(db, dataset.id)
+        # 에셋 추가 시 새 버전 생성
+        from app.utils.dataset_helper import create_new_dataset_version
+        dataset_version = create_new_dataset_version(db, dataset.id)
         dataset_split = get_or_create_dataset_split(
             db,
             dataset_version.id,
@@ -503,8 +525,12 @@ async def upload_images_to_dataset(
             # SHA256 계산
             sha256_hash = calculate_sha256_from_s3(storage_uri)
             
+            # S3 파일명 추출 (datasets/포트홀/images/포트홀_1.jpg → 포트홀_1.jpg)
+            s3_filename = storage_uri.split('/')[-1] if '/' in storage_uri else storage_uri
+            
             asset = Asset(
                 dataset_split_id=dataset_split.id,
+                name=s3_filename,  # ERD의 에셋명 필드 (S3 파일명)
                 type=AssetType.IMAGE,
                 storage_uri=storage_uri,
                 sha256=sha256_hash,
@@ -1114,7 +1140,8 @@ async def confirm_upload_complete_batch(
         raise HTTPException(status_code=404, detail="Dataset not found")
     
     # DatasetVersion 및 Split 생성/조회
-    dataset_version = get_or_create_dataset_version(db, dataset_id)
+    # 에셋 추가 시 새 버전 생성
+    dataset_version = create_new_dataset_version(db, dataset_id)
     dataset_split = get_or_create_dataset_split(
         db, 
         dataset_version.id, 
@@ -1148,21 +1175,26 @@ async def confirm_upload_complete_batch(
                 # SHA256 계산
                 sha256_hash = calculate_sha256_from_s3(s3_key)
                 
-                # 이미 존재하는 Asset 확인 (sha256 기준)
+                # 같은 dataset_split 내에서 이미 존재하는 Asset 확인 (sha256 기준)
                 existing_asset = db.query(Asset).filter(
+                    Asset.dataset_split_id == dataset_split.id,
                     Asset.sha256 == sha256_hash
                 ).first()
                 
                 if existing_asset:
-                    # 이미 존재하는 경우 기존 Asset 사용
+                    # 같은 split 내에 이미 존재하는 경우 기존 Asset 사용
                     asset = existing_asset
-                    # storage_uri가 다를 수 있으므로 업데이트 (같은 파일이 다른 경로에 있을 수 있음)
+                    # storage_uri가 다를 수 있으므로 업데이트
                     if asset.storage_uri != s3_key:
                         asset.storage_uri = s3_key
                 else:
-                    # 새 Asset 생성
+                    # S3 파일명 추출 (datasets/포트홀/images/포트홀_1.jpg → 포트홀_1.jpg)
+                    s3_filename = s3_key.split('/')[-1] if '/' in s3_key else s3_key
+                    
+                    # 새 Asset 생성 (ERD 기준: name 필드에 에셋명 저장)
                     asset = Asset(
                         dataset_split_id=dataset_split.id,
+                        name=s3_filename,  # ERD의 에셋명 필드 (S3 파일명)
                         type=asset_type,
                         storage_uri=s3_key,
                         sha256=sha256_hash,
@@ -1223,7 +1255,7 @@ async def get_dataset_assets(
     dataset_id: int,
     kind: Optional[str] = None,  # "image" | "video" | None (all)
     page: int = 1,
-    limit: int = 100,
+    limit: int = 10000,
     db: Session = Depends(get_db),
     current_user: dict = Depends(get_current_user_dev)
 ):
@@ -1260,12 +1292,14 @@ async def get_dataset_assets(
     # DatasetAssetResponse 형식으로 변환 (API 호환성)
     result = []
     for asset in assets:
-        filename = asset.storage_uri.split('/')[-1] if asset.storage_uri else f"asset_{asset.id}"
+        # 에셋명 사용 (ERD의 name 필드)
+        asset_name = asset.name if asset.name else (asset.storage_uri.split('/')[-1] if asset.storage_uri else f"asset_{asset.id}")
+        
         result.append({
             "id": asset.id,
             "dataset_id": dataset_id,
             "kind": asset.type.value,
-            "original_filename": filename,
+            "original_filename": asset_name,  # API 호환성을 위해 original_filename 필드명 유지
             "s3_key": asset.storage_uri,
             "file_size": asset.bytes,
             "width": asset.width,
@@ -1313,8 +1347,8 @@ async def get_asset_download_url(
         raise HTTPException(status_code=404, detail="Dataset not found")
     
     try:
-        # 파일명 추출
-        filename = asset.storage_uri.split('/')[-1] if asset.storage_uri else f"asset_{asset.id}"
+        # 에셋명 사용 (ERD의 name 필드)
+        filename = asset.name if asset.name else (asset.storage_uri.split('/')[-1] if asset.storage_uri else f"asset_{asset.id}")
         
         # Presigned GET URL 생성
         url_data = presigned_url_service.generate_download_url(
@@ -1389,7 +1423,9 @@ async def generate_presigned_download_urls_batch(
             continue
         
         try:
-            filename = asset.storage_uri.split('/')[-1] if asset.storage_uri else f"asset_{asset.id}"
+            # 에셋명 사용 (ERD의 name 필드)
+            filename = asset.name if asset.name else (asset.storage_uri.split('/')[-1] if asset.storage_uri else f"asset_{asset.id}")
+            
             url_data = presigned_url_service.generate_download_url(
                 s3_key=asset.storage_uri,
                 filename=filename,
@@ -1418,3 +1454,164 @@ async def generate_presigned_download_urls_batch(
         "failed_count": len(failed),
         "failed": failed
     }
+
+
+# ========== SELF-ANNOTATION LABEL CLASS APIs ==========
+
+@router.get("/{dataset_id}/label-classes")
+async def get_dataset_label_classes(
+    dataset_id: int,
+    db: Session = Depends(get_db),
+    current_user: dict = Depends(get_current_user_dev)
+):
+    """Get all label classes for a dataset (for self-annotation)"""
+    from app.models.label_ontology_version import LabelOntologyVersion
+
+    # Get dataset
+    dataset = db.query(Dataset).filter(Dataset.id == dataset_id).first()
+    if not dataset:
+        raise HTTPException(status_code=404, detail="Dataset not found")
+
+    # Get project's default ontology version
+    # Try to find existing ontology version for this project
+    ontology_version = db.query(LabelOntologyVersion).filter(
+        LabelOntologyVersion.project_id == dataset.project_id
+    ).first()
+
+    # If no ontology version exists, create a default one
+    if not ontology_version:
+        ontology_version = LabelOntologyVersion(
+            project_id=dataset.project_id,
+            version_tag="v1.0",
+            description="Default ontology version for self-annotation"
+        )
+        db.add(ontology_version)
+        db.commit()
+        db.refresh(ontology_version)
+
+    # Get label classes for this ontology version
+    label_classes = db.query(LabelClass).filter(
+        LabelClass.ontology_version_id == ontology_version.id
+    ).all()
+
+    return label_classes
+
+
+@router.post("/{dataset_id}/label-classes", status_code=status.HTTP_201_CREATED)
+async def create_label_class(
+    dataset_id: int,
+    label_class_data: dict = Body(...),
+    db: Session = Depends(get_db),
+    current_user: dict = Depends(get_current_user_dev)
+):
+    """Create a new label class for a dataset (for self-annotation)"""
+    from app.models.label_ontology_version import LabelOntologyVersion
+
+    # Get dataset
+    dataset = db.query(Dataset).filter(Dataset.id == dataset_id).first()
+    if not dataset:
+        raise HTTPException(status_code=404, detail="Dataset not found")
+
+    # Get or create project's default ontology version
+    ontology_version = db.query(LabelOntologyVersion).filter(
+        LabelOntologyVersion.project_id == dataset.project_id
+    ).first()
+
+    if not ontology_version:
+        ontology_version = LabelOntologyVersion(
+            project_id=dataset.project_id,
+            version_tag="v1.0",
+            description="Default ontology version for self-annotation"
+        )
+        db.add(ontology_version)
+        db.commit()
+        db.refresh(ontology_version)
+
+    # Check if label class with this name already exists
+    display_name = label_class_data.get("display_name")
+    if not display_name:
+        raise HTTPException(status_code=400, detail="display_name is required")
+
+    existing_class = db.query(LabelClass).filter(
+        LabelClass.ontology_version_id == ontology_version.id,
+        LabelClass.display_name == display_name
+    ).first()
+
+    if existing_class:
+        # Return existing class instead of creating duplicate
+        return existing_class
+
+    # Create new label class
+    new_label_class = LabelClass(
+        ontology_version_id=ontology_version.id,
+        display_name=display_name,
+        color=label_class_data.get("color", "#FF0000"),
+        shape_type="bbox"  # Default to bbox for self-annotation
+    )
+
+    db.add(new_label_class)
+    db.commit()
+    db.refresh(new_label_class)
+
+    return new_label_class
+
+
+# ========== ANNOTATION CRUD APIs ==========
+
+@router.put("/annotations/{annotation_id}", response_model=AnnotationResponse)
+async def update_annotation(
+    annotation_id: int,
+    annotation_data: AnnotationCreate,
+    db: Session = Depends(get_db),
+    current_user: dict = Depends(get_current_user_dev)
+):
+    """Update an existing annotation"""
+    # Get annotation
+    annotation = db.query(Annotation).filter(Annotation.id == annotation_id).first()
+    if not annotation:
+        raise HTTPException(status_code=404, detail="Annotation not found")
+
+    # Verify asset exists
+    asset = db.query(Asset).filter(Asset.id == annotation_data.asset_id).first()
+    if not asset:
+        raise HTTPException(status_code=404, detail="Asset not found")
+
+    # Verify label class exists
+    label_class = db.query(LabelClass).filter(LabelClass.id == annotation_data.label_class_id).first()
+    if not label_class:
+        raise HTTPException(status_code=404, detail="Label class not found")
+
+    # Update annotation
+    annotation.asset_id = annotation_data.asset_id
+    annotation.label_class_id = annotation_data.label_class_id
+    annotation.model_version_id = annotation_data.model_version_id
+    annotation.geometry_type = annotation_data.geometry_type
+    annotation.geometry = annotation_data.geometry
+    annotation.is_normalized = annotation_data.is_normalized
+    annotation.source = annotation_data.source
+    annotation.confidence = annotation_data.confidence
+    annotation.annotator_name = annotation_data.annotator_name or current_user.get("name", "system")
+
+    db.commit()
+    db.refresh(annotation)
+
+    return annotation
+
+
+@router.delete("/annotations/{annotation_id}", status_code=status.HTTP_204_NO_CONTENT)
+async def delete_annotation(
+    annotation_id: int,
+    db: Session = Depends(get_db),
+    current_user: dict = Depends(get_current_user_dev)
+):
+    """Delete an annotation"""
+    # Get annotation
+    annotation = db.query(Annotation).filter(Annotation.id == annotation_id).first()
+    if not annotation:
+        raise HTTPException(status_code=404, detail="Annotation not found")
+
+    # Delete annotation
+    db.delete(annotation)
+    db.commit()
+
+    return Response(status_code=status.HTTP_204_NO_CONTENT)

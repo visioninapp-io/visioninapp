@@ -46,6 +46,16 @@ class Settings(BaseSettings):
     CACHE_TTL: int = 300  # 5 minutes
     ENABLE_CACHE: bool = False  # Set to True when Redis is available
     
+    # RabbitMQ
+    RABBITMQ_HOST: str = ""
+    RABBITMQ_PORT: int = 5672
+    RABBITMQ_USER: str = ""
+    RABBITMQ_PASSWORD: str = ""
+    RABBITMQ_VHOST: str = "/"
+    RABBITMQ_SSL: bool = False
+
+    TRAIN_REQUEST_QUEUE: str = "train_request_q"
+
     # AWS S3 Configuration
     AWS_ACCESS_KEY_ID: str = ""
     AWS_SECRET_ACCESS_KEY: str = ""

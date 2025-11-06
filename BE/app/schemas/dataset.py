@@ -1,4 +1,4 @@
-from pydantic import BaseModel, Field
+from pydantic import BaseModel, Field, field_validator
 from typing import Optional, List, Dict, Any
 from datetime import datetime
 from app.models.dataset import GeometryType
@@ -58,6 +58,12 @@ class DatasetBase(BaseModel):
     name: str
     description: Optional[str] = None
 
+    @field_validator("description", mode="before")
+    def ensure_str(cls, v):
+        if v is None:
+            return None
+        return str(v)
+
 
 class DatasetCreate(DatasetBase):
     """Dataset 생성 스키마"""
@@ -68,6 +74,12 @@ class DatasetUpdate(BaseModel):
     """Dataset 수정 스키마"""
     name: Optional[str] = None
     description: Optional[str] = None
+
+    @field_validator("description", mode="before")
+    def ensure_str(cls, v):
+        if v is None:
+            return None
+        return str(v)
 
 
 class DatasetResponse(DatasetBase):

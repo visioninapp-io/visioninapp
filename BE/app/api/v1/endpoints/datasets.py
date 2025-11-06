@@ -2,7 +2,7 @@ from fastapi import APIRouter, Depends, HTTPException, UploadFile, File, status,
 from fastapi.responses import StreamingResponse, Response, RedirectResponse
 from sqlalchemy.orm import Session
 from typing import List, Optional
-from pydantic import BaseModel
+from pydantic import BaseModel, field_validator
 import io
 import zipfile
 import base64
@@ -67,6 +67,12 @@ class UploadDatasetRequest(BaseModel):
     description: Optional[str] = None
     filenames: List[str]
     content_type: Optional[str] = None
+
+    @field_validator("description", mode="before")
+    def ensure_str(cls, v):
+        if v is None:
+            return None
+        return str(v)
 
 class BatchDownloadUrlRequest(BaseModel):
     asset_ids: List[int]

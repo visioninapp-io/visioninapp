@@ -1637,3 +1637,82 @@ async def delete_annotation(
     db.commit()
 
     return Response(status_code=status.HTTP_204_NO_CONTENT)
+
+
+# ========== LABEL FILE APIs (S3) ==========
+
+class LabelUploadUrlRequest(BaseModel):
+    """Label 업로드용 Presigned URL 요청"""
+    filename: str
+
+
+@router.post("/{dataset_id}/labels/presigned-upload-url")
+async def get_label_presigned_upload_url(
+    dataset_id: int,
+    request: LabelUploadUrlRequest,
+    db: Session = Depends(get_db),
+    current_user: dict = Depends(get_current_user)
+):
+    """
+    Label 파일 업로드용 Presigned URL 발급
+
+    - Label 파일은 datasets/{dataset_name}/labels/{base_filename}.txt 경로에 저장
+    - 이미지 파일명과 매핑 (예: image1.jpg -> image1.txt)
+    - 프론트엔드가 Presigned URL로 직접 S3에 업로드
+    - URL 만료 시간: 1시간
+    """
+    # 데이터셋 확인
+    dataset = db.query(Dataset).filter(Dataset.id == dataset_id).first()
+    if not dataset:
+        raise HTTPException(status_code=404, detail="Dataset not found")
+
+    # Presigned URL 생성
+    try:
+        url_data = presigned_url_service.generate_label_upload_url(
+            dataset_name=dataset.name,
+            image_filename=request.filename
+        )
+        return url_data
+    except Exception as e:
+        raise HTTPException(
+            status_code=500,
+            detail=f"Label upload URL 생성 실패: {str(e)}"
+        )
+
+
+@router.delete("/{dataset_id}/labels/{image_filename}")
+async def delete_label_file(
+    dataset_id: int,
+    image_filename: str,
+    db: Session = Depends(get_db),
+    current_user: dict = Depends(get_current_user)
+):
+    """
+    S3에서 Label 파일 삭제
+
+    - Label 파일명은 이미지 파일명에서 파생 (예: image1.jpg -> image1.txt)
+    - datasets/{dataset_name}/labels/{base_filename}.txt 경로에서 삭제
+    """
+    # 데이터셋 확인
+    dataset = db.query(Dataset).filter(Dataset.id == dataset_id).first()
+    if not dataset:
+        raise HTTPException(status_code=404, detail="Dataset not found")
+
+    # Label 파일 삭제
+    try:
+        success = presigned_url_service.delete_label_file(
+            dataset_name=dataset.name,
+            image_filename=image_filename
+        )
+        if success:
+            return {"message": "Label 파일 삭제 완료", "filename": image_filename}
+        else:
+            raise HTTPException(
+                status_code=500,
+                detail="Label 파일 삭제 실패"
+            )
+    except Exception as e:
+        raise HTTPException(
+            status_code=500,
+            detail=f"Label 파일 삭제 실패: {str(e)}"
+        )

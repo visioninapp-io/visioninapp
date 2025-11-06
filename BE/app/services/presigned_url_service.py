@@ -304,10 +304,10 @@ class PresignedURLService:
     def check_object_exists(self, s3_key: str) -> bool:
         """
         Check if an S3 object exists.
-        
+
         Args:
             s3_key: S3 object key.
-            
+
         Returns:
             bool indicating existence.
         """
@@ -319,6 +319,103 @@ class PresignedURLService:
             )
             return True
         except ClientError:
+            return False
+
+    def generate_label_upload_url(
+        self,
+        dataset_name: str,
+        image_filename: str,
+        expiration: int = 3600
+    ) -> Dict:
+        """
+        Label 파일 업로드용 Presigned URL 생성
+
+        Label 파일은 datasets/{dataset_name}/labels/{base_filename}.txt 경로에 저장
+        이미지 파일명과 매핑됨 (예: image1.jpg -> image1.txt)
+
+        Args:
+            dataset_name: 데이터셋 이름 (S3 경로에 사용)
+            image_filename: 이미지 파일명 (예: "image1.jpg")
+            expiration: URL 만료 시간(초)
+
+        Returns:
+            Dict with upload_url, s3_key, filename 등
+        """
+        start_time = time.time()
+
+        # 데이터셋 이름 정리
+        sanitized_dataset_name = sanitize_dataset_name_for_s3(dataset_name)
+
+        # 이미지 파일명에서 확장자 제거하고 .txt로 변경
+        base_filename = image_filename.rsplit('.', 1)[0] if '.' in image_filename else image_filename
+        label_filename = f"{base_filename}.txt"
+
+        # S3 키 생성: datasets/{dataset_name}/labels/{base_filename}.txt
+        s3_key = f"datasets/{sanitized_dataset_name}/labels/{label_filename}"
+
+        try:
+            # Presigned URL 생성 (ContentType 제외하여 CORS 이슈 방지)
+            presigned_url = self.s3_client.generate_presigned_url(
+                'put_object',
+                Params={
+                    'Bucket': settings.AWS_BUCKET_NAME,
+                    'Key': s3_key
+                },
+                ExpiresIn=expiration
+            )
+
+            elapsed_time = time.time() - start_time
+            print(f"[PresignedURL] Label upload URL 생성 완료 ({elapsed_time:.4f}s): {label_filename}")
+
+            return {
+                "upload_url": presigned_url,
+                "s3_key": s3_key,
+                "filename": label_filename,
+                "image_filename": image_filename,
+                "expires_in": expiration,
+                "generation_time": elapsed_time
+            }
+
+        except ClientError as e:
+            raise Exception(f"Label upload URL 생성 실패: {str(e)}")
+
+    def delete_label_file(
+        self,
+        dataset_name: str,
+        image_filename: str
+    ) -> bool:
+        """
+        S3에서 Label 파일 삭제
+
+        Args:
+            dataset_name: 데이터셋 이름 (S3 경로에 사용)
+            image_filename: 이미지 파일명 (예: "image1.jpg")
+
+        Returns:
+            bool: 삭제 성공 여부
+        """
+        try:
+            # 데이터셋 이름 정리
+            sanitized_dataset_name = sanitize_dataset_name_for_s3(dataset_name)
+
+            # 이미지 파일명에서 확장자 제거하고 .txt로 변경
+            base_filename = image_filename.rsplit('.', 1)[0] if '.' in image_filename else image_filename
+            label_filename = f"{base_filename}.txt"
+
+            # S3 키 생성
+            s3_key = f"datasets/{sanitized_dataset_name}/labels/{label_filename}"
+
+            # S3에서 삭제
+            self.s3_client.delete_object(
+                Bucket=settings.AWS_BUCKET_NAME,
+                Key=s3_key
+            )
+
+            print(f"[PresignedURL] Label 파일 삭제 완료: {s3_key}")
+            return True
+
+        except ClientError as e:
+            print(f"[PresignedURL] Label 파일 삭제 실패: {str(e)}")
             return False
 
 

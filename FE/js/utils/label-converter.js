@@ -21,7 +21,8 @@ function convertToYOLO(annotations, labelClassesMap) {
     for (const ann of annotations) {
         try {
             // Get class ID from class name
-            const className = ann.class_name || ann.label_class_name;
+            // Support multiple attribute names for compatibility
+            const className = ann.className || ann.class_name || ann.label_class_name;
             const classId = labelClassesMap.get(className)?.id;
 
             if (classId === undefined) {
@@ -30,20 +31,34 @@ function convertToYOLO(annotations, labelClassesMap) {
             }
 
             // Get geometry (bbox)
-            const geometry = ann.geometry;
+            // Support both direct properties and nested geometry object
+            let x, y, width, height;
 
-            if (!geometry || !geometry.x || !geometry.y || !geometry.width || !geometry.height) {
-                console.warn(`[LabelConverter] Invalid geometry:`, ann);
+            if (ann.geometry) {
+                // Nested geometry object (from DB)
+                const geometry = ann.geometry;
+                if (!geometry.x || !geometry.y || !geometry.width || !geometry.height) {
+                    console.warn(`[LabelConverter] Invalid geometry:`, ann);
+                    continue;
+                }
+                x = geometry.x;
+                y = geometry.y;
+                width = geometry.width;
+                height = geometry.height;
+            } else if (ann.x !== undefined && ann.y !== undefined && ann.width !== undefined && ann.height !== undefined) {
+                // Direct properties (from frontend state)
+                x = ann.x;
+                y = ann.y;
+                width = ann.width;
+                height = ann.height;
+            } else {
+                console.warn(`[LabelConverter] Invalid annotation structure:`, ann);
                 continue;
             }
 
             // YOLO expects normalized coordinates (0-1)
             // If already normalized (is_normalized = true), use as-is
             // Otherwise, normalize (shouldn't happen, but handle it)
-            let x = geometry.x;
-            let y = geometry.y;
-            let width = geometry.width;
-            let height = geometry.height;
 
             // YOLO uses center coordinates
             const center_x = x + (width / 2);

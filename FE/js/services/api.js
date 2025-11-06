@@ -635,16 +635,24 @@ class APIService {
      */
     async uploadLabelToS3(uploadUrl, labelContent) {
         console.log(`[API] Uploading label to S3...`);
+        console.log(`[API] Upload URL:`, uploadUrl);
+        console.log(`[API] Content length:`, labelContent.length, 'bytes');
+
         const response = await fetch(uploadUrl, {
             method: 'PUT',
             body: labelContent
             // No headers - let browser set Content-Type automatically
         });
 
+        console.log(`[API] S3 upload response status:`, response.status);
+
         if (!response.ok) {
-            throw new Error(`S3 label upload failed: ${response.status}`);
+            const errorText = await response.text();
+            console.error(`[API] S3 upload error response:`, errorText);
+            throw new Error(`S3 label upload failed: ${response.status} - ${errorText}`);
         }
 
+        console.log(`[API] S3 upload successful`);
         return { success: true };
     }
 
@@ -668,16 +676,23 @@ class APIService {
      */
     async uploadLabel(datasetId, imageFilename, labelContent) {
         try {
+            console.log(`[API] Starting label upload for dataset ${datasetId}, image: ${imageFilename}`);
+            console.log(`[API] Label content preview:`, labelContent.substring(0, 200));
+
             // 1. Get presigned URL
+            console.log(`[API] Step 1: Requesting presigned URL...`);
             const urlData = await this.getPresignedLabelUploadUrl(datasetId, imageFilename);
+            console.log(`[API] Presigned URL received:`, urlData);
 
             // 2. Upload to S3
+            console.log(`[API] Step 2: Uploading to S3...`);
             await this.uploadLabelToS3(urlData.upload_url, labelContent);
 
-            console.log(`[API] Label uploaded successfully: ${urlData.filename}`);
+            console.log(`[API] Label uploaded successfully: ${urlData.filename} to ${urlData.s3_key}`);
             return { success: true, s3_key: urlData.s3_key };
         } catch (error) {
             console.error(`[API] Failed to upload label:`, error);
+            console.error(`[API] Error details:`, error.message, error.stack);
             throw error;
         }
     }

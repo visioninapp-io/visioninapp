@@ -613,6 +613,75 @@ class APIService {
         return this.get(`/datasets/${datasetId}/label-classes`);
     }
 
+    // ========== LABELS (S3) ==========
+    /**
+     * Get presigned URL for uploading label file to S3
+     * @param {number} datasetId - Dataset ID
+     * @param {string} imageFilename - Image filename (e.g., "image1.jpg")
+     * @returns {Promise} Object with upload_url, s3_key, filename
+     */
+    async getPresignedLabelUploadUrl(datasetId, imageFilename) {
+        console.log(`[API] Getting presigned URL for label: ${imageFilename}`);
+        return this.post(`/datasets/${datasetId}/labels/presigned-upload-url`, {
+            filename: imageFilename
+        });
+    }
+
+    /**
+     * Upload label file to S3 using presigned URL
+     * @param {string} uploadUrl - Presigned upload URL
+     * @param {string} labelContent - Label file content (YOLO format)
+     * @returns {Promise}
+     */
+    async uploadLabelToS3(uploadUrl, labelContent) {
+        console.log(`[API] Uploading label to S3...`);
+        const response = await fetch(uploadUrl, {
+            method: 'PUT',
+            body: labelContent
+            // No headers - let browser set Content-Type automatically
+        });
+
+        if (!response.ok) {
+            throw new Error(`S3 label upload failed: ${response.status}`);
+        }
+
+        return { success: true };
+    }
+
+    /**
+     * Delete label file from S3
+     * @param {number} datasetId - Dataset ID
+     * @param {string} imageFilename - Image filename
+     * @returns {Promise}
+     */
+    async deleteLabelFromS3(datasetId, imageFilename) {
+        console.log(`[API] Deleting label from S3: ${imageFilename}`);
+        return this.delete(`/datasets/${datasetId}/labels/${imageFilename}`);
+    }
+
+    /**
+     * Complete workflow: Upload label to S3
+     * @param {number} datasetId - Dataset ID
+     * @param {string} imageFilename - Image filename
+     * @param {string} labelContent - YOLO format label content
+     * @returns {Promise}
+     */
+    async uploadLabel(datasetId, imageFilename, labelContent) {
+        try {
+            // 1. Get presigned URL
+            const urlData = await this.getPresignedLabelUploadUrl(datasetId, imageFilename);
+
+            // 2. Upload to S3
+            await this.uploadLabelToS3(urlData.upload_url, labelContent);
+
+            console.log(`[API] Label uploaded successfully: ${urlData.filename}`);
+            return { success: true, s3_key: urlData.s3_key };
+        } catch (error) {
+            console.error(`[API] Failed to upload label:`, error);
+            throw error;
+        }
+    }
+
     // ========== MODELS ==========
     async getModels() {
         console.log('[API] Fetching models...');

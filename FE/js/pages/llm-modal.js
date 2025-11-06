@@ -25,15 +25,17 @@ async function showLLMModal() {
         timers: []
     };
 
-    // 데이터셋 로드
-    await loadDatasetsForLLMModal();
-
-    // Show modal
+    // Show modal first
     const modal = new bootstrap.Modal(document.getElementById('llmModal'));
     modal.show();
 
-    // Initialize
+    // Render step first (빈 select로)
     renderStep(llmModalState.currentStep);
+
+    // Then load datasets and update select
+    await loadDatasetsForLLMModal();
+    // 데이터셋 로드 후 다시 업데이트
+    updateDatasetSelect();
 }
 
 // Create modal HTML
@@ -210,8 +212,11 @@ function renderQueryInputStep(container) {
         });
     }
 
-    // 렌더링 후 데이터셋 옵션 업데이트
-    updateDatasetSelect();
+    // 렌더링 후 데이터셋 옵션 업데이트 (데이터셋이 이미 로드된 경우에만)
+    // 데이터셋이 아직 로드되지 않았으면 showLLMModal에서 나중에 업데이트됨
+    if (llmModalState.datasets && llmModalState.datasets.length > 0) {
+        updateDatasetSelect();
+    }
 }
 
 // 데이터셋 로드 함수
@@ -223,11 +228,7 @@ async function loadDatasetsForLLMModal() {
         // 데이터셋이 있으면 첫 번째 선택
         if (llmModalState.datasets.length > 0 && !llmModalState.selectedDatasetId) {
             llmModalState.selectedDatasetId = llmModalState.datasets[0].id;
-        }
-        
-        // Step 1이면 드롭다운 업데이트
-        if (llmModalState.currentStep === 1) {
-            updateDatasetSelect();
+            console.log('[LLM Modal] Auto-selected first dataset:', llmModalState.selectedDatasetId);
         }
     } catch (error) {
         console.error('[LLM Modal] Error loading datasets:', error);
@@ -239,23 +240,35 @@ async function loadDatasetsForLLMModal() {
 // 데이터셋 셀렉트 박스 업데이트 (다른 페이지들과 동일한 패턴)
 function updateDatasetSelect() {
     const select = document.getElementById('llm-dataset-select');
-    if (!select) return;
+    if (!select) {
+        console.log('[LLM Modal] Select element not found');
+        return;
+    }
     
     // 기존 옵션 제거 (첫 번째 "-- Select Dataset --" 제외)
     while (select.children.length > 1) {
         select.removeChild(select.lastChild);
     }
     
+    // 데이터셋이 없으면 리턴
+    if (!llmModalState.datasets || llmModalState.datasets.length === 0) {
+        console.log('[LLM Modal] No datasets available');
+        return;
+    }
+    
     // 데이터셋 옵션 추가
     llmModalState.datasets.forEach(dataset => {
         const option = document.createElement('option');
-        option.value = dataset.id;
+        option.value = String(dataset.id);  // 문자열로 변환
         option.textContent = `${dataset.name} (${dataset.total_images || 0} images)`;
-        if (dataset.id === llmModalState.selectedDatasetId) {
+        // 타입을 명확히 비교
+        if (String(dataset.id) === String(llmModalState.selectedDatasetId)) {
             option.selected = true;
         }
         select.appendChild(option);
     });
+    
+    console.log('[LLM Modal] Updated dataset select with', llmModalState.datasets.length, 'datasets');
 }
 
 // 데이터셋 선택 변경 핸들러

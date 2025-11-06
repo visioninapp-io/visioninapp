@@ -746,27 +746,52 @@ function updateAnnotationClass(index, newClassName) {
 }
 
 // Delete annotation
-function deleteAnnotation(index) {
+async function deleteAnnotation(index) {
     if (index < 0 || index >= selfAnnotationState.annotations.length) return;
 
     if (!confirm('Delete this annotation?')) return;
 
     const annotation = selfAnnotationState.annotations[index];
+    const currentImage = selfAnnotationState.currentImage;
     console.log(`[SelfAnnotation] Deleting annotation ${index}:`, annotation);
 
     // If saved annotation, delete from backend
     if (annotation.saved && annotation.id) {
-        apiService.deleteAnnotation(annotation.id)
-            .then(() => {
-                console.log(`[SelfAnnotation] Deleted annotation ${annotation.id} from backend`);
-            })
-            .catch(error => {
-                console.error(`[SelfAnnotation] Failed to delete annotation:`, error);
-                showToast('Failed to delete annotation from server', 'error');
-            });
+        try {
+            await apiService.deleteAnnotation(annotation.id);
+            console.log(`[SelfAnnotation] Deleted annotation ${annotation.id} from backend`);
+        } catch (error) {
+            console.error(`[SelfAnnotation] Failed to delete annotation:`, error);
+            showToast('Failed to delete annotation from server', 'error');
+            return; // Don't proceed if backend delete failed
+        }
     }
 
+    // Remove from state
     selfAnnotationState.annotations.splice(index, 1);
+
+    // Update label file in S3
+    if (currentImage) {
+        try {
+            const remainingAnnotations = selfAnnotationState.annotations.filter(ann =>
+                ann.saved && ann.imageId === currentImage.id
+            );
+
+            if (remainingAnnotations.length === 0) {
+                // No more annotations - delete label file from S3
+                await apiService.deleteLabelFromS3(selfAnnotationState.datasetId, currentImage.filename);
+                console.log(`[SelfAnnotation] Deleted label file for ${currentImage.filename}`);
+            } else {
+                // Re-upload updated label file with remaining annotations
+                await uploadLabelsToS3();
+                console.log(`[SelfAnnotation] Updated label file for ${currentImage.filename}`);
+            }
+        } catch (error) {
+            console.error(`[SelfAnnotation] Failed to update label file in S3:`, error);
+            showToast('Deleted annotation but failed to update labels in S3', 'warning');
+        }
+    }
+
     redrawCanvas();
     updateAnnotationsList();
 }
@@ -884,7 +909,14 @@ async function saveAllAnnotations() {
         console.log(`[SelfAnnotation] Save complete: ${successCount} success, ${failCount} failed`);
 
         if (successCount > 0) {
-            showToast(`Saved ${successCount} annotation(s) successfully`, 'success');
+            // Upload label file to S3
+            try {
+                await uploadLabelsToS3();
+                showToast(`Saved ${successCount} annotation(s) and uploaded labels to S3`, 'success');
+            } catch (labelError) {
+                console.error('[SelfAnnotation] Failed to upload labels to S3:', labelError);
+                showToast(`Saved ${successCount} annotation(s) but failed to upload labels to S3`, 'warning');
+            }
 
             // Update current image display
             redrawCanvas();
@@ -898,6 +930,60 @@ async function saveAllAnnotations() {
     } catch (error) {
         console.error('[SelfAnnotation] Save error:', error);
         showToast('Failed to save annotations', 'error');
+    }
+}
+
+// Upload labels to S3 for current image
+async function uploadLabelsToS3() {
+    try {
+        const currentImage = selfAnnotationState.currentImage;
+        if (!currentImage) {
+            console.warn('[SelfAnnotation] No current image for label upload');
+            return;
+        }
+
+        // Get all saved annotations for current image
+        const annotations = selfAnnotationState.annotations.filter(ann =>
+            ann.saved && ann.imageId === currentImage.id
+        );
+
+        if (annotations.length === 0) {
+            console.log('[SelfAnnotation] No annotations to upload for labels');
+            return;
+        }
+
+        console.log(`[SelfAnnotation] Uploading labels for ${currentImage.filename} (${annotations.length} annotations)`);
+
+        // Get label classes mapping
+        const labelClasses = await apiService.get(`/datasets/${selfAnnotationState.datasetId}/label-classes`);
+        const labelClassesMap = new Map();
+
+        if (labelClasses && Array.isArray(labelClasses)) {
+            labelClasses.forEach(cls => {
+                labelClassesMap.set(cls.display_name, { id: cls.id, name: cls.display_name });
+            });
+        }
+
+        // Convert annotations to YOLO format
+        const labelContent = convertToYOLO(annotations, labelClassesMap);
+
+        if (!labelContent) {
+            console.warn('[SelfAnnotation] No valid label content generated');
+            return;
+        }
+
+        // Upload to S3
+        await apiService.uploadLabel(
+            selfAnnotationState.datasetId,
+            currentImage.filename,
+            labelContent
+        );
+
+        console.log(`[SelfAnnotation] Successfully uploaded labels for ${currentImage.filename}`);
+
+    } catch (error) {
+        console.error('[SelfAnnotation] Failed to upload labels to S3:', error);
+        throw error;
     }
 }
 

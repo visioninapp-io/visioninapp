@@ -427,6 +427,177 @@ class APIService {
         return this.post(`/datasets/${datasetId}/presigned-download-urls-batch`, { asset_ids: assetIds });
     }
 
+    // Helper function to get image dimensions
+    async getImageDimensions(file) {
+        return new Promise((resolve, reject) => {
+            const img = new Image();
+            const objectUrl = URL.createObjectURL(file);
+
+            img.onload = () => {
+                URL.revokeObjectURL(objectUrl);
+                resolve({ width: img.width, height: img.height });
+            };
+
+            img.onerror = () => {
+                URL.revokeObjectURL(objectUrl);
+                reject(new Error('Failed to load image'));
+            };
+
+            img.src = objectUrl;
+        });
+    }
+
+    // Helper function to get video metadata
+    async getVideoMetadata(file) {
+        return new Promise((resolve, reject) => {
+            const video = document.createElement('video');
+            const objectUrl = URL.createObjectURL(file);
+
+            video.onloadedmetadata = () => {
+                URL.revokeObjectURL(objectUrl);
+                resolve({
+                    width: video.videoWidth,
+                    height: video.videoHeight,
+                    duration_ms: Math.round(video.duration * 1000)
+                });
+            };
+
+            video.onerror = () => {
+                URL.revokeObjectURL(objectUrl);
+                reject(new Error('Failed to load video'));
+            };
+
+            video.src = objectUrl;
+        });
+    }
+
+    /**
+     * Upload files using Presigned URL method (recommended)
+     * @param {FileList|Array} files - Files to upload
+     * @param {number|null} datasetId - Optional: existing dataset ID
+     * @param {string|null} datasetName - Required if datasetId is null
+     * @param {string|null} description - Optional: dataset description
+     * @param {function} onProgress - Optional: progress callback (current, total)
+     * @returns {Promise} Upload result with dataset info and successful/failed uploads
+     */
+    async uploadWithPresignedUrl(files, datasetId = null, datasetName = null, description = null, onProgress = null) {
+        console.log('[API] Starting presigned URL upload...');
+        console.log('[API] Files:', files.length, 'Dataset ID:', datasetId, 'Dataset Name:', datasetName);
+
+        try {
+            // Step 1: Get presigned URLs
+            const filenames = Array.from(files).map(f => f.name);
+            const urlRequest = {
+                filenames,
+                content_type: files[0]?.type || 'image/jpeg'
+            };
+
+            if (datasetId) {
+                urlRequest.dataset_id = datasetId;
+            } else if (datasetName) {
+                urlRequest.name = datasetName;
+                if (description) {
+                    urlRequest.description = description;
+                }
+            } else {
+                throw new Error('Either datasetId or datasetName must be provided');
+            }
+
+            console.log('[API] Requesting presigned URLs:', urlRequest);
+            const urlResponse = await this.post('/datasets/presigned-upload-urls', urlRequest);
+            console.log('[API] Received presigned URLs:', urlResponse);
+
+            const targetDatasetId = urlResponse.dataset.id;
+
+            // Step 2: Upload files to S3 in parallel
+            console.log('[API] Uploading files to S3...');
+            const uploadPromises = urlResponse.urls.map(async (urlInfo, index) => {
+                const file = files[index];
+
+                try {
+                    // Upload to S3 without explicit Content-Type header
+                    // Browser will automatically set it, avoiding CORS preflight issues
+                    const uploadResponse = await fetch(urlInfo.upload_url, {
+                        method: 'PUT',
+                        body: file
+                        // No headers - let browser set Content-Type automatically
+                    });
+
+                    if (!uploadResponse.ok) {
+                        throw new Error(`S3 upload failed: ${uploadResponse.status}`);
+                    }
+
+                    // Get file metadata
+                    let metadata = {
+                        s3_key: urlInfo.s3_key,
+                        original_filename: file.name,
+                        file_size: file.size
+                    };
+
+                    // Extract dimensions for images/videos
+                    if (file.type.startsWith('image/')) {
+                        try {
+                            const { width, height } = await this.getImageDimensions(file);
+                            metadata.width = width;
+                            metadata.height = height;
+                        } catch (error) {
+                            console.warn('[API] Failed to get image dimensions:', error);
+                        }
+                    } else if (file.type.startsWith('video/')) {
+                        try {
+                            const { width, height, duration_ms } = await this.getVideoMetadata(file);
+                            metadata.width = width;
+                            metadata.height = height;
+                            metadata.duration_ms = duration_ms;
+                        } catch (error) {
+                            console.warn('[API] Failed to get video metadata:', error);
+                        }
+                    }
+
+                    if (onProgress) {
+                        onProgress(index + 1, files.length);
+                    }
+
+                    return metadata;
+                } catch (error) {
+                    console.error(`[API] Failed to upload ${file.name}:`, error);
+                    throw error;
+                }
+            });
+
+            const uploadedItems = await Promise.all(uploadPromises);
+            console.log('[API] All files uploaded to S3:', uploadedItems);
+
+            // Step 3: Notify backend of upload completion
+            console.log('[API] Notifying backend of upload completion...');
+            const completeResponse = await this.post(
+                `/datasets/${targetDatasetId}/upload-complete-batch`,
+                { items: uploadedItems }
+            );
+
+            console.log('[API] Upload complete:', completeResponse);
+            return {
+                ...completeResponse,
+                dataset_id: targetDatasetId,
+                dataset: urlResponse.dataset
+            };
+
+        } catch (error) {
+            console.error('[API] Presigned URL upload failed:', error);
+            throw error;
+        }
+    }
+
+    /**
+     * Get presigned download URL for a single asset
+     * @param {number} assetId - Asset ID
+     * @returns {Promise} Object with download_url, filename, etc.
+     */
+    async getAssetPresignedDownload(assetId) {
+        console.log(`[API] Getting presigned download URL for asset ${assetId}...`);
+        return this.get(`/datasets/assets/${assetId}/presigned-download`);
+    }
+
     async downloadDatasetImage(datasetId, imageId) {
         console.log(`[API] Downloading image ${imageId} from dataset ${datasetId}...`);
         return this.get(`/datasets/${datasetId}/images/${imageId}/download`);
@@ -708,8 +879,9 @@ class APIService {
         return this.get(`/datasets/${datasetId}/versions`);
     }
 
-    async getVersion(versionId) {
-        return this.get(`/datasets/versions/${versionId}`);
+    async getVersion(datasetId, versionId) {
+        console.log(`[API] Fetching version ${versionId} from dataset ${datasetId}...`);
+        return this.get(`/datasets/${datasetId}/versions/${versionId}`);
     }
 
     async createVersion(datasetId, versionData) {
@@ -717,13 +889,14 @@ class APIService {
         return this.post(`/datasets/${datasetId}/versions`, versionData);
     }
 
-    async updateVersion(versionId, versionData) {
-        console.log(`[API] Updating version ${versionId}:`, versionData);
-        return this.put(`/datasets/versions/${versionId}`, versionData);
+    async updateVersion(datasetId, versionId, versionData) {
+        console.log(`[API] Updating version ${versionId} in dataset ${datasetId}:`, versionData);
+        return this.put(`/datasets/${datasetId}/versions/${versionId}`, versionData);
     }
 
-    async deleteVersion(versionId) {
-        return this.delete(`/datasets/versions/${versionId}`);
+    async deleteVersion(datasetId, versionId) {
+        console.log(`[API] Deleting version ${versionId} from dataset ${datasetId}...`);
+        return this.delete(`/datasets/${datasetId}/versions/${versionId}`);
     }
 
     // ========== EXPORT ==========

@@ -894,7 +894,12 @@ class GeneratePage {
         if (!confirm('Are you sure you want to delete this version?')) return;
 
         try {
-            await apiService.deleteVersion(versionId);
+            if (!this.selectedDataset || !this.selectedDataset.id) {
+                showToast('No dataset selected', 'error');
+                return;
+            }
+
+            await apiService.deleteVersion(this.selectedDataset.id, versionId);
             showToast('Version deleted successfully', 'success');
             await this.loadVersions(this.selectedDataset.id);
             const app = document.getElementById('app');

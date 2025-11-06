@@ -1,4 +1,3 @@
-<<<<<<< HEAD
 # claude
 .claude
 
@@ -13,17 +12,9 @@ tests/
 **/*.pt
 
 AI/uploads/models/model_*/
-=======
-# claude
-.claude
 
-*.png
+AI/converted_models/**
 
-docs/
+*.onnx
 
-tests/
-
-AI_test/
-
-runs/
->>>>>>> feature/llm-pipeline
+*.engine

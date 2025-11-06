@@ -7,9 +7,11 @@ This module provides unified interfaces for model training and inference, with b
 
 - 🚀 **Easy-to-use inference service** with automatic model downloading
 - 🏋️ **Training service** with progress callbacks and metrics tracking
+- 🔄 **Model conversion service** for ONNX and TensorRT formats
 - 🔌 **Seamless integration** with Backend and Frontend
 - 📦 **Automatic fallback** to YOLOv8n when no custom model is available
 - 📊 **Real-time progress tracking** during training and inference
+- ⚡ **Optimized deployment** with format-specific optimizations
 
 ## Quick Start
 
@@ -69,6 +71,38 @@ if results['success']:
     print(f"Model saved to: {best_model}")
 ```
 
+### 3. Model Conversion
+
+```python
+from AI.conversion_service import ModelConversionService
+
+# Create conversion service
+service = ModelConversionService()
+
+# Convert to ONNX
+onnx_result = service.convert_model(
+    model_path='path/to/model.pt',
+    target_format='onnx',
+    imgsz=640,
+    batch_size=1,
+    dynamic=False,
+    simplify=True
+)
+
+# Convert to TensorRT
+tensorrt_result = service.convert_model(
+    model_path='path/to/model.pt',
+    target_format='tensorrt',
+    imgsz=640,
+    batch_size=1,
+    precision='fp16',
+    workspace=4
+)
+
+if onnx_result['success']:
+    print(f"ONNX model: {onnx_result['output_path']}")
+```
+
 ## Architecture
 
 ```
@@ -81,10 +115,14 @@ AI/
 │   └── payload.py         # Payload-based API
 ├── inference_service.py   # High-level inference API
 ├── training_service.py    # High-level training API
+├── conversion_service.py  # Model conversion service
+├── main.py               # FastAPI application
 ├── examples/              # Usage examples
 │   ├── train_yolo.py      # Basic training example
 │   ├── inference_example.py
-│   └── training_example.py
+│   ├── training_example.py
+│   ├── conversion_example.py    # Model conversion examples
+│   └── api_conversion_example.py # API-based conversion
 └── requirements.txt
 ```
 
@@ -195,6 +233,93 @@ nc: 2  # number of classes
 names: ['class1', 'class2']
 ```
 
+## Model Conversion
+
+The AI module now supports converting YOLO models to optimized formats for deployment:
+
+### Supported Formats
+
+- **ONNX**: Cross-platform format for edge devices and ONNX Runtime
+- **TensorRT**: NVIDIA GPU-optimized format for high-performance inference
+
+### Conversion Options
+
+#### ONNX Conversion
+```python
+from AI.conversion_service import convert_to_onnx
+
+result = convert_to_onnx(
+    model_path="models/best.pt",
+    output_dir="converted_models",
+    imgsz=640,           # Input image size
+    batch_size=1,        # Batch size
+    dynamic=False,       # Enable dynamic shapes
+    simplify=True,       # Simplify ONNX graph
+    opset=17            # ONNX opset version
+)
+```
+
+#### TensorRT Conversion
+```python
+from AI.conversion_service import convert_to_tensorrt
+
+result = convert_to_tensorrt(
+    model_path="models/best.pt",
+    output_dir="converted_models",
+    imgsz=640,           # Input image size
+    batch_size=1,        # Batch size
+    precision="fp16",    # fp32, fp16, or int8
+    workspace=4,         # GPU workspace (GB)
+    int8_calibration_data="path/to/calibration.yaml"  # For INT8
+)
+```
+
+### API Endpoints
+
+The FastAPI service provides REST endpoints for model conversion:
+
+```bash
+# Get supported formats
+GET /api/v1/convert/formats
+
+# Get model information
+GET /api/v1/models/{model_name}/info
+
+# Convert a model
+POST /api/v1/convert
+{
+  "model_path": "models/yolov8n.pt",
+  "target_format": "onnx",
+  "imgsz": 640,
+  "batch_size": 1,
+  "dynamic": false
+}
+
+# Batch conversion
+POST /api/v1/convert/batch
+{
+  "model_paths": ["model1.pt", "model2.pt"],
+  "target_format": "onnx",
+  "conversion_options": {...}
+}
+```
+
+### Use Cases
+
+| Format | Use Case | Benefits | Requirements |
+|--------|----------|----------|--------------|
+| ONNX | Edge deployment, Cross-platform | Universal compatibility, Smaller size | ONNX Runtime |
+| TensorRT | NVIDIA GPU servers | Maximum performance, Low latency | NVIDIA GPU, TensorRT |
+
+### Performance Comparison
+
+| Format | Inference Speed | Model Size | Compatibility |
+|--------|----------------|------------|---------------|
+| PyTorch (.pt) | Baseline | Largest | PyTorch only |
+| ONNX | 1.2-2x faster | 10-30% smaller | Universal |
+| TensorRT FP16 | 2-4x faster | 50% smaller | NVIDIA GPU |
+| TensorRT INT8 | 3-6x faster | 75% smaller | NVIDIA GPU + calibration |
+
 ## Examples
 
 Run the example scripts to see the services in action:
@@ -208,6 +333,12 @@ python AI/examples/training_example.py
 
 # Basic YOLO training
 python AI/examples/train_yolo.py
+
+# Model conversion examples
+python AI/examples/conversion_example.py
+
+# API-based conversion examples
+python AI/examples/api_conversion_example.py
 ```
 
 ## API Reference
@@ -236,6 +367,31 @@ class YOLOTrainingService:
         **kwargs
     ) -> Dict
     def get_best_model_path() -> Optional[Path]
+```
+
+### Conversion Service
+
+```python
+class ModelConversionService:
+    def __init__(self)
+    def convert_model(
+        model_path: Union[str, Path],
+        target_format: str,
+        output_dir: Optional[Union[str, Path]] = None,
+        **conversion_options
+    ) -> Dict[str, Any]
+    def get_conversion_info(model_path: Union[str, Path]) -> Dict[str, Any]
+    def batch_convert(
+        model_paths: List[Union[str, Path]],
+        target_format: str,
+        output_dir: Optional[Union[str, Path]] = None,
+        **conversion_options
+    ) -> List[Dict[str, Any]]
+
+# Convenience functions
+def convert_to_onnx(model_path, output_dir=None, **options) -> Dict
+def convert_to_tensorrt(model_path, output_dir=None, **options) -> Dict
+def get_model_info(model_path) -> Dict
 ```
 
 ### Progress Callback Format

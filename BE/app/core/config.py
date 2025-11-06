@@ -1,4 +1,3 @@
-<<<<<<< HEAD
 from pydantic_settings import BaseSettings
 from typing import List
 
@@ -20,8 +19,15 @@ class Settings(BaseSettings):
         "*"  # Allow all origins for development
     ]
 
-    # Database
-    DATABASE_URL: str = "sqlite:///./app.db"
+    # Database - MySQL Configuration
+    DATABASE_URL: str = ""  # 환경 변수로 설정하거나 자동으로 구성됨
+    
+    # MySQL Configuration (환경 변수로 설정)
+    MYSQL_USER: str = "root"
+    MYSQL_PASSWORD: str = "password"
+    MYSQL_HOST: str = "localhost"
+    MYSQL_PORT: int = 3306
+    MYSQL_DATABASE: str = "vision_db"
 
     # Security
     SECRET_KEY: str = "your-secret-key-here-change-in-production"
@@ -60,52 +66,3 @@ class Settings(BaseSettings):
 
 
 settings = Settings()
-=======
-from pydantic_settings import BaseSettings
-from typing import List
-
-
-class Settings(BaseSettings):
-    PROJECT_NAME: str = "FastAPI Backend"
-    VERSION: str = "1.0.0"
-    API_V1_STR: str = "/api/v1"
-
-    # CORS
-    ALLOWED_ORIGINS: List[str] = [
-        "http://localhost:3000",
-        "http://localhost:5173",
-        "http://127.0.0.1:5173",
-        "http://localhost:5500",
-        "http://localhost:8080",
-        "http://127.0.0.1:8080",
-        "http://127.0.0.1:5500",
-        "*"  # Allow all origins for development
-    ]
-
-    # Database
-    DATABASE_URL: str = "sqlite:///./app.db"
-
-    # Security
-    SECRET_KEY: str = "your-secret-key-here-change-in-production"
-    ALGORITHM: str = "HS256"
-    ACCESS_TOKEN_EXPIRE_MINUTES: int = 30
-
-    # File Storage
-    UPLOAD_DIR: str = "uploads"
-    MAX_UPLOAD_SIZE: int = 10 * 1024 * 1024  # 10MB
-
-    # Redis Cache
-    REDIS_HOST: str = "localhost"
-    REDIS_PORT: int = 6379
-    REDIS_DB: int = 0
-    REDIS_PASSWORD: str = ""
-    CACHE_TTL: int = 300  # 5 minutes
-    ENABLE_CACHE: bool = False  # Set to True when Redis is available
-
-    class Config:
-        env_file = ".env"
-        case_sensitive = True
-
-
-settings = Settings()
->>>>>>> feature/llm-pipeline

@@ -14,7 +14,7 @@ router = APIRouter()
 @router.get("/", response_model=List[ExportJobResponse])
 async def get_export_jobs(
     skip: int = 0,
-    limit: int = 100,
+    limit: int = 10000,
     db: Session = Depends(get_db),
     current_user: dict = Depends(get_current_user_dev)
 ):

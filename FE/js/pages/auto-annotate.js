@@ -1,4 +1,3 @@
-
 // Auto-Annotate Page Component
 
 class AutoAnnotatePage {

@@ -1,7 +1,7 @@
 // API Service Layer - Handles all backend communications
 // Enhanced with robust error handling and debugging
 
-const API_BASE_URL = 'http://localhost:8000/api/v1';
+const API_BASE_URL = '/api/v1';
 
 class APIService {
     constructor() {
@@ -223,9 +223,96 @@ class APIService {
         return this.post('/datasets/', data);
     }
 
+    async updateDataset(id, data) {
+        console.log(`[API] Updating dataset ${id}:`, data);
+        return this.put(`/datasets/${id}`, data);
+    }
+
+    async deleteDataset(id) {
+        console.log(`[API] Deleting dataset ${id}...`);
+        return this.delete(`/datasets/${id}`);
+    }
+
     async uploadDataset(formData) {
         console.log('[API] Uploading dataset...');
-        return this.upload('/datasets/upload', formData);
+        console.log('[API] FormData type:', typeof formData, formData);
+
+        // Check if formData is valid
+        if (!formData || typeof formData.get !== 'function') {
+            console.error('[API] Invalid FormData object:', formData);
+            throw new Error('Invalid FormData object');
+        }
+
+        try {
+            // Extract dataset_id and name from FormData
+            const datasetId = formData.get('dataset_id');
+            const datasetName = formData.get('name');
+            const datasetDescription = formData.get('description');
+
+            console.log('[API] Upload params:', { datasetId, datasetName, datasetDescription });
+
+            // Get files from FormData
+            const files = formData.getAll('files');
+            console.log('[API] Files count:', files.length);
+
+            if (files.length === 0) {
+                throw new Error('No files provided');
+            }
+
+            let targetDatasetId = datasetId;
+
+            // If no dataset_id, create a new dataset first
+            if (!datasetId || datasetId === '') {
+                if (!datasetName) {
+                    throw new Error('Dataset name is required for new dataset');
+                }
+
+                console.log('[API] Creating new dataset:', datasetName);
+                const newDataset = await this.createDataset({
+                    name: datasetName,
+                    description: datasetDescription || ''
+                });
+                targetDatasetId = newDataset.id;
+                console.log('[API] Created dataset with ID:', targetDatasetId);
+            }
+
+            // Now upload files to the dataset
+            console.log(`[API] Uploading ${files.length} files to dataset ${targetDatasetId}...`);
+
+            // Create new FormData with just the files
+            const uploadFormData = new FormData();
+            files.forEach(file => {
+                uploadFormData.append('files', file);
+            });
+
+            try {
+                // Backend expects POST /datasets/{dataset_id}/images/upload
+                const result = await this.upload(`/datasets/${targetDatasetId}/images/upload`, uploadFormData);
+
+                console.log('[API] Upload response:', result);
+
+                // Add dataset_id to result for frontend compatibility
+                if (result && !result.dataset_id) {
+                    result.dataset_id = targetDatasetId;
+                }
+
+                return result;
+
+            } catch (uploadError) {
+                console.error('[API] Upload to backend failed:', uploadError);
+                console.error('[API] Error details:', {
+                    message: uploadError.message,
+                    stack: uploadError.stack
+                });
+
+                // More detailed error for user
+                throw new Error(`Upload failed: ${uploadError.message}. Check browser console for details.`);
+            }
+
+        } catch (error) {
+            console.error('[API] Upload process failed:', error);
+            throw error;
+        }
     }
 
     async autoAnnotate(datasetId, modelId = null, confidenceThreshold = 0.5, overwriteExisting = false) {
@@ -266,8 +353,20 @@ class APIService {
         console.log(`[API] Fetching images for dataset ${datasetId}...`);
         try {
             const data = await this.get(`/datasets/${datasetId}/images`);
-            console.log(`[API] Fetched ${data.length} images`);
-            return data;
+
+            // BE returns: { dataset_id, page, images: [...], total_images }
+            // Extract the images array
+            if (data && data.images && Array.isArray(data.images)) {
+                console.log(`[API] Fetched ${data.images.length} images`);
+                return data.images;
+            } else if (Array.isArray(data)) {
+                // Fallback: if BE returns array directly
+                console.log(`[API] Fetched ${data.length} images`);
+                return data;
+            } else {
+                console.warn('[API] Unexpected response format:', data);
+                return [];
+            }
         } catch (error) {
             console.error(`[API] Failed to fetch images for dataset ${datasetId}:`, error);
             return [];
@@ -293,10 +392,65 @@ class APIService {
         }
     }
 
+    async createAnnotation(annotationData) {
+        console.log('[API] Creating annotation:', annotationData);
+        return this.post('/datasets/annotations', annotationData);
+    }
+
+    async deleteAnnotation(annotationId) {
+        console.log(`[API] Deleting annotation ${annotationId}...`);
+        return this.delete(`/datasets/annotations/${annotationId}`);
+    }
+
+    async updateAnnotation(annotationId, annotationData) {
+        console.log(`[API] Updating annotation ${annotationId}:`, annotationData);
+        return this.put(`/datasets/annotations/${annotationId}`, annotationData);
+    }
+
+    async getDatasetAssets(datasetId) {
+        console.log(`[API] Fetching assets for dataset ${datasetId}...`);
+        return this.get(`/datasets/${datasetId}/assets`);
+    }
+
+    async getPresignedUploadUrls(data) {
+        console.log('[API] Getting presigned upload URLs...');
+        return this.post('/datasets/presigned-upload-urls', data);
+    }
+
+    async uploadCompleteBatch(datasetId, data) {
+        console.log(`[API] Completing batch upload for dataset ${datasetId}...`);
+        return this.post(`/datasets/${datasetId}/upload-complete-batch`, data);
+    }
+
+    async getPresignedDownloadUrlsBatch(datasetId, assetIds) {
+        console.log(`[API] Getting presigned download URLs for dataset ${datasetId}...`);
+        return this.post(`/datasets/${datasetId}/presigned-download-urls-batch`, { asset_ids: assetIds });
+    }
+
+    async downloadDatasetImage(datasetId, imageId) {
+        console.log(`[API] Downloading image ${imageId} from dataset ${datasetId}...`);
+        return this.get(`/datasets/${datasetId}/images/${imageId}/download`);
+    }
+
+    async downloadDataset(datasetId) {
+        console.log(`[API] Downloading dataset ${datasetId}...`);
+        return this.get(`/datasets/${datasetId}/download`);
+    }
+
+    async getDatasetLabelClasses(datasetId) {
+        console.log(`[API] Fetching label classes for dataset ${datasetId}...`);
+        return this.get(`/datasets/${datasetId}/label-classes`);
+    }
+
     // ========== MODELS ==========
     async getModels() {
         console.log('[API] Fetching models...');
         return this.get('/models/');
+    }
+
+    async getTrainedModels() {
+        console.log('[API] Fetching trained models...');
+        return this.get('/models/trained');
     }
 
     async getModel(id) {
@@ -308,22 +462,73 @@ class APIService {
         return this.post('/models/', data);
     }
 
+    async updateModel(id, data) {
+        console.log(`[API] Updating model ${id}:`, data);
+        return this.put(`/models/${id}`, data);
+    }
+
+    async deleteModel(id) {
+        console.log(`[API] Deleting model ${id}...`);
+        return this.delete(`/models/${id}`);
+    }
+
+    async getModelPresignedUpload(modelId, data) {
+        console.log(`[API] Getting presigned upload URL for model ${modelId}...`);
+        return this.post(`/models/${modelId}/presigned-upload`, data);
+    }
+
+    async modelUploadComplete(modelId, data) {
+        console.log(`[API] Completing upload for model ${modelId}...`);
+        return this.post(`/models/${modelId}/upload-complete`, data);
+    }
+
+    async getModelArtifacts(modelId) {
+        console.log(`[API] Fetching artifacts for model ${modelId}...`);
+        return this.get(`/models/${modelId}/artifacts`);
+    }
+
+    async getArtifactPresignedDownload(artifactId) {
+        console.log(`[API] Getting presigned download URL for artifact ${artifactId}...`);
+        return this.get(`/models/artifacts/${artifactId}/presigned-download`);
+    }
+
+    async predictModel(modelId, data) {
+        console.log(`[API] Running prediction with model ${modelId}...`);
+        return this.post(`/models/${modelId}/predict`, data);
+    }
+
     async convertModel(modelId, targetFramework, optimizationLevel, precision) {
-        return this.post(`/models/convert`, {
-            model_id: modelId,
-            target_framework: targetFramework,
-            optimization_level: optimizationLevel,
-            precision: precision
-        });
+        // NOTE: Backend does not have a /models/convert endpoint
+        // Model conversion should be handled differently or via training/export
+        console.warn('[API] Model conversion endpoint not available in backend');
+        throw new Error('Model conversion not implemented in backend');
     }
 
     async exportModel(modelId, format) {
-        const response = await fetch(`${this.baseURL}/models/${modelId}/export?format=${format}`, {
-            headers: {
-                'Authorization': `Bearer ${this.getAuthToken()}`
+        // Backend uses /models/{model_id}/download for model download
+        // This returns a presigned URL
+        console.log(`[API] Exporting model ${modelId}...`);
+        try {
+            const data = await this.post(`/models/${modelId}/download`);
+
+            // If backend returns presigned URL, open it
+            if (data.download_url) {
+                window.open(data.download_url, '_blank');
+                return data;
             }
-        });
-        return response.blob();
+
+            // Fallback: old behavior (if backend returns blob)
+            const response = await fetch(`${this.baseURL}/models/${modelId}/download`, {
+                method: 'POST',
+                headers: {
+                    'Authorization': `Bearer ${this.getAuthToken()}`
+                }
+            });
+            return response.blob();
+        } catch (error) {
+            console.error(`[API] Failed to export model ${modelId}:`, error);
+            throw error;
+        }
     }
 
     // ========== TRAINING ==========
@@ -348,6 +553,11 @@ class APIService {
         return this.post('/training/', data);
     }
 
+    async updateTrainingJob(id, data) {
+        console.log(`[API] Updating training job ${id}:`, data);
+        return this.put(`/training/${id}`, data);
+    }
+
     async pauseTraining(id) {
         return this.post(`/training/${id}/control`, { action: 'pause' });
     }
@@ -356,10 +566,16 @@ class APIService {
         return this.post(`/training/${id}/control`, { action: 'cancel' });
     }
 
+    async hyperparameterTuning(data) {
+        console.log('[API] Starting hyperparameter tuning:', data);
+        return this.post('/training/hyperparameter-tuning', data);
+    }
+
     async getTrainingMetrics(id) {
         console.log(`[API] Fetching training metrics for job ${id}...`);
         try {
-            const data = await this.get(`/training/${id}/metrics`);
+            // Backend uses /training/{job_id}/progress for metrics
+            const data = await this.get(`/training/${id}/progress`);
             return data;
         } catch (error) {
             console.error(`[API] Failed to fetch training metrics for job ${id}:`, error);
@@ -380,7 +596,32 @@ class APIService {
         return this.get(`/evaluation/${id}`);
     }
 
+    async getModelVersionEvaluations(modelVersionId) {
+        console.log(`[API] Fetching evaluations for model version ${modelVersionId}...`);
+        return this.get(`/evaluation/model-version/${modelVersionId}`);
+    }
+
+    async getLatestModelVersionEvaluation(modelVersionId) {
+        console.log(`[API] Fetching latest evaluation for model version ${modelVersionId}...`);
+        return this.get(`/evaluation/model-version/${modelVersionId}/latest`);
+    }
+
+    async compareEvaluations(data) {
+        console.log('[API] Comparing evaluations:', data);
+        return this.post('/evaluation/compare', data);
+    }
+
+    async deleteEvaluation(id) {
+        console.log(`[API] Deleting evaluation ${id}...`);
+        return this.delete(`/evaluation/${id}`);
+    }
+
     // ========== DEPLOYMENT ==========
+    async getDeploymentStats() {
+        console.log('[API] Fetching deployment stats...');
+        return this.get('/deployment/stats');
+    }
+
     async getDeployments() {
         return this.get('/deployment/');
     }
@@ -393,33 +634,72 @@ class APIService {
         return this.get(`/deployment/${id}`);
     }
 
+    async updateDeployment(id, data) {
+        console.log(`[API] Updating deployment ${id}:`, data);
+        return this.put(`/deployment/${id}`, data);
+    }
+
     async deleteDeployment(id) {
         return this.delete(`/deployment/${id}`);
     }
 
+    async deploymentInference(deploymentId, data) {
+        console.log(`[API] Running inference on deployment ${deploymentId}...`);
+        return this.post(`/deployment/${deploymentId}/inference`, data);
+    }
+
+    async deploymentHealthCheck(deploymentId) {
+        console.log(`[API] Checking health of deployment ${deploymentId}...`);
+        return this.post(`/deployment/${deploymentId}/health-check`);
+    }
+
+    async startDeployment(deploymentId) {
+        console.log(`[API] Starting deployment ${deploymentId}...`);
+        return this.post(`/deployment/${deploymentId}/start`);
+    }
+
+    async stopDeployment(deploymentId) {
+        console.log(`[API] Stopping deployment ${deploymentId}...`);
+        return this.post(`/deployment/${deploymentId}/stop`);
+    }
+
     // ========== MONITORING ==========
+    // NOTE: Backend does not have /monitoring endpoints implemented yet
+    // These methods are placeholders for future implementation
     async getMonitoring() {
-        return this.get('/monitoring/');
+        console.warn('[API] Monitoring endpoints not implemented in backend');
+        // return this.get('/monitoring/');
+        return [];
     }
 
     async getMonitoringDashboard(deploymentId) {
-        return this.get(`/monitoring/dashboard/${deploymentId}`);
+        console.warn('[API] Monitoring endpoints not implemented in backend');
+        // return this.get(`/monitoring/dashboard/${deploymentId}`);
+        return null;
     }
 
     async getAlerts() {
-        return this.get('/monitoring/alerts');
+        console.warn('[API] Monitoring endpoints not implemented in backend');
+        // return this.get('/monitoring/alerts');
+        return [];
     }
 
     async acknowledgeAlert(alertId) {
-        return this.post(`/monitoring/alerts/${alertId}/acknowledge`);
+        console.warn('[API] Monitoring endpoints not implemented in backend');
+        // return this.post(`/monitoring/alerts/${alertId}/acknowledge`);
+        throw new Error('Monitoring not implemented');
     }
 
     async triggerRetraining(deploymentId) {
-        return this.post(`/monitoring/feedback-loops/${deploymentId}/trigger-retrain`);
+        console.warn('[API] Monitoring endpoints not implemented in backend');
+        // return this.post(`/monitoring/feedback-loops/${deploymentId}/trigger-retrain`);
+        throw new Error('Monitoring not implemented');
     }
 
     async getPerformanceMetrics(deploymentId) {
-        return this.get(`/monitoring/deployments/${deploymentId}/metrics`);
+        console.warn('[API] Monitoring endpoints not implemented in backend');
+        // return this.get(`/monitoring/deployments/${deploymentId}/metrics`);
+        return null;
     }
 
     // ========== VERSIONS ==========
@@ -435,6 +715,11 @@ class APIService {
     async createVersion(datasetId, versionData) {
         console.log('[API] Creating dataset version:', versionData);
         return this.post(`/datasets/${datasetId}/versions`, versionData);
+    }
+
+    async updateVersion(versionId, versionData) {
+        console.log(`[API] Updating version ${versionId}:`, versionData);
+        return this.put(`/datasets/versions/${versionId}`, versionData);
     }
 
     async deleteVersion(versionId) {

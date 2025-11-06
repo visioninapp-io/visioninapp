@@ -103,8 +103,20 @@ class ExportService:
         (export_path / "images").mkdir(exist_ok=True)
         (export_path / "labels").mkdir(exist_ok=True)
 
-        # Create class mapping
-        class_names = dataset.class_names if dataset.class_names else []
+        # Get class names from latest dataset version's label ontology
+        from app.models.label_class import LabelClass
+        from app.models.dataset import DatasetVersion
+        
+        latest_version = db.query(DatasetVersion).filter(
+            DatasetVersion.dataset_id == dataset.id
+        ).order_by(DatasetVersion.created_at.desc()).first()
+        
+        class_names = []
+        if latest_version and latest_version.ontology_version:
+            label_classes = db.query(LabelClass).filter(
+                LabelClass.ontology_version_id == latest_version.ontology_version_id
+            ).all()
+            class_names = [lc.display_name for lc in label_classes]
 
         # Write data.yaml
         data_yaml = {
@@ -169,8 +181,22 @@ class ExportService:
             "categories": []
         }
 
+        # Get class names from latest dataset version's label ontology
+        from app.models.label_class import LabelClass
+        from app.models.dataset import DatasetVersion
+        
+        latest_version = db.query(DatasetVersion).filter(
+            DatasetVersion.dataset_id == dataset.id
+        ).order_by(DatasetVersion.created_at.desc()).first()
+        
+        class_names = []
+        if latest_version and latest_version.ontology_version:
+            label_classes = db.query(LabelClass).filter(
+                LabelClass.ontology_version_id == latest_version.ontology_version_id
+            ).all()
+            class_names = [lc.display_name for lc in label_classes]
+        
         # Add categories
-        class_names = dataset.class_names if dataset.class_names else []
         for idx, class_name in enumerate(class_names):
             coco_data["categories"].append({
                 "id": idx,

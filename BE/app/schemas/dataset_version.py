@@ -59,60 +59,37 @@ class AugmentationConfig(BaseModel):
     mixup: Optional[float] = None  # Alpha value for mixup
 
 
-# Dataset Version Schemas
+# Dataset Version Schemas (ERD 구조 기준)
 class DatasetVersionCreate(BaseModel):
     """Create a new dataset version"""
-    dataset_id: int
-    name: str
-    description: Optional[str] = None
-
-    # Data split
-    train_split: float = Field(0.7, ge=0, le=1)
-    valid_split: float = Field(0.2, ge=0, le=1)
-    test_split: float = Field(0.1, ge=0, le=1)
-
-    # Preprocessing and augmentation
-    preprocessing_config: Optional[PreprocessingConfig] = None
-    augmentation_config: Optional[AugmentationConfig] = None
+    version_tag: Optional[str] = None  # None이면 자동 생성 (v1.0, v2.0, ...)
+    is_frozen: bool = False
 
 
 class DatasetVersionUpdate(BaseModel):
     """Update dataset version"""
-    name: Optional[str] = None
-    description: Optional[str] = None
-    status: Optional[str] = None
+    is_frozen: Optional[bool] = None
+
+
+class DatasetSplitInfo(BaseModel):
+    """Split information"""
+    split: str  # train, val, test, unassigned
+    ratio: float
+    asset_count: int
 
 
 class DatasetVersionResponse(BaseModel):
-    """Dataset version response"""
+    """Dataset version response (ERD 구조)"""
     id: int
     dataset_id: int
-    version_number: int
-    name: str
-    description: Optional[str]
-
-    # Split info
-    train_split: float
-    valid_split: float
-    test_split: float
-
-    # Configs
-    preprocessing_config: Dict[str, Any]
-    augmentation_config: Dict[str, Any]
-
-    # Stats
-    total_images: int
-    train_images: int
-    valid_images: int
-    test_images: int
-
-    # Status
-    status: str
-    generation_progress: int
-
+    ontology_version_id: int
+    version_tag: str
+    is_frozen: bool
     created_at: datetime
-    completed_at: Optional[datetime]
-    created_by: str
+    
+    # Computed fields (조회 시 계산)
+    splits: List[DatasetSplitInfo] = []
+    total_assets: int = 0
 
     class Config:
         from_attributes = True
@@ -149,28 +126,3 @@ class ExportJobResponse(BaseModel):
     class Config:
         from_attributes = True
 
-
-# Batch Upload Schemas
-class UploadBatchCreate(BaseModel):
-    """Create upload batch"""
-    dataset_id: int
-    batch_name: str
-    total_files: int
-
-
-class UploadBatchResponse(BaseModel):
-    """Upload batch response"""
-    id: int
-    dataset_id: int
-    batch_name: str
-    total_files: int
-    successful_uploads: int
-    failed_uploads: int
-    status: str
-    error_messages: List[str]
-    created_at: datetime
-    completed_at: Optional[datetime]
-    created_by: str
-
-    class Config:
-        from_attributes = True

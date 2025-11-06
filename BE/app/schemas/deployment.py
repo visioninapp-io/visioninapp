@@ -5,44 +5,32 @@ from app.models.deployment import DeploymentTarget, DeploymentStatus
 
 
 class DeploymentBase(BaseModel):
+    """Deployment 기본 스키마"""
     name: str
-    model_id: int
     target: DeploymentTarget
-    device_type: str
 
     class Config:
         protected_namespaces = ()
 
 
 class DeploymentCreate(DeploymentBase):
-    configuration: Optional[Dict[str, Any]] = None
+    """Deployment 생성 스키마"""
+    model_version_id: int = Field(..., description="모델 버전 ID")
+    endpoint_url: str = Field(..., description="엔드포인트 URL")
 
 
 class DeploymentUpdate(BaseModel):
-    status: Optional[DeploymentStatus] = None
+    """Deployment 업데이트 스키마"""
+    name: Optional[str] = None
     endpoint_url: Optional[str] = None
-    total_requests: Optional[int] = None
-    requests_today: Optional[int] = None
-    avg_response_time: Optional[float] = None
-    uptime_percentage: Optional[float] = None
-    health_status: Optional[str] = None
 
 
 class DeploymentResponse(DeploymentBase):
+    """Deployment 응답 스키마"""
     id: int
-    status: DeploymentStatus
-    endpoint_url: Optional[str]
-    api_key: Optional[str]
-    configuration: Optional[Dict[str, Any]]
-    total_requests: int
-    requests_today: int
-    avg_response_time: Optional[float]
-    uptime_percentage: Optional[float]
-    last_health_check: Optional[datetime]
-    health_status: str
-    deployed_at: Optional[datetime]
-    created_at: datetime
-    created_by: str
+    model_version_id: int
+    endpoint_url: str
+    deployed_at: datetime
 
     class Config:
         from_attributes = True
@@ -71,18 +59,7 @@ class InferenceResponse(BaseModel):
     visualization_url: Optional[str] = None
 
 
-class InferenceLogResponse(BaseModel):
-    id: int
-    deployment_id: int
-    request_id: str
-    predictions: List[Dict[str, Any]]
-    confidence_scores: Optional[Dict[str, Any]]
-    inference_time: float
-    preprocessing_time: Optional[float]
-    postprocessing_time: Optional[float]
-    timestamp: datetime
-
-    class Config:
+class Config:
         from_attributes = True
 
 

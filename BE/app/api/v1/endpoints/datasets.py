@@ -1,4 +1,3 @@
-<<<<<<< HEAD
 from fastapi import APIRouter, Depends, HTTPException, UploadFile, File, status, Form, Body
 from fastapi.responses import StreamingResponse, Response, RedirectResponse
 from sqlalchemy.orm import Session
@@ -8,21 +7,32 @@ import io
 import zipfile
 import base64
 from datetime import datetime
+import hashlib
 from app.core.database import get_db
 from app.core.auth import get_current_user, get_current_user_dev
-from app.core.cache import cache_manager, invalidate_cache
-from app.models.dataset import Dataset, Image, Annotation, DatasetStatus
-from app.models.dataset_asset import DatasetAsset
+from app.models.dataset import Dataset, Annotation, DatasetVersion
+from app.models.label_class import LabelClass
+from app.utils.project_helper import get_or_create_default_project
+from app.utils.dataset_helper import (
+    get_or_create_dataset_version,
+    create_new_dataset_version,
+    get_or_create_dataset_split,
+    get_latest_dataset_version,
+    get_assets_from_dataset,
+    format_assets_as_images,
+    format_asset_as_image
+)
+from app.models.asset import Asset, AssetType
+from app.models.dataset_split import DatasetSplit, DatasetSplitType
 from app.schemas.dataset import (
     DatasetCreate, DatasetUpdate, DatasetResponse, DatasetStats,
-    ImageResponse, AnnotationCreate, AnnotationResponse, AutoAnnotationRequest
+    AnnotationCreate, AnnotationResponse, AutoAnnotationRequest
 )
 from app.schemas.dataset_asset import (
     DatasetAssetResponse, UploadCompleteItem as AssetUploadCompleteItem,
     UploadCompleteBatchRequest as AssetUploadCompleteBatchRequest
 )
 from app.utils.file_storage import file_storage
-from app.services.dataset_cache_service import dataset_cache_service
 from app.services.presigned_url_service import presigned_url_service
 from app.core.config import settings
 import time
@@ -59,7 +69,7 @@ class UploadDatasetRequest(BaseModel):
     content_type: Optional[str] = None
 
 class BatchDownloadUrlRequest(BaseModel):
-    image_ids: List[int]
+    asset_ids: List[int]
 
 
 # ============================================================
@@ -72,77 +82,101 @@ async def get_dataset_stats(
     current_user: dict = Depends(get_current_user_dev)
 ):
     """Get overall dataset statistics for current user"""
-    # Get user's datasets
-    user_datasets = db.query(Dataset).filter(Dataset.created_by == current_user["uid"]).all()
+    # Get user's default project
+    from app.models.project import Project
+    default_project = get_or_create_default_project(db, current_user["uid"])
+    
+    # Get datasets from user's project
+    user_datasets = db.query(Dataset).filter(Dataset.project_id == default_project.id).all()
     dataset_ids = [d.id for d in user_datasets]
-
-    # Count images only from user's datasets
-    total_images = db.query(Image).filter(Image.dataset_id.in_(dataset_ids)).count() if dataset_ids else 0
-    total_datasets = len(user_datasets)
-    total_classes = sum(d.total_classes for d in user_datasets)
-
-    annotated_images = db.query(Image).filter(
-        Image.dataset_id.in_(dataset_ids),
-        Image.is_annotated == 1
+    
+    # Asset에서 통계 계산
+    total_assets = 0
+    total_images = 0
+    
+    if dataset_ids:
+        for dataset_id in dataset_ids:
+            # 전체 Asset 개수 (이미지 + 비디오)
+            all_assets, _ = get_assets_from_dataset(
+                db=db,
+                dataset_id=dataset_id,
+                asset_type=None,  # 전체
+                limit=100000
+            )
+            total_assets += len(all_assets)
+            
+            # 이미지 개수
+            image_assets, _ = get_assets_from_dataset(
+                db=db,
+                dataset_id=dataset_id,
+                asset_type=AssetType.IMAGE,
+                limit=100000
+            )
+            total_images += len(image_assets)
+    
+    # 전체 Annotation 개수 계산
+    total_annotations = db.query(Annotation).join(Asset).join(DatasetSplit).join(DatasetVersion).filter(
+        DatasetVersion.dataset_id.in_(dataset_ids)
     ).count() if dataset_ids else 0
-
-    auto_annotation_rate = (annotated_images / total_images * 100) if total_images > 0 else 0
+    
+    total_datasets = len(user_datasets)
 
     return {
+        "total_assets": total_assets,
         "total_images": total_images,
         "total_datasets": total_datasets,
-        "total_classes": total_classes,
-        "auto_annotation_rate": auto_annotation_rate
+        "total_annotations": total_annotations
     }
 
 
 @router.get("/", response_model=List[DatasetResponse])
 async def get_datasets(
     skip: int = 0,
-    limit: int = 100,
+    limit: int = 10000,
     db: Session = Depends(get_db),
     current_user: dict = Depends(get_current_user_dev)
 ):
-    """Get all datasets with caching"""
-    cache_key = f"datasets:list:{current_user['uid']}:{skip}:{limit}"
+    """Get all datasets for current user"""
+    # Get user's default project
+    default_project = get_or_create_default_project(db, current_user["uid"])
+    
+    # Query datasets from user's project
+    datasets = db.query(Dataset).filter(
+        Dataset.project_id == default_project.id
+    ).offset(skip).limit(limit).all()
 
-    # Try to get from cache
-    cached_data = cache_manager.get(cache_key)
-    if cached_data is not None:
-        print(f"[CACHE HIT] {cache_key}")
-        return cached_data
-
-    # Query database - Filter by current user
-    print(f"[CACHE MISS] {cache_key}")
-    datasets = db.query(Dataset).filter(Dataset.created_by == current_user["uid"]).offset(skip).limit(limit).all()
-
-    # Convert to dict for serialization
-    datasets_dict = [
-        {
+    # Convert to response format with computed fields
+    datasets_list = []
+    for d in datasets:
+        # Asset 개수 계산
+        assets, _ = get_assets_from_dataset(
+            db=db,
+            dataset_id=d.id,
+            asset_type=None,  # 전체
+            limit=100000
+        )
+        total_assets = len(assets)
+        
+        # Annotation 개수 계산
+        total_annotations = db.query(Annotation).join(Asset).join(DatasetSplit).join(DatasetVersion).filter(
+            DatasetVersion.dataset_id == d.id
+        ).count()
+        
+        # 버전 개수
+        version_count = len(d.versions)
+        
+        datasets_list.append({
             "id": d.id,
+            "project_id": d.project_id,
             "name": d.name,
             "description": d.description,
-            "dataset_type": d.dataset_type.value if hasattr(d.dataset_type, 'value') else (d.dataset_type or "object_detection"),
-            "status": d.status.value if hasattr(d.status, 'value') else d.status,
-            "total_images": d.total_images,
-            "annotated_images": d.annotated_images,
-            "total_classes": d.total_classes,
-            "class_names": d.class_names or [],
-            "class_colors": d.class_colors or {},
-            "auto_annotation_enabled": bool(d.auto_annotation_enabled),
-            "auto_annotation_model_id": d.auto_annotation_model_id,
-            "is_public": bool(d.is_public),
-            "created_at": d.created_at.isoformat() if d.created_at else None,
-            "updated_at": d.updated_at.isoformat() if d.updated_at else None,
-            "created_by": d.created_by
-        }
-        for d in datasets
-    ]
+            "created_at": d.created_at,
+            "total_assets": total_assets,
+            "total_annotations": total_annotations,
+            "version_count": version_count
+        })
 
-    # Cache the result
-    cache_manager.set(cache_key, datasets_dict, ttl=60)  # Cache for 1 minute
-
-    return datasets_dict
+    return datasets_list
 
 
 @router.post("/", response_model=DatasetResponse, status_code=status.HTTP_201_CREATED)
@@ -151,31 +185,39 @@ async def create_dataset(
     db: Session = Depends(get_db),
     current_user: dict = Depends(get_current_user_dev)
 ):
-    """Create a new dataset"""
-    db_dataset = db.query(Dataset).filter(Dataset.name == dataset.name).first()
+    """Create a new dataset (ERD 기준)"""
+    # Get or create default project for user
+    default_project = get_or_create_default_project(db, current_user["uid"])
+    
+    # Check if dataset name already exists in this project
+    db_dataset = db.query(Dataset).filter(
+        Dataset.name == dataset.name,
+        Dataset.project_id == default_project.id
+    ).first()
     if db_dataset:
-        raise HTTPException(status_code=400, detail="Dataset with this name already exists")
+        raise HTTPException(status_code=400, detail="Dataset with this name already exists in this project")
 
-    # Get dataset data and ensure default values
-    dataset_data = dataset.dict()
-    if dataset_data.get("class_names") is None:
-        dataset_data["class_names"] = []
-    if dataset_data.get("class_colors") is None:
-        dataset_data["class_colors"] = {}
-
+    # Create dataset with ERD fields only
     db_dataset = Dataset(
-        **dataset_data,
-        created_by=current_user["uid"]
+        project_id=default_project.id,
+        name=dataset.name,
+        description=dataset.description
     )
     db.add(db_dataset)
     db.commit()
     db.refresh(db_dataset)
 
-    # Invalidate datasets cache
-    invalidate_cache("datasets")
-    print("[CACHE] Invalidated: datasets")
-
-    return db_dataset
+    # Return with computed fields
+    return {
+        "id": db_dataset.id,
+        "project_id": db_dataset.project_id,
+        "name": db_dataset.name,
+        "description": db_dataset.description,
+        "created_at": db_dataset.created_at,
+        "total_assets": 0,
+        "total_annotations": 0,
+        "version_count": 0
+    }
 
 
 @router.get("/{dataset_id}", response_model=DatasetResponse)
@@ -184,11 +226,38 @@ async def get_dataset(
     db: Session = Depends(get_db),
     current_user: dict = Depends(get_current_user_dev)
 ):
-    """Get a specific dataset"""
+    """Get a specific dataset with computed fields"""
     dataset = db.query(Dataset).filter(Dataset.id == dataset_id).first()
     if not dataset:
         raise HTTPException(status_code=404, detail="Dataset not found")
-    return dataset
+    
+    # Asset 개수 계산
+    assets, _ = get_assets_from_dataset(
+        db=db,
+        dataset_id=dataset.id,
+        asset_type=None,
+        limit=100000
+    )
+    total_assets = len(assets)
+    
+    # Annotation 개수 계산
+    total_annotations = db.query(Annotation).join(Asset).join(DatasetSplit).join(DatasetVersion).filter(
+        DatasetVersion.dataset_id == dataset.id
+    ).count()
+    
+    # 버전 개수
+    version_count = len(dataset.versions)
+    
+    return {
+        "id": dataset.id,
+        "project_id": dataset.project_id,
+        "name": dataset.name,
+        "description": dataset.description,
+        "created_at": dataset.created_at,
+        "total_assets": total_assets,
+        "total_annotations": total_annotations,
+        "version_count": version_count
+    }
 
 
 @router.put("/{dataset_id}", response_model=DatasetResponse)
@@ -198,23 +267,38 @@ async def update_dataset(
     db: Session = Depends(get_db),
     current_user: dict = Depends(get_current_user_dev)
 ):
-    """Update a dataset"""
+    """Update a dataset (ERD 기준)"""
     db_dataset = db.query(Dataset).filter(Dataset.id == dataset_id).first()
     if not db_dataset:
         raise HTTPException(status_code=404, detail="Dataset not found")
 
+    # Update only allowed fields
     update_data = dataset_update.dict(exclude_unset=True)
-
-    # Convert boolean to int for SQLite
-    if "auto_annotation_enabled" in update_data:
-        update_data["auto_annotation_enabled"] = int(update_data["auto_annotation_enabled"])
-
     for field, value in update_data.items():
-        setattr(db_dataset, field, value)
+        if hasattr(db_dataset, field):
+            setattr(db_dataset, field, value)
 
     db.commit()
     db.refresh(db_dataset)
-    return db_dataset
+    
+    # Return with computed fields
+    assets, _ = get_assets_from_dataset(db=db, dataset_id=db_dataset.id, asset_type=None, limit=100000)
+    total_assets = len(assets)
+    total_annotations = db.query(Annotation).join(Asset).join(DatasetSplit).join(DatasetVersion).filter(
+        DatasetVersion.dataset_id == db_dataset.id
+    ).count()
+    version_count = len(db_dataset.versions)
+    
+    return {
+        "id": db_dataset.id,
+        "project_id": db_dataset.project_id,
+        "name": db_dataset.name,
+        "description": db_dataset.description,
+        "created_at": db_dataset.created_at,
+        "total_assets": total_assets,
+        "total_annotations": total_annotations,
+        "version_count": version_count
+    }
 
 
 @router.delete("/{dataset_id}", status_code=status.HTTP_204_NO_CONTENT)
@@ -230,16 +314,8 @@ async def delete_dataset(
 
     print(f"[DELETE DATASET] Deleting dataset {dataset_id}: {dataset.name}")
     
-    # Invalidate dataset images cache before deletion
-    dataset_cache_service.invalidate_dataset_cache(dataset_id)
-    print(f"[CACHE] Invalidated images cache for dataset {dataset_id}")
-    
     db.delete(dataset)
     db.commit()
-
-    # Invalidate cache to ensure frontend gets updated list
-    invalidate_cache("datasets")
-    print("[CACHE] Invalidated after dataset deletion: datasets")
 
     return None
 
@@ -248,12 +324,12 @@ async def delete_dataset(
 async def get_dataset_images(
     dataset_id: int,
     page: int = 1,
-    limit: int = 1000,
+    limit: int = 10000,
     db: Session = Depends(get_db),
     current_user: dict = Depends(get_current_user_dev)
 ):
     """
-    Get images in a dataset with base64 encoding and Redis caching
+    Get images in a dataset with base64 encoding
     
     Args:
         dataset_id: Dataset ID
@@ -262,21 +338,22 @@ async def get_dataset_images(
     
     Returns:
         Dictionary with base64 encoded images and metadata
-        
-    Cache Strategy:
-        - First request: Loads from S3/local storage, encodes to base64, caches in Redis
-        - Subsequent requests: Returns cached data from Redis (very fast)
-        - Cache is automatically invalidated on dataset updates
     """
     # Verify dataset exists
     dataset = db.query(Dataset).filter(Dataset.id == dataset_id).first()
     if not dataset:
         raise HTTPException(status_code=404, detail="Dataset not found")
     
-    # Get all images for this dataset
-    all_images = db.query(Image).filter(Image.dataset_id == dataset_id).all()
+    # Asset에서 조회
+    assets, total_count = get_assets_from_dataset(
+        db=db,
+        dataset_id=dataset_id,
+        asset_type=AssetType.IMAGE,
+        page=page,
+        limit=limit
+    )
     
-    if not all_images:
+    if not assets:
         return {
             "dataset_id": dataset_id,
             "page": page,
@@ -287,29 +364,20 @@ async def get_dataset_images(
             "total_pages": 0
         }
     
-    print(f"[GET IMAGES] Dataset {dataset_id}: {len(all_images)} total images, page {page}, limit {limit}")
+    print(f"[GET IMAGES] Dataset {dataset_id}: {len(assets)} assets, page {page}, limit {limit}")
     
-    # Use cache service to get base64 encoded images
-    try:
-        result = await dataset_cache_service.get_cached_images(
-            dataset_id=dataset_id,
-            images_db=all_images,
-            page=page,
-            limit=limit
-        )
-        
-        # Add total pages
-        result["total_pages"] = (result["total_images"] + limit - 1) // limit
-        
-        print(f"[GET IMAGES] Returning {len(result['images'])} images (cached: {result['cached']})")
-        
-        return result
-    except Exception as e:
-        print(f"[ERROR] Failed to get images for dataset {dataset_id}: {str(e)}")
-        raise HTTPException(
-            status_code=500,
-            detail=f"Failed to load images from S3: {str(e)}"
-        )
+    # Asset을 Image 형식으로 변환
+    image_list = format_assets_as_images(assets)
+    
+    return {
+        "dataset_id": dataset_id,
+        "page": page,
+        "page_size": limit,
+        "cached": False,
+        "images": image_list,
+        "total_images": total_count,
+        "total_pages": (total_count + limit - 1) // limit
+    }
 
 
 @router.post("/presigned-upload-urls", status_code=status.HTTP_201_CREATED)
@@ -336,11 +404,14 @@ async def generate_presigned_upload_urls(
     
     dataset = None
     
+    # Get or create default project for user
+    default_project = get_or_create_default_project(db, current_user["uid"])
+    
     # If dataset_id provided, use existing dataset
     if request.dataset_id:
         dataset = db.query(Dataset).filter(
             Dataset.id == request.dataset_id,
-            Dataset.created_by == current_user["uid"]
+            Dataset.project_id == default_project.id
         ).first()
         
         if not dataset:
@@ -350,42 +421,46 @@ async def generate_presigned_upload_urls(
         if not request.name:
             raise HTTPException(status_code=400, detail="Dataset name is required when creating new dataset")
         
-        # Check if dataset name already exists for this user
+        # Check if dataset name already exists in this project
         existing = db.query(Dataset).filter(
             Dataset.name == request.name,
-            Dataset.created_by == current_user["uid"]
+            Dataset.project_id == default_project.id
         ).first()
         
         if existing:
             raise HTTPException(status_code=400, detail="Dataset with this name already exists")
         
+        # Create dataset with ERD fields only
         dataset = Dataset(
             name=request.name,
             description=request.description or "",
-            dataset_type="object_detection",  # default
-            total_images=0,
-            annotated_images=0,
-            total_classes=0,
-            status=DatasetStatus.UPLOADING,
-            created_by=current_user["uid"],
-            auto_annotation_enabled=False,
-            is_public=False
+            project_id=default_project.id
         )
         db.add(dataset)
         db.commit()
         db.refresh(dataset)
     
     try:
+        # Get current asset count to determine starting number
+        # This ensures sequential numbering: dataset_name_1, dataset_name_2, etc.
+        assets, total_count = get_assets_from_dataset(
+            db=db,
+            dataset_id=dataset.id,
+            asset_type=None,  # All assets regardless of type
+            page=1,
+            limit=100000  # Get all for counting
+        )
+        start_number = total_count + 1
+        
         # Generate presigned URLs
         urls = presigned_url_service.generate_batch_upload_urls(
             dataset_id=dataset.id,
+            dataset_name=dataset.name,
             filenames=request.filenames,
+            start_number=start_number,
             content_type=request.content_type,
             expiration=1800  # 30분
         )
-        
-        # Invalidate cache
-        invalidate_cache("datasets")
         
         return {
             "success": True,
@@ -393,8 +468,7 @@ async def generate_presigned_upload_urls(
             "dataset": {
                 "id": dataset.id,
                 "name": dataset.name,
-                "description": dataset.description,
-                "status": dataset.status.value if hasattr(dataset.status, 'value') else dataset.status
+                "description": dataset.description
             },
             "urls": urls,
             "total_count": len(urls)
@@ -424,41 +498,57 @@ async def upload_images_to_dataset(
         raise HTTPException(status_code=400, detail="No files provided")
 
     try:
-        # Update dataset status
-        original_status = dataset.status
-        dataset.status = DatasetStatus.UPLOADING
-        db.commit()
-
         # Upload images to S3
         successful_uploads, failed_uploads = await file_storage.save_images_batch(files, dataset.id)
 
-        # Create Image records
+        # DatasetVersion 및 Split 생성/조회
+        # 에셋 추가 시 새 버전 생성
+        from app.utils.dataset_helper import create_new_dataset_version
+        dataset_version = create_new_dataset_version(db, dataset.id)
+        dataset_split = get_or_create_dataset_split(
+            db,
+            dataset_version.id,
+            DatasetSplitType.UNASSIGNED
+        )
+
+        # Asset 생성
         for upload in successful_uploads:
             metadata = upload["metadata"]
-            db_image = Image(
-                dataset_id=dataset.id,
-                filename=metadata["stored_filename"],
-                file_path=metadata["relative_path"],
-                file_size=metadata["file_size"],
+            storage_uri = metadata["relative_path"]
+            
+            # SHA256 계산
+            sha256_hash = calculate_sha256_from_s3(storage_uri)
+            
+            # S3 파일명 추출 (datasets/포트홀/images/포트홀_1.jpg → 포트홀_1.jpg)
+            s3_filename = storage_uri.split('/')[-1] if '/' in storage_uri else storage_uri
+            
+            asset = Asset(
+                dataset_split_id=dataset_split.id,
+                name=s3_filename,  # ERD의 에셋명 필드 (S3 파일명)
+                type=AssetType.IMAGE,
+                storage_uri=storage_uri,
+                sha256=sha256_hash,
+                bytes=metadata["file_size"],
                 width=metadata.get("width"),
                 height=metadata.get("height"),
-                is_annotated=0
+                duration_ms=None,
+                fps=None,
+                frame=None,
+                codec=None
             )
-            db.add(db_image)
+            db.add(asset)
 
-        # Update dataset
-        dataset.total_images += len(successful_uploads)
-        dataset.status = original_status if len(failed_uploads) == 0 else DatasetStatus.PROCESSING
         db.commit()
-        
-        # Invalidate dataset images cache
-        dataset_cache_service.invalidate_dataset_cache(dataset_id)
-        print(f"[CACHE] Invalidated images cache for dataset {dataset_id}")
+
+        # 전체 Asset 개수 계산
+        total_assets = db.query(Asset).join(DatasetSplit).filter(
+            DatasetSplit.dataset_version_id == dataset_version.id
+        ).count()
 
         response = {
             "message": f"Successfully uploaded {len(successful_uploads)} images",
             "dataset_id": dataset_id,
-            "total_images": dataset.total_images,
+            "total_assets": total_assets,
             "successful_uploads": len(successful_uploads),
             "failed_uploads": len(failed_uploads)
         }
@@ -469,8 +559,7 @@ async def upload_images_to_dataset(
         return response
 
     except Exception as e:
-        dataset.status = DatasetStatus.ERROR
-        db.commit()
+        db.rollback()
         raise HTTPException(status_code=500, detail=f"Upload failed: {str(e)}")
 
 
@@ -481,13 +570,17 @@ async def get_image_annotations(
     db: Session = Depends(get_db),
     current_user: dict = Depends(get_current_user_dev)
 ):
-    """Get all annotations for a specific image, optionally filtered by minimum confidence threshold"""
-    image = db.query(Image).filter(Image.id == image_id).first()
-    if not image:
-        raise HTTPException(status_code=404, detail="Image not found")
-
-    # Get all annotations for the image
-    query = db.query(Annotation).filter(Annotation.image_id == image_id)
+    """
+    Get all annotations for a specific asset
+    """
+    # Asset 조회
+    asset = db.query(Asset).filter(Asset.id == image_id).first()
+    
+    if not asset:
+        raise HTTPException(status_code=404, detail="Asset not found")
+    
+    # Asset 기반 Annotation 조회
+    query = db.query(Annotation).filter(Annotation.asset_id == asset.id)
 
     # Apply confidence threshold filter if specified
     if min_confidence is not None:
@@ -495,7 +588,7 @@ async def get_image_annotations(
         print(f"[GET ANNOTATIONS] Filtering by confidence >= {min_confidence}")
 
     annotations = query.all()
-    print(f"[GET ANNOTATIONS] Found {len(annotations)} annotations for image {image_id}")
+    print(f"[GET ANNOTATIONS] Found {len(annotations)} annotations for asset {image_id}")
 
     return annotations
 
@@ -506,20 +599,32 @@ async def create_annotation(
     db: Session = Depends(get_db),
     current_user: dict = Depends(get_current_user_dev)
 ):
-    """Create a new annotation"""
-    image = db.query(Image).filter(Image.id == annotation.image_id).first()
-    if not image:
-        raise HTTPException(status_code=404, detail="Image not found")
+    """
+    Create a new annotation
+    """
+    # Asset 존재 확인
+    asset = db.query(Asset).filter(Asset.id == annotation.asset_id).first()
+    if not asset:
+        raise HTTPException(status_code=404, detail="Asset not found")
 
+    # LabelClass 존재 확인
+    label_class = db.query(LabelClass).filter(LabelClass.id == annotation.label_class_id).first()
+    if not label_class:
+        raise HTTPException(status_code=404, detail="Label class not found")
+    
+    # Annotation 생성
     db_annotation = Annotation(
-        **annotation.dict(exclude={"is_auto_generated"}),
-        is_auto_generated=int(annotation.is_auto_generated)
+        asset_id=annotation.asset_id,
+        label_class_id=annotation.label_class_id,
+        model_version_id=annotation.model_version_id,
+        geometry_type=annotation.geometry_type,
+        geometry=annotation.geometry,
+        is_normalized=annotation.is_normalized,
+        source=annotation.source,
+        confidence=annotation.confidence,
+        annotator_name=annotation.annotator_name or current_user.get("name", "system")
     )
     db.add(db_annotation)
-
-    # Mark image as annotated
-    image.is_annotated = 1
-
     db.commit()
     db.refresh(db_annotation)
     return db_annotation
@@ -545,20 +650,19 @@ async def auto_annotate_dataset(
 
     print(f"[AUTO-ANNOTATE] Found dataset: {dataset.name}")
 
-    # 데이터셋에 이미지가 있는지 확인
-    images = db.query(Image).filter(Image.dataset_id == request.dataset_id).all()
-    if not images:
+    # Asset에서 이미지 조회
+    assets, _ = get_assets_from_dataset(
+        db=db,
+        dataset_id=request.dataset_id,
+        asset_type=AssetType.IMAGE,
+        limit=100000
+    )
+    
+    if not assets:
         print(f"[AUTO-ANNOTATE] No images in dataset {request.dataset_id}")
         raise HTTPException(status_code=400, detail="No images in dataset")
 
-    print(f"[AUTO-ANNOTATE] Found {len(images)} images")
-
-    # 상태 업데이트
-    dataset.status = DatasetStatus.PROCESSING
-    dataset.auto_annotation_enabled = 1
-    if request.model_id:
-        dataset.auto_annotation_model_id = request.model_id
-    db.commit()
+    print(f"[AUTO-ANNOTATE] Found {len(assets)} assets")
 
     try:
         print("[AUTO-ANNOTATE] Connecting to AI service...")
@@ -602,19 +706,36 @@ async def auto_annotate_dataset(
         conf_threshold = getattr(request, 'confidence_threshold', 0.25)
         print(f"[AUTO-ANNOTATE] Using confidence threshold: {conf_threshold}")
 
-        # 각 이미지에 대해 자동 어노테이션 실행
+        # 각 Asset에 대해 자동 어노테이션 실행
         total_annotations = 0
         annotated_images_count = 0
         base_upload_dir = Path("uploads")
         print(f"[AUTO-ANNOTATE] Base upload directory: {base_upload_dir.absolute()}")
 
-        for idx, img in enumerate(images, 1):
-            img_path = base_upload_dir / img.file_path
-            print(f"[AUTO-ANNOTATE] Processing image {idx}/{len(images)}: {img.filename}")
-            print(f"[AUTO-ANNOTATE] Image path: {img_path}")
+        # DatasetVersion에서 LabelClass 찾기
+        dataset_version = get_latest_dataset_version(db, request.dataset_id)
+        if not dataset_version:
+            raise HTTPException(status_code=400, detail="Dataset version not found")
+        
+        ontology = dataset_version.ontology_version
+        label_classes = db.query(LabelClass).filter(
+            LabelClass.ontology_version_id == ontology.id
+        ).all()
+        label_class_map = {lc.display_name: lc for lc in label_classes}
+
+        for idx, asset in enumerate(assets, 1):
+            # S3 경로 또는 로컬 경로 처리
+            if asset.storage_uri.startswith('datasets/'):
+                img_path = base_upload_dir / asset.storage_uri
+            else:
+                img_path = Path(asset.storage_uri)
+            
+            filename = asset.storage_uri.split('/')[-1] if asset.storage_uri else f"asset_{asset.id}"
+            print(f"[AUTO-ANNOTATE] Processing asset {idx}/{len(assets)}: {filename}")
+            print(f"[AUTO-ANNOTATE] Asset path: {img_path}")
 
             if not img_path.exists():
-                print(f"[AUTO-ANNOTATE] WARNING: Image file not found: {img_path}")
+                print(f"[AUTO-ANNOTATE] WARNING: Asset file not found: {img_path}")
                 continue
 
             # 추론 실행 (AI service를 통해)
@@ -625,96 +746,88 @@ async def auto_annotate_dataset(
                     image_path=str(img_path),
                     conf=conf_threshold
                 )
-                annotations = result.get('predictions', [])
-                print(f"[AUTO-ANNOTATE] Found {len(annotations)} annotations")
+                predictions = result.get('predictions', [])
+                print(f"[AUTO-ANNOTATE] Found {len(predictions)} predictions")
             except Exception as e:
                 print(f"[AUTO-ANNOTATE] Prediction failed: {e}")
                 continue
 
             # overwrite_existing이 True인 경우 기존 어노테이션 삭제
             if request.overwrite_existing:
-                existing_annotations = db.query(Annotation).filter(Annotation.image_id == img.id).all()
+                existing_annotations = db.query(Annotation).filter(Annotation.asset_id == asset.id).all()
                 if existing_annotations:
-                    print(f"[AUTO-ANNOTATE] Overwrite mode: Deleting {len(existing_annotations)} existing annotations for image {img.id}")
+                    print(f"[AUTO-ANNOTATE] Overwrite mode: Deleting {len(existing_annotations)} existing annotations for asset {asset.id}")
                     for existing_ann in existing_annotations:
                         db.delete(existing_ann)
-                    db.flush()  # Flush to ensure deletions are processed before inserts
+                    db.flush()
                     print(f"[AUTO-ANNOTATE] Existing annotations deleted")
 
-            if annotations:
+            if predictions:
                 # 어노테이션 저장
-                for ann in annotations:
+                for pred in predictions:
                     # AI service returns Detection objects, convert to dict if needed
-                    if isinstance(ann, dict):
-                        bbox = ann['bbox']
-                        class_id = ann['class_id']
-                        class_name = ann['class_name']
-                        confidence = ann['confidence']
+                    if isinstance(pred, dict):
+                        bbox = pred['bbox']
+                        class_id = pred['class_id']
+                        class_name = pred['class_name']
+                        confidence = pred['confidence']
                     else:
                         # Pydantic model from AI service
-                        bbox = ann.bbox
-                        class_id = ann.class_id
-                        class_name = ann.class_name
-                        confidence = ann.confidence
+                        bbox = pred.bbox
+                        class_id = pred.class_id
+                        class_name = pred.class_name
+                        confidence = pred.confidence
+                    
+                    # LabelClass 찾기
+                    label_class = label_class_map.get(class_name)
+                    if not label_class:
+                        print(f"[AUTO-ANNOTATE] Warning: Label class '{class_name}' not found in ontology, skipping")
+                        continue
+                    
+                    # Geometry 데이터 구성
+                    geometry_data = {
+                        "bbox": {
+                            "x_center": bbox['x_center'] if isinstance(bbox, dict) else bbox.get('x_center', 0),
+                            "y_center": bbox['y_center'] if isinstance(bbox, dict) else bbox.get('y_center', 0),
+                            "width": bbox['width'] if isinstance(bbox, dict) else bbox.get('width', 0),
+                            "height": bbox['height'] if isinstance(bbox, dict) else bbox.get('height', 0)
+                        }
+                    }
+                    
+                    from app.models.dataset import GeometryType
                     
                     db_annotation = Annotation(
-                        image_id=img.id,
-                        class_id=class_id,
-                        class_name=class_name,
-                        x_center=bbox['x_center'] if isinstance(bbox, dict) else bbox.get('x_center'),
-                        y_center=bbox['y_center'] if isinstance(bbox, dict) else bbox.get('y_center'),
-                        width=bbox['width'] if isinstance(bbox, dict) else bbox.get('width'),
-                        height=bbox['height'] if isinstance(bbox, dict) else bbox.get('height'),
+                        asset_id=asset.id,
+                        label_class_id=label_class.id,
+                        geometry_type=GeometryType.BBOX,
+                        geometry=geometry_data,
+                        is_normalized=True,
+                        source="model",
                         confidence=confidence,
-                        is_auto_generated=1,
-                        is_verified=0
+                        annotator_name="auto-annotation"
                     )
                     db.add(db_annotation)
                     total_annotations += 1
 
-                # 이미지를 어노테이션됨으로 표시
-                img.is_annotated = 1
                 annotated_images_count += 1
-                print(f"[AUTO-ANNOTATE] Saved {len(annotations)} annotations for image {img.filename}")
+                print(f"[AUTO-ANNOTATE] Saved {len(predictions)} annotations for asset {filename}")
 
         # 커밋
         print(f"[AUTO-ANNOTATE] Committing {total_annotations} annotations...")
         db.commit()
         print("[AUTO-ANNOTATE] Committed successfully")
 
-        # 데이터셋 통계 업데이트
-        print("[AUTO-ANNOTATE] Updating dataset statistics...")
-        dataset.annotated_images = annotated_images_count
-        dataset.status = DatasetStatus.ANNOTATED if annotated_images_count > 0 else DatasetStatus.READY
-
-        # 실제로 detection된 클래스만 추출
-        print("[AUTO-ANNOTATE] Extracting detected class names...")
-        detected_annotations = db.query(Annotation).join(Image).filter(Image.dataset_id == request.dataset_id).all()
-        detected_class_names = list(set([ann.class_name for ann in detected_annotations]))
-        detected_class_names.sort()  # 알파벳 순 정렬
-
-        print(f"[AUTO-ANNOTATE] Detected classes: {detected_class_names}")
-
-        # 클래스 이름 업데이트 (실제로 detection된 클래스만)
-        if detected_class_names:
-            dataset.class_names = detected_class_names
-            dataset.total_classes = len(detected_class_names)
-            print(f"[AUTO-ANNOTATE] Updated class names to detected classes: {dataset.class_names}")
-        else:
-            print("[AUTO-ANNOTATE] No classes detected, keeping original class names")
-
+        # Commit all annotations
         db.commit()
-
-        # Invalidate datasets cache after auto-annotation
-        invalidate_cache("datasets")
-        print("[AUTO-ANNOTATE] Cache invalidated")
+        
+        print(f"[AUTO-ANNOTATE] Successfully created {total_annotations} annotations for {annotated_images_count} images")
 
         result = {
             "message": "Auto-annotation completed",
             "dataset_id": request.dataset_id,
             "model_id": request.model_id,
             "status": "completed",
-            "total_images": len(images),
+            "total_images": len(assets),
             "annotated_images": annotated_images_count,
             "total_annotations": total_annotations,
             "confidence_threshold": conf_threshold
@@ -723,13 +836,12 @@ async def auto_annotate_dataset(
         return result
 
     except Exception as e:
-        # 에러 발생 시 상태 복구
+        # 에러 발생 시 롤백
         print(f"[AUTO-ANNOTATE] ERROR: {str(e)}")
         print(f"[AUTO-ANNOTATE] Error type: {type(e).__name__}")
         import traceback
         print(f"[AUTO-ANNOTATE] Traceback:\n{traceback.format_exc()}")
-        dataset.status = DatasetStatus.ERROR
-        db.commit()
+        db.rollback()
 
         raise HTTPException(
             status_code=500,
@@ -745,62 +857,67 @@ async def download_single_image(
     current_user: dict = Depends(get_current_user_dev)
 ):
     """
-    Download a single image from a dataset
+    Download a single asset from a dataset
     
     Args:
         dataset_id: Dataset ID
-        image_id: Image ID
+        image_id: Asset ID
         
     Returns:
-        Image file as StreamingResponse
+        Asset file as StreamingResponse
     """
     # Verify dataset exists
     dataset = db.query(Dataset).filter(Dataset.id == dataset_id).first()
     if not dataset:
         raise HTTPException(status_code=404, detail="Dataset not found")
     
-    # Get image record
-    image = db.query(Image).filter(
-        Image.id == image_id,
-        Image.dataset_id == dataset_id
-    ).first()
+    # Asset 조회
+    asset = db.query(Asset).join(DatasetSplit).join(DatasetVersion).filter(
+            Asset.id == image_id,
+        DatasetVersion.dataset_id == dataset_id
+        ).first()
     
-    if not image:
-        raise HTTPException(status_code=404, detail="Image not found")
+    if not asset:
+        raise HTTPException(status_code=404, detail="Asset not found")
     
     try:
-        # Download image from S3
-        image_data = file_storage.download_from_s3(image.file_path)
+        # Download asset from S3
+        asset_data = file_storage.download_from_s3(asset.storage_uri)
         
-        if not image_data:
+        if not asset_data:
             raise HTTPException(
                 status_code=404,
-                detail=f"Image file not found in storage: {image.filename}"
+                detail=f"Asset file not found in storage: {asset.storage_uri}"
             )
         
         # Determine content type
+        filename = asset.storage_uri.split('/')[-1] if asset.storage_uri else f"asset_{asset.id}"
         content_type = "image/jpeg"
-        if image.filename.lower().endswith('.png'):
+        if filename.lower().endswith('.png'):
             content_type = "image/png"
-        elif image.filename.lower().endswith('.gif'):
+        elif filename.lower().endswith('.gif'):
             content_type = "image/gif"
-        elif image.filename.lower().endswith('.bmp'):
+        elif filename.lower().endswith('.bmp'):
             content_type = "image/bmp"
+        elif filename.lower().endswith('.mp4'):
+            content_type = "video/mp4"
+        elif filename.lower().endswith('.avi'):
+            content_type = "video/avi"
         
         # Return as streaming response
         return StreamingResponse(
-            io.BytesIO(image_data),
+            io.BytesIO(asset_data),
             media_type=content_type,
             headers={
-                "Content-Disposition": f'attachment; filename="{image.filename}"'
+                "Content-Disposition": f'attachment; filename="{filename}"'
             }
         )
     
     except Exception as e:
-        print(f"[ERROR] Failed to download image {image_id}: {str(e)}")
+        print(f"[ERROR] Failed to download asset {image_id}: {str(e)}")
         raise HTTPException(
             status_code=500,
-            detail=f"Failed to download image: {str(e)}"
+            detail=f"Failed to download asset: {str(e)}"
         )
 
 
@@ -826,15 +943,14 @@ async def download_dataset(
     if not dataset:
         raise HTTPException(status_code=404, detail="Dataset not found")
     
-    # Get all assets (images + videos) from DatasetAsset table
-    assets = db.query(DatasetAsset).filter(
-        DatasetAsset.dataset_id == dataset_id
-    ).all()
+    # Asset 테이블에서 조회
+    assets, total_count = get_assets_from_dataset(
+        db=db,
+        dataset_id=dataset_id,
+        limit=10000  # 큰 수로 설정하여 모든 asset 가져오기
+    )
     
-    # Also get images from Image table for backward compatibility
-    images = db.query(Image).filter(Image.dataset_id == dataset_id).all()
-    
-    if not assets and not images:
+    if not assets:
         raise HTTPException(
             status_code=404,
             detail="No files found in this dataset"
@@ -846,116 +962,94 @@ async def download_dataset(
         
         with zipfile.ZipFile(zip_buffer, 'w', zipfile.ZIP_DEFLATED) as zip_file:
             # Add dataset info
-            total_images = len([a for a in assets if a.kind == 'image']) + len(images)
-            total_videos = len([a for a in assets if a.kind == 'video'])
+            total_images = len([a for a in assets if a.type == AssetType.IMAGE])
+            total_videos = len([a for a in assets if a.type == AssetType.VIDEO])
+            
+            # Get class names from latest dataset version
+            from app.models.label_class import LabelClass
+            
+            latest_version = db.query(DatasetVersion).filter(
+                DatasetVersion.dataset_id == dataset.id
+            ).order_by(DatasetVersion.created_at.desc()).first()
+            
+            class_names = []
+            if latest_version and latest_version.ontology_version:
+                label_classes = db.query(LabelClass).filter(
+                    LabelClass.ontology_version_id == latest_version.ontology_version_id
+                ).all()
+                class_names = [lc.display_name for lc in label_classes]
             
             dataset_info = f"""Dataset: {dataset.name}
 Description: {dataset.description or 'N/A'}
 Total Images: {total_images}
 Total Videos: {total_videos}
-Total Classes: {dataset.total_classes}
-Class Names: {', '.join(dataset.class_names) if dataset.class_names else 'N/A'}
+Total Classes: {len(class_names)}
+Class Names: {', '.join(class_names) if class_names else 'N/A'}
 Created: {dataset.created_at}
 """
             zip_file.writestr("dataset_info.txt", dataset_info)
             
-            # Add assets (images + videos from DatasetAsset)
+            # Asset 처리
             failed_files = []
             processed_count = 0
             
             for idx, asset in enumerate(assets):
                 try:
                     # Download file from S3
-                    file_data = file_storage.download_from_s3(asset.s3_key)
+                    file_data = file_storage.download_from_s3(asset.storage_uri)
                     
                     if file_data:
                         # Add file to ZIP in appropriate folder
-                        folder = "images" if asset.kind == 'image' else "videos"
-                        zip_file.writestr(f"{folder}/{asset.original_filename}", file_data)
+                        folder = "images" if asset.type == AssetType.IMAGE else "videos"
+                        filename = asset.storage_uri.split('/')[-1] if asset.storage_uri else f"asset_{asset.id}"
+                        zip_file.writestr(f"{folder}/{filename}", file_data)
                         processed_count += 1
                         
                         # Add annotation if available and requested (images only)
-                        if include_annotations and asset.kind == 'image':
-                            # Try to find corresponding Image record for annotations
-                            image_record = None
-                            for img in images:
-                                if img.file_path == asset.s3_key or img.filename == asset.original_filename:
-                                    image_record = img
-                                    break
-                            
-                            if image_record and image_record.is_annotated:
-                                annotations = db.query(Annotation).filter(
-                                    Annotation.image_id == image_record.id
-                                ).all()
-                                
-                                if annotations:
-                                    # Create YOLO format annotation
-                                    annotation_lines = []
-                                    for ann in annotations:
-                                        annotation_lines.append(
-                                            f"{ann.class_id} {ann.x_center} {ann.y_center} "
-                                            f"{ann.width} {ann.height}"
-                                        )
-                                    
-                                    annotation_filename = asset.original_filename.rsplit('.', 1)[0] + '.txt'
-                                    zip_file.writestr(
-                                        f"annotations/{annotation_filename}",
-                                        '\n'.join(annotation_lines)
-                                    )
-                    else:
-                        failed_files.append(asset.original_filename)
-                        print(f"[WARN] Failed to download asset: {asset.original_filename}")
-                
-                except Exception as e:
-                    failed_files.append(asset.original_filename)
-                    print(f"[ERROR] Error processing asset {asset.original_filename}: {str(e)}")
-                
-                # Progress logging
-                if (idx + 1) % 100 == 0:
-                    print(f"[DOWNLOAD] Processed {idx + 1}/{len(assets)} assets")
-            
-            # Also add images from Image table (for backward compatibility with old data)
-            for idx, image in enumerate(images):
-                # Skip if already added from DatasetAsset
-                asset_exists = any(asset.s3_key == image.file_path for asset in assets)
-                if asset_exists:
-                    continue
-                
-                try:
-                    # Download image from S3
-                    image_data = file_storage.download_from_s3(image.file_path)
-                    
-                    if image_data:
-                        # Add image to ZIP
-                        zip_file.writestr(f"images/{image.filename}", image_data)
-                        processed_count += 1
-                        
-                        # Add annotation if available and requested
-                        if include_annotations and image.is_annotated:
+                        if include_annotations and asset.type == AssetType.IMAGE:
                             annotations = db.query(Annotation).filter(
-                                Annotation.image_id == image.id
+                                Annotation.asset_id == asset.id
                             ).all()
                             
                             if annotations:
+                                # Create YOLO format annotation
                                 annotation_lines = []
                                 for ann in annotations:
+                                    # LabelClass에서 class_id 가져오기
+                                    label_class = db.query(LabelClass).filter(LabelClass.id == ann.label_class_id).first()
+                                    class_id = label_class.id if label_class else 0
+                                    
+                                    # Geometry에서 좌표 추출
+                                    if ann.geometry and isinstance(ann.geometry, dict):
+                                        bbox = ann.geometry.get('bbox', {})
+                                        x_center = bbox.get('x_center', 0)
+                                        y_center = bbox.get('y_center', 0)
+                                        width = bbox.get('width', 0)
+                                        height = bbox.get('height', 0)
+                                    else:
+                                        # Geometry가 없으면 스킵
+                                        continue
+                                    
                                     annotation_lines.append(
-                                        f"{ann.class_id} {ann.x_center} {ann.y_center} "
-                                        f"{ann.width} {ann.height}"
+                                        f"{class_id} {x_center} {y_center} {width} {height}"
                                     )
                                 
-                                annotation_filename = image.filename.rsplit('.', 1)[0] + '.txt'
+                                annotation_filename = filename.rsplit('.', 1)[0] + '.txt'
                                 zip_file.writestr(
                                     f"annotations/{annotation_filename}",
                                     '\n'.join(annotation_lines)
                                 )
                     else:
-                        failed_files.append(image.filename)
-                        print(f"[WARN] Failed to download image: {image.filename}")
+                        failed_files.append(filename)
+                        print(f"[WARN] Failed to download asset: {filename}")
                 
                 except Exception as e:
-                    failed_files.append(image.filename)
-                    print(f"[ERROR] Error processing image {image.filename}: {str(e)}")
+                    failed_files.append(asset.storage_uri)
+                    print(f"[ERROR] Error processing asset {asset.storage_uri}: {str(e)}")
+                
+                # Progress logging
+                if (idx + 1) % 100 == 0:
+                    print(f"[DOWNLOAD] Processed {idx + 1}/{len(assets)} assets")
             
             # Add failed files list if any
             if failed_files:
@@ -993,6 +1087,22 @@ Created: {dataset.created_at}
 # Presigned URL 기반 업로드/다운로드 엔드포인트
 # ============================================================
 
+def calculate_sha256_from_s3(s3_key: str) -> str:
+    """S3 파일의 SHA256 해시 계산"""
+    try:
+        # S3에서 파일 다운로드하여 해시 계산
+        file_data = file_storage.download_from_s3(s3_key)
+        if file_data:
+            return hashlib.sha256(file_data).hexdigest()
+        else:
+            # 파일이 없으면 s3_key 기반 임시 해시 생성
+            return hashlib.sha256(s3_key.encode()).hexdigest()[:64]
+    except Exception as e:
+        print(f"[WARN] Failed to calculate SHA256 for {s3_key}: {e}")
+        # 실패 시 s3_key 기반 임시 해시
+        return hashlib.sha256(s3_key.encode()).hexdigest()[:64]
+
+
 @router.post("/{dataset_id}/upload-complete-batch")
 async def confirm_upload_complete_batch(
     dataset_id: int,
@@ -1001,7 +1111,7 @@ async def confirm_upload_complete_batch(
     current_user: dict = Depends(get_current_user_dev)
 ):
     """
-    S3 업로드 완료 알림 - DatasetAsset 테이블에 메타데이터 저장
+    S3 업로드 완료 알림 - Asset 테이블에 메타데이터 저장
     
     items: [
         {
@@ -1014,18 +1124,23 @@ async def confirm_upload_complete_batch(
         },
         ...
     ]
-    
-    - 이미지와 동영상을 자동으로 구분하여 DatasetAsset에 저장
-    - kind는 s3_key의 경로(images/ or videos/)로 자동 판별
     """
-    # 데이터셋 존재 및 권한 확인
+    # 데이터셋 존재 확인
     dataset = db.query(Dataset).filter(
-        Dataset.id == dataset_id,
-        Dataset.created_by == current_user["uid"]
+        Dataset.id == dataset_id
     ).first()
     
     if not dataset:
         raise HTTPException(status_code=404, detail="Dataset not found")
+    
+    # DatasetVersion 및 Split 생성/조회
+    # 에셋 추가 시 새 버전 생성
+    dataset_version = create_new_dataset_version(db, dataset_id)
+    dataset_split = get_or_create_dataset_split(
+        db, 
+        dataset_version.id, 
+        DatasetSplitType.UNASSIGNED
+    )
     
     successful = []
     failed = []
@@ -1043,46 +1158,57 @@ async def confirm_upload_complete_batch(
                     })
                     continue
                 
-                # kind 자동 판별 (s3_key 경로에서 추출)
+                # Asset 타입 판별
                 if '/videos/' in s3_key:
-                    kind = 'video'
+                    asset_type = AssetType.VIDEO
                 elif '/images/' in s3_key:
-                    kind = 'image'
+                    asset_type = AssetType.IMAGE
                 else:
-                    kind = 'image'  # default
+                    asset_type = AssetType.IMAGE  # default
                 
-                # DatasetAsset에 메타데이터 저장
-                asset = DatasetAsset(
-                    dataset_id=dataset_id,
-                    kind=kind,
-                    original_filename=item.original_filename,
-                    s3_key=s3_key,
-                    file_size=item.file_size,
-                    width=item.width,
-                    height=item.height,
-                    duration_ms=item.duration_ms,
-                    created_by=current_user["uid"]
-                )
+                # SHA256 계산
+                sha256_hash = calculate_sha256_from_s3(s3_key)
                 
-                db.add(asset)
+                # 같은 dataset_split 내에서 이미 존재하는 Asset 확인 (sha256 기준)
+                existing_asset = db.query(Asset).filter(
+                    Asset.dataset_split_id == dataset_split.id,
+                    Asset.sha256 == sha256_hash
+                ).first()
                 
-                # 하위 호환성: Image 테이블에도 저장 (이미지만)
-                if kind == 'image':
-                    image = Image(
-                        dataset_id=dataset_id,
-                        filename=item.original_filename,
-                        file_path=s3_key,
-                        file_size=item.file_size,
+                if existing_asset:
+                    # 같은 split 내에 이미 존재하는 경우 기존 Asset 사용
+                    asset = existing_asset
+                    # storage_uri가 다를 수 있으므로 업데이트
+                    if asset.storage_uri != s3_key:
+                        asset.storage_uri = s3_key
+                else:
+                    # S3 파일명 추출 (datasets/포트홀/images/포트홀_1.jpg → 포트홀_1.jpg)
+                    s3_filename = s3_key.split('/')[-1] if '/' in s3_key else s3_key
+                    
+                    # 새 Asset 생성 (ERD 기준: name 필드에 에셋명 저장)
+                    asset = Asset(
+                        dataset_split_id=dataset_split.id,
+                        name=s3_filename,  # ERD의 에셋명 필드 (S3 파일명)
+                        type=asset_type,
+                        storage_uri=s3_key,
+                        sha256=sha256_hash,
+                        bytes=item.file_size,
                         width=item.width,
                         height=item.height,
-                        is_annotated=False
+                        duration_ms=item.duration_ms if asset_type == AssetType.VIDEO else None,
+                        fps=None,  # 비디오 메타데이터는 추후 확장
+                        frame=None,
+                        codec=None
                     )
-                    db.add(image)
+                    db.add(asset)
+                
+                db.flush()  # ID를 즉시 생성하기 위해 flush
                 
                 successful.append({
                     "filename": item.original_filename,
                     "s3_key": s3_key,
-                    "kind": kind
+                    "asset_id": asset.id,
+                    "type": asset_type.value
                 })
                 
             except Exception as e:
@@ -1090,20 +1216,14 @@ async def confirm_upload_complete_batch(
                     "filename": getattr(item, "original_filename", "unknown"),
                     "error": str(e)
                 })
+                print(f"[ERROR] Failed to process upload item: {e}")
+                import traceback
+                traceback.print_exc()
         
-        # 데이터셋 통계 업데이트
-        image_count = db.query(DatasetAsset).filter(
-            DatasetAsset.dataset_id == dataset_id,
-            DatasetAsset.kind == 'image'
-        ).count()
-        
-        dataset.total_images = image_count
-        
+        # 변경사항 커밋
         db.commit()
         
-        # 캐시 무효화
-        invalidate_cache(f"dataset_{dataset_id}")
-        dataset_cache_service.invalidate_dataset_cache(dataset_id)
+        print(f"[UPLOAD] Successfully processed {len(successful)} assets for dataset {dataset_id}")
         
         return {
             "success": True,
@@ -1115,18 +1235,21 @@ async def confirm_upload_complete_batch(
         
     except Exception as e:
         db.rollback()
+        print(f"[ERROR] Batch upload failed: {e}")
+        import traceback
+        traceback.print_exc()
         raise HTTPException(
             status_code=500,
             detail=f"Failed to process batch upload: {str(e)}"
         )
 
 
-@router.get("/{dataset_id}/assets", response_model=List[DatasetAssetResponse])
+@router.get("/{dataset_id}/assets")
 async def get_dataset_assets(
     dataset_id: int,
     kind: Optional[str] = None,  # "image" | "video" | None (all)
     page: int = 1,
-    limit: int = 100,
+    limit: int = 10000,
     db: Session = Depends(get_db),
     current_user: dict = Depends(get_current_user_dev)
 ):
@@ -1136,26 +1259,51 @@ async def get_dataset_assets(
     - kind: "image", "video", 또는 None(전체)
     - 페이징 지원
     """
-    # 데이터셋 권한 확인
+    # 데이터셋 확인
     dataset = db.query(Dataset).filter(
-        Dataset.id == dataset_id,
-        Dataset.created_by == current_user["uid"]
+        Dataset.id == dataset_id
     ).first()
     
     if not dataset:
         raise HTTPException(status_code=404, detail="Dataset not found")
     
-    # 쿼리 구성
-    query = db.query(DatasetAsset).filter(DatasetAsset.dataset_id == dataset_id)
+    # Asset 타입 변환
+    asset_type = None
+    if kind == "image":
+        asset_type = AssetType.IMAGE
+    elif kind == "video":
+        asset_type = AssetType.VIDEO
     
-    if kind:
-        query = query.filter(DatasetAsset.kind == kind)
+    # Asset 조회
+    assets, total_count = get_assets_from_dataset(
+        db=db,
+        dataset_id=dataset_id,
+        asset_type=asset_type,
+        page=page,
+        limit=limit
+    )
     
-    # 페이징
-    offset = (page - 1) * limit
-    assets = query.order_by(DatasetAsset.created_at.desc()).offset(offset).limit(limit).all()
+    # DatasetAssetResponse 형식으로 변환 (API 호환성)
+    result = []
+    for asset in assets:
+        # 에셋명 사용 (ERD의 name 필드)
+        asset_name = asset.name if asset.name else (asset.storage_uri.split('/')[-1] if asset.storage_uri else f"asset_{asset.id}")
+        
+        result.append({
+            "id": asset.id,
+            "dataset_id": dataset_id,
+            "kind": asset.type.value,
+            "original_filename": asset_name,  # API 호환성을 위해 original_filename 필드명 유지
+            "s3_key": asset.storage_uri,
+            "file_size": asset.bytes,
+            "width": asset.width,
+            "height": asset.height,
+            "duration_ms": asset.duration_ms,
+            "created_at": asset.created_at.isoformat() if asset.created_at else None,
+            "created_by": current_user["uid"]
+        })
     
-    return assets
+    return result
 
 
 @router.get("/assets/{asset_id}/presigned-download")
@@ -1165,39 +1313,49 @@ async def get_asset_download_url(
     current_user: dict = Depends(get_current_user_dev)
 ):
     """
-    DatasetAsset 단건 다운로드용 Presigned URL 발급
+    Asset 단건 다운로드용 Presigned URL 발급
     
     - 이미지/동영상 모두 지원
     - URL 만료 시간: 1시간
     """
     # Asset 조회
-    asset = db.query(DatasetAsset).filter(DatasetAsset.id == asset_id).first()
+    asset = db.query(Asset).filter(Asset.id == asset_id).first()
     
     if not asset:
         raise HTTPException(status_code=404, detail="Asset not found")
     
-    # 데이터셋 권한 확인
+    # 데이터셋 권한 확인 (DatasetSplit -> DatasetVersion -> Dataset)
+    dataset_split = asset.dataset_split
+    if not dataset_split:
+        raise HTTPException(status_code=404, detail="Dataset split not found")
+    
+    dataset_version = dataset_split.dataset_version
+    if not dataset_version:
+        raise HTTPException(status_code=404, detail="Dataset version not found")
+    
     dataset = db.query(Dataset).filter(
-        Dataset.id == asset.dataset_id,
-        Dataset.created_by == current_user["uid"]
+        Dataset.id == dataset_version.dataset_id
     ).first()
     
     if not dataset:
-        raise HTTPException(status_code=403, detail="Access denied")
+        raise HTTPException(status_code=404, detail="Dataset not found")
     
     try:
+        # 에셋명 사용 (ERD의 name 필드)
+        filename = asset.name if asset.name else (asset.storage_uri.split('/')[-1] if asset.storage_uri else f"asset_{asset.id}")
+        
         # Presigned GET URL 생성
         url_data = presigned_url_service.generate_download_url(
-            s3_key=asset.s3_key,
+            s3_key=asset.storage_uri,
             expiration=3600,
-            filename=asset.original_filename
+            filename=filename
         )
         
         return {
             "success": True,
             "asset_id": asset.id,
-            "original_filename": asset.original_filename,
-            "kind": asset.kind,
+            "original_filename": filename,
+            "kind": asset.type.value,
             "download_url": url_data["download_url"],
             "expires_in": url_data["expires_in"]
         }
@@ -1217,66 +1375,69 @@ async def generate_presigned_download_urls_batch(
     current_user: dict = Depends(get_current_user_dev)
 ):
     """
-    이미지 다운로드용 Presigned URL 발급 (단일/배치 모두 처리)
+    Asset 다운로드용 Presigned URL 발급 (단일/배치 모두 처리)
     
-    - 단일 파일: image_ids에 1개만 전달
-    - 여러 파일: image_ids에 여러 개 전달
+    - 단일 파일: asset_ids에 1개만 전달
+    - 여러 파일: asset_ids에 여러 개 전달
     - 클라이언트가 각 URL로 직접 S3에서 다운로드
     - URL 만료 시간: 1시간
     """
-    # 데이터셋 권한 확인
+    # 데이터셋 확인
     dataset = db.query(Dataset).filter(
-        Dataset.id == dataset_id,
-        Dataset.created_by == current_user["uid"]
+        Dataset.id == dataset_id
     ).first()
     
     if not dataset:
         raise HTTPException(status_code=404, detail="Dataset not found")
     
-    # 이미지 조회
-    images = db.query(Image).filter(
-        Image.id.in_(request.image_ids),
-        Image.dataset_id == dataset_id
-    ).all()
+    # Asset 조회
+    assets = db.query(Asset).join(DatasetSplit).join(DatasetVersion).filter(
+        Asset.id.in_(request.asset_ids),
+        DatasetVersion.dataset_id == dataset_id
+        ).all()
     
-    if not images:
-        raise HTTPException(status_code=404, detail="No images found")
+    if not assets:
+        raise HTTPException(status_code=404, detail="No assets found")
     
-    # 이미지 ID로 매핑
-    image_map = {img.id: img for img in images}
+    # Asset ID로 매핑
+    asset_map = {asset.id: asset for asset in assets}
     
     # Presigned URL 생성
     urls = []
     failed = []
     
-    for image_id in request.image_ids:
-        image = image_map.get(image_id)
+    for asset_id in request.asset_ids:
+        asset = asset_map.get(asset_id)
         
-        if not image:
+        if not asset:
             failed.append({
-                "image_id": image_id,
-                "error": "Image not found"
+                "asset_id": asset_id,
+                "error": "Asset not found"
             })
             continue
         
         try:
+            # 에셋명 사용 (ERD의 name 필드)
+            filename = asset.name if asset.name else (asset.storage_uri.split('/')[-1] if asset.storage_uri else f"asset_{asset.id}")
+            
             url_data = presigned_url_service.generate_download_url(
-                s3_key=image.file_path,
-                filename=image.filename,
+                s3_key=asset.storage_uri,
+                filename=filename,
                 expiration=3600  # 1시간
             )
             
             urls.append({
-                "image_id": image.id,
+                "asset_id": asset.id,
+                "type": asset.type.value,
                 "download_url": url_data["download_url"],
-                "filename": image.filename,
-                "s3_key": image.file_path,
+                "filename": filename,
+                "s3_key": asset.storage_uri,
                 "expires_in": url_data["expires_in"],
                 "generation_time": url_data["generation_time"]
             })
         except Exception as e:
             failed.append({
-                "image_id": image_id,
+                "asset_id": asset_id,
                 "error": str(e)
             })
     
@@ -1287,605 +1448,164 @@ async def generate_presigned_download_urls_batch(
         "failed_count": len(failed),
         "failed": failed
     }
-=======
-from fastapi import APIRouter, Depends, HTTPException, UploadFile, File, status, Form
-from sqlalchemy.orm import Session
-from typing import List, Optional
-from app.core.database import get_db
-from app.core.auth import get_current_user, get_current_user_dev
-from app.core.cache import cache_manager, invalidate_cache
-from app.models.dataset import Dataset, Image, Annotation, DatasetStatus
-from app.schemas.dataset import (
-    DatasetCreate, DatasetUpdate, DatasetResponse, DatasetStats,
-    ImageResponse, AnnotationCreate, AnnotationResponse, AutoAnnotationRequest
-)
-from app.utils.file_storage import file_storage
-
-router = APIRouter()
 
 
-@router.get("/stats", response_model=DatasetStats)
-async def get_dataset_stats(
-    db: Session = Depends(get_db),
-    current_user: dict = Depends(get_current_user_dev)
-):
-    """Get overall dataset statistics for current user"""
-    # Get user's datasets
-    user_datasets = db.query(Dataset).filter(Dataset.created_by == current_user["uid"]).all()
-    dataset_ids = [d.id for d in user_datasets]
+# ========== SELF-ANNOTATION LABEL CLASS APIs ==========
 
-    # Count images only from user's datasets
-    total_images = db.query(Image).filter(Image.dataset_id.in_(dataset_ids)).count() if dataset_ids else 0
-    total_datasets = len(user_datasets)
-    total_classes = sum(d.total_classes for d in user_datasets)
-
-    annotated_images = db.query(Image).filter(
-        Image.dataset_id.in_(dataset_ids),
-        Image.is_annotated == 1
-    ).count() if dataset_ids else 0
-
-    auto_annotation_rate = (annotated_images / total_images * 100) if total_images > 0 else 0
-
-    return {
-        "total_images": total_images,
-        "total_datasets": total_datasets,
-        "total_classes": total_classes,
-        "auto_annotation_rate": auto_annotation_rate
-    }
-
-
-@router.get("/", response_model=List[DatasetResponse])
-async def get_datasets(
-    skip: int = 0,
-    limit: int = 100,
-    db: Session = Depends(get_db),
-    current_user: dict = Depends(get_current_user_dev)
-):
-    """Get all datasets with caching"""
-    cache_key = f"datasets:list:{current_user['uid']}:{skip}:{limit}"
-
-    # Try to get from cache
-    cached_data = cache_manager.get(cache_key)
-    if cached_data is not None:
-        print(f"[CACHE HIT] {cache_key}")
-        return cached_data
-
-    # Query database - Filter by current user
-    print(f"[CACHE MISS] {cache_key}")
-    datasets = db.query(Dataset).filter(Dataset.created_by == current_user["uid"]).offset(skip).limit(limit).all()
-
-    # Convert to dict for serialization
-    datasets_dict = [
-        {
-            "id": d.id,
-            "name": d.name,
-            "description": d.description,
-            "dataset_type": d.dataset_type.value if hasattr(d.dataset_type, 'value') else (d.dataset_type or "object_detection"),
-            "status": d.status.value if hasattr(d.status, 'value') else d.status,
-            "total_images": d.total_images,
-            "annotated_images": d.annotated_images,
-            "total_classes": d.total_classes,
-            "class_names": d.class_names or [],
-            "class_colors": d.class_colors or {},
-            "auto_annotation_enabled": bool(d.auto_annotation_enabled),
-            "auto_annotation_model_id": d.auto_annotation_model_id,
-            "is_public": bool(d.is_public),
-            "created_at": d.created_at.isoformat() if d.created_at else None,
-            "updated_at": d.updated_at.isoformat() if d.updated_at else None,
-            "created_by": d.created_by
-        }
-        for d in datasets
-    ]
-
-    # Cache the result
-    cache_manager.set(cache_key, datasets_dict, ttl=60)  # Cache for 1 minute
-
-    return datasets_dict
-
-
-@router.post("/", response_model=DatasetResponse, status_code=status.HTTP_201_CREATED)
-async def create_dataset(
-    dataset: DatasetCreate,
-    db: Session = Depends(get_db),
-    current_user: dict = Depends(get_current_user_dev)
-):
-    """Create a new dataset"""
-    db_dataset = db.query(Dataset).filter(Dataset.name == dataset.name).first()
-    if db_dataset:
-        raise HTTPException(status_code=400, detail="Dataset with this name already exists")
-
-    # Get dataset data and ensure default values
-    dataset_data = dataset.dict()
-    if dataset_data.get("class_names") is None:
-        dataset_data["class_names"] = []
-    if dataset_data.get("class_colors") is None:
-        dataset_data["class_colors"] = {}
-
-    db_dataset = Dataset(
-        **dataset_data,
-        created_by=current_user["uid"]
-    )
-    db.add(db_dataset)
-    db.commit()
-    db.refresh(db_dataset)
-
-    # Invalidate datasets cache
-    invalidate_cache("datasets")
-    print("[CACHE] Invalidated: datasets")
-
-    return db_dataset
-
-
-@router.get("/{dataset_id}", response_model=DatasetResponse)
-async def get_dataset(
+@router.get("/{dataset_id}/label-classes")
+async def get_dataset_label_classes(
     dataset_id: int,
     db: Session = Depends(get_db),
     current_user: dict = Depends(get_current_user_dev)
 ):
-    """Get a specific dataset"""
-    dataset = db.query(Dataset).filter(Dataset.id == dataset_id).first()
-    if not dataset:
-        raise HTTPException(status_code=404, detail="Dataset not found")
-    return dataset
+    """Get all label classes for a dataset (for self-annotation)"""
+    from app.models.label_ontology_version import LabelOntologyVersion
 
-
-@router.put("/{dataset_id}", response_model=DatasetResponse)
-async def update_dataset(
-    dataset_id: int,
-    dataset_update: DatasetUpdate,
-    db: Session = Depends(get_db),
-    current_user: dict = Depends(get_current_user_dev)
-):
-    """Update a dataset"""
-    db_dataset = db.query(Dataset).filter(Dataset.id == dataset_id).first()
-    if not db_dataset:
-        raise HTTPException(status_code=404, detail="Dataset not found")
-
-    update_data = dataset_update.dict(exclude_unset=True)
-
-    # Convert boolean to int for SQLite
-    if "auto_annotation_enabled" in update_data:
-        update_data["auto_annotation_enabled"] = int(update_data["auto_annotation_enabled"])
-
-    for field, value in update_data.items():
-        setattr(db_dataset, field, value)
-
-    db.commit()
-    db.refresh(db_dataset)
-    return db_dataset
-
-
-@router.delete("/{dataset_id}", status_code=status.HTTP_204_NO_CONTENT)
-async def delete_dataset(
-    dataset_id: int,
-    db: Session = Depends(get_db),
-    current_user: dict = Depends(get_current_user_dev)
-):
-    """Delete a dataset"""
+    # Get dataset
     dataset = db.query(Dataset).filter(Dataset.id == dataset_id).first()
     if not dataset:
         raise HTTPException(status_code=404, detail="Dataset not found")
 
-    print(f"[DELETE DATASET] Deleting dataset {dataset_id}: {dataset.name}")
-    db.delete(dataset)
-    db.commit()
+    # Get project's default ontology version
+    # Try to find existing ontology version for this project
+    ontology_version = db.query(LabelOntologyVersion).filter(
+        LabelOntologyVersion.project_id == dataset.project_id
+    ).first()
 
-    # Invalidate cache to ensure frontend gets updated list
-    invalidate_cache("datasets")
-    print("[CACHE] Invalidated after dataset deletion: datasets")
-
-    return None
-
-
-@router.get("/{dataset_id}/images", response_model=List[ImageResponse])
-async def get_dataset_images(
-    dataset_id: int,
-    skip: int = 0,
-    limit: int = 100,
-    db: Session = Depends(get_db),
-    current_user: dict = Depends(get_current_user_dev)
-):
-    """Get all images in a dataset"""
-    dataset = db.query(Dataset).filter(Dataset.id == dataset_id).first()
-    if not dataset:
-        raise HTTPException(status_code=404, detail="Dataset not found")
-
-    images = db.query(Image).filter(Image.dataset_id == dataset_id).offset(skip).limit(limit).all()
-
-    # Convert is_annotated from int to bool for response
-    for img in images:
-        img.is_annotated = bool(img.is_annotated)
-
-    print(f"[GET IMAGES] Returning {len(images)} images for dataset {dataset_id}")
-    for img in images:
-        print(f"  - {img.filename}: is_annotated={img.is_annotated}")
-
-    return images
-
-
-@router.post("/upload", status_code=status.HTTP_201_CREATED)
-async def upload_dataset(
-    files: List[UploadFile] = File(...),
-    name: Optional[str] = Form(None),
-    description: Optional[str] = Form(None),
-    dataset_id: Optional[int] = Form(None),
-    db: Session = Depends(get_db),
-    current_user: dict = Depends(get_current_user_dev)
-):
-    """Upload images to create a new dataset or add to existing dataset"""
-
-    # Validate files list
-    if not files or len(files) == 0:
-        raise HTTPException(status_code=400, detail="No files provided")
-
-    # If dataset_id provided, use existing dataset
-    if dataset_id:
-        dataset = db.query(Dataset).filter(Dataset.id == dataset_id).first()
-        if not dataset:
-            raise HTTPException(status_code=404, detail="Dataset not found")
-    else:
-        # Create new dataset
-        if not name:
-            raise HTTPException(status_code=400, detail="Dataset name is required for new dataset")
-
-        existing = db.query(Dataset).filter(Dataset.name == name).first()
-        if existing:
-            raise HTTPException(status_code=400, detail="Dataset with this name already exists")
-
-        dataset = Dataset(
-            name=name,
-            description=description or "",
-            total_images=0,
-            total_classes=0,
-            status=DatasetStatus.UPLOADING,
-            created_by=current_user["uid"]
+    # If no ontology version exists, create a default one
+    if not ontology_version:
+        ontology_version = LabelOntologyVersion(
+            project_id=dataset.project_id,
+            version_tag="v1.0",
+            description="Default ontology version for self-annotation"
         )
-        db.add(dataset)
+        db.add(ontology_version)
         db.commit()
-        db.refresh(dataset)
+        db.refresh(ontology_version)
 
-    # Save files to disk and create Image records
-    try:
-        dataset.status = DatasetStatus.UPLOADING
-        db.commit()
+    # Get label classes for this ontology version
+    label_classes = db.query(LabelClass).filter(
+        LabelClass.ontology_version_id == ontology_version.id
+    ).all()
 
-        successful_uploads, failed_uploads = await file_storage.save_images_batch(files, dataset.id)
-
-        # Create Image records for successful uploads
-        for upload in successful_uploads:
-            metadata = upload["metadata"]
-            db_image = Image(
-                dataset_id=dataset.id,
-                filename=metadata["stored_filename"],
-                file_path=metadata["relative_path"],
-                file_size=metadata["file_size"],
-                width=metadata.get("width"),
-                height=metadata.get("height"),
-                is_annotated=0
-            )
-            db.add(db_image)
-
-        # Update dataset counts
-        dataset.total_images += len(successful_uploads)
-        dataset.status = DatasetStatus.READY if len(failed_uploads) == 0 else DatasetStatus.PROCESSING
-        db.commit()
-        db.refresh(dataset)
-
-        # Invalidate datasets cache
-        invalidate_cache("datasets")
-        print("[CACHE] Invalidated after upload: datasets")
-
-        response = {
-            "message": f"Successfully uploaded {len(successful_uploads)} images",
-            "dataset_id": dataset.id,
-            "dataset_name": dataset.name,
-            "total_images": dataset.total_images,
-            "successful_uploads": len(successful_uploads),
-            "failed_uploads": len(failed_uploads),
-            "dataset": dataset
-        }
-
-        if failed_uploads:
-            response["failed_files"] = failed_uploads
-
-        return response
-
-    except Exception as e:
-        dataset.status = DatasetStatus.ERROR
-        db.commit()
-        raise HTTPException(status_code=500, detail=f"Upload failed: {str(e)}")
+    return label_classes
 
 
-@router.post("/{dataset_id}/images/upload", status_code=status.HTTP_201_CREATED)
-async def upload_images_to_dataset(
+@router.post("/{dataset_id}/label-classes", status_code=status.HTTP_201_CREATED)
+async def create_label_class(
     dataset_id: int,
-    files: List[UploadFile] = File(...),
+    label_class_data: dict = Body(...),
     db: Session = Depends(get_db),
     current_user: dict = Depends(get_current_user_dev)
 ):
-    """Upload images to a specific dataset"""
+    """Create a new label class for a dataset (for self-annotation)"""
+    from app.models.label_ontology_version import LabelOntologyVersion
+
+    # Get dataset
     dataset = db.query(Dataset).filter(Dataset.id == dataset_id).first()
     if not dataset:
         raise HTTPException(status_code=404, detail="Dataset not found")
 
-    if not files or len(files) == 0:
-        raise HTTPException(status_code=400, detail="No files provided")
+    # Get or create project's default ontology version
+    ontology_version = db.query(LabelOntologyVersion).filter(
+        LabelOntologyVersion.project_id == dataset.project_id
+    ).first()
 
-    try:
-        # Update dataset status
-        original_status = dataset.status
-        dataset.status = DatasetStatus.UPLOADING
-        db.commit()
-
-        # Save images to disk
-        successful_uploads, failed_uploads = await file_storage.save_images_batch(files, dataset.id)
-
-        # Create Image records
-        for upload in successful_uploads:
-            metadata = upload["metadata"]
-            db_image = Image(
-                dataset_id=dataset.id,
-                filename=metadata["stored_filename"],
-                file_path=metadata["relative_path"],
-                file_size=metadata["file_size"],
-                width=metadata.get("width"),
-                height=metadata.get("height"),
-                is_annotated=0
-            )
-            db.add(db_image)
-
-        # Update dataset
-        dataset.total_images += len(successful_uploads)
-        dataset.status = original_status if len(failed_uploads) == 0 else DatasetStatus.PROCESSING
-        db.commit()
-
-        response = {
-            "message": f"Successfully uploaded {len(successful_uploads)} images",
-            "dataset_id": dataset_id,
-            "total_images": dataset.total_images,
-            "successful_uploads": len(successful_uploads),
-            "failed_uploads": len(failed_uploads)
-        }
-
-        if failed_uploads:
-            response["failed_files"] = failed_uploads
-
-        return response
-
-    except Exception as e:
-        dataset.status = DatasetStatus.ERROR
-        db.commit()
-        raise HTTPException(status_code=500, detail=f"Upload failed: {str(e)}")
-
-
-@router.get("/images/{image_id}/annotations", response_model=List[AnnotationResponse])
-async def get_image_annotations(
-    image_id: int,
-    min_confidence: Optional[float] = None,
-    db: Session = Depends(get_db),
-    current_user: dict = Depends(get_current_user_dev)
-):
-    """Get all annotations for a specific image, optionally filtered by minimum confidence threshold"""
-    image = db.query(Image).filter(Image.id == image_id).first()
-    if not image:
-        raise HTTPException(status_code=404, detail="Image not found")
-
-    # Get all annotations for the image
-    query = db.query(Annotation).filter(Annotation.image_id == image_id)
-
-    # Apply confidence threshold filter if specified
-    if min_confidence is not None:
-        query = query.filter(Annotation.confidence >= min_confidence)
-        print(f"[GET ANNOTATIONS] Filtering by confidence >= {min_confidence}")
-
-    annotations = query.all()
-    print(f"[GET ANNOTATIONS] Found {len(annotations)} annotations for image {image_id}")
-
-    return annotations
-
-
-@router.post("/annotations", response_model=AnnotationResponse, status_code=status.HTTP_201_CREATED)
-async def create_annotation(
-    annotation: AnnotationCreate,
-    db: Session = Depends(get_db),
-    current_user: dict = Depends(get_current_user_dev)
-):
-    """Create a new annotation"""
-    image = db.query(Image).filter(Image.id == annotation.image_id).first()
-    if not image:
-        raise HTTPException(status_code=404, detail="Image not found")
-
-    db_annotation = Annotation(
-        **annotation.dict(exclude={"is_auto_generated"}),
-        is_auto_generated=int(annotation.is_auto_generated)
-    )
-    db.add(db_annotation)
-
-    # Mark image as annotated
-    image.is_annotated = 1
-
-    db.commit()
-    db.refresh(db_annotation)
-    return db_annotation
-
-
-@router.post("/auto-annotate")
-async def auto_annotate_dataset(
-    request: AutoAnnotationRequest,
-    db: Session = Depends(get_db),
-    current_user: dict = Depends(get_current_user_dev)
-):
-    """Trigger auto-annotation for a dataset using YOLO model"""
-    print(f"[AUTO-ANNOTATE] Received request: dataset_id={request.dataset_id}, model_id={request.model_id}, conf={getattr(request, 'confidence_threshold', 0.25)}")
-
-    from app.services.auto_annotation_service import get_auto_annotation_service
-    from app.utils.file_storage import file_storage
-    from pathlib import Path
-
-    # 데이터셋 확인
-    dataset = db.query(Dataset).filter(Dataset.id == request.dataset_id).first()
-    if not dataset:
-        print(f"[AUTO-ANNOTATE] Dataset not found: {request.dataset_id}")
-        raise HTTPException(status_code=404, detail="Dataset not found")
-
-    print(f"[AUTO-ANNOTATE] Found dataset: {dataset.name}")
-
-    # 데이터셋에 이미지가 있는지 확인
-    images = db.query(Image).filter(Image.dataset_id == request.dataset_id).all()
-    if not images:
-        print(f"[AUTO-ANNOTATE] No images in dataset {request.dataset_id}")
-        raise HTTPException(status_code=400, detail="No images in dataset")
-
-    print(f"[AUTO-ANNOTATE] Found {len(images)} images")
-
-    # 상태 업데이트
-    dataset.status = DatasetStatus.PROCESSING
-    dataset.auto_annotation_enabled = 1
-    if request.model_id:
-        dataset.auto_annotation_model_id = request.model_id
-    db.commit()
-
-    try:
-        print("[AUTO-ANNOTATE] Loading auto-annotation service...")
-        # 자동 어노테이션 서비스 로드
-        service = get_auto_annotation_service()
-        print("[AUTO-ANNOTATE] Service loaded successfully")
-
-        # 모델 경로 결정
-        model_path = None
-        if request.model_id:
-            print(f"[AUTO-ANNOTATE] Custom model requested: {request.model_id}")
-            # 특정 모델 ID가 지정된 경우
-            from app.models.model import Model
-            model = db.query(Model).filter(Model.id == request.model_id).first()
-            if model and model.file_path:
-                model_path = model.file_path
-                print(f"[AUTO-ANNOTATE] Using custom model: {model_path}")
-
-        # 모델 로드 (model_path가 None이면 기본 경로 사용)
-        print(f"[AUTO-ANNOTATE] Loading model from: {model_path or 'default (AI/models/best.pt)'}")
-        if not service.load_model(model_path):
-            print("[AUTO-ANNOTATE] Failed to load model!")
-            raise HTTPException(
-                status_code=500,
-                detail="Failed to load model. Please ensure AI/models/best.pt exists or train the model first"
-            )
-        print("[AUTO-ANNOTATE] Model loaded successfully")
-
-        # Confidence threshold (요청에서 받거나 기본값 0.25)
-        conf_threshold = getattr(request, 'confidence_threshold', 0.25)
-        print(f"[AUTO-ANNOTATE] Using confidence threshold: {conf_threshold}")
-
-        # 각 이미지에 대해 자동 어노테이션 실행
-        total_annotations = 0
-        annotated_images_count = 0
-        base_upload_dir = Path("uploads")
-        print(f"[AUTO-ANNOTATE] Base upload directory: {base_upload_dir.absolute()}")
-
-        for idx, img in enumerate(images, 1):
-            img_path = base_upload_dir / img.file_path
-            print(f"[AUTO-ANNOTATE] Processing image {idx}/{len(images)}: {img.filename}")
-            print(f"[AUTO-ANNOTATE] Image path: {img_path}")
-
-            if not img_path.exists():
-                print(f"[AUTO-ANNOTATE] WARNING: Image file not found: {img_path}")
-                continue
-
-            # 추론 실행
-            print(f"[AUTO-ANNOTATE] Running prediction...")
-            annotations = service.predict_image(str(img_path), conf_threshold)
-            print(f"[AUTO-ANNOTATE] Found {len(annotations)} annotations")
-
-            # overwrite_existing이 True인 경우 기존 어노테이션 삭제
-            if request.overwrite_existing:
-                existing_annotations = db.query(Annotation).filter(Annotation.image_id == img.id).all()
-                if existing_annotations:
-                    print(f"[AUTO-ANNOTATE] Overwrite mode: Deleting {len(existing_annotations)} existing annotations for image {img.id}")
-                    for existing_ann in existing_annotations:
-                        db.delete(existing_ann)
-                    db.flush()  # Flush to ensure deletions are processed before inserts
-                    print(f"[AUTO-ANNOTATE] Existing annotations deleted")
-
-            if annotations:
-                # 어노테이션 저장
-                for ann in annotations:
-                    bbox = ann['bbox']
-                    db_annotation = Annotation(
-                        image_id=img.id,
-                        class_id=ann['class_id'],
-                        class_name=ann['class_name'],
-                        x_center=bbox['x_center'],
-                        y_center=bbox['y_center'],
-                        width=bbox['width'],
-                        height=bbox['height'],
-                        confidence=ann['confidence'],
-                        is_auto_generated=1,
-                        is_verified=0
-                    )
-                    db.add(db_annotation)
-                    total_annotations += 1
-
-                # 이미지를 어노테이션됨으로 표시
-                img.is_annotated = 1
-                annotated_images_count += 1
-                print(f"[AUTO-ANNOTATE] Saved {len(annotations)} annotations for image {img.filename}")
-
-        # 커밋
-        print(f"[AUTO-ANNOTATE] Committing {total_annotations} annotations...")
-        db.commit()
-        print("[AUTO-ANNOTATE] Committed successfully")
-
-        # 데이터셋 통계 업데이트
-        print("[AUTO-ANNOTATE] Updating dataset statistics...")
-        dataset.annotated_images = annotated_images_count
-        dataset.status = DatasetStatus.ANNOTATED if annotated_images_count > 0 else DatasetStatus.READY
-
-        # 실제로 detection된 클래스만 추출
-        print("[AUTO-ANNOTATE] Extracting detected class names...")
-        detected_annotations = db.query(Annotation).join(Image).filter(Image.dataset_id == request.dataset_id).all()
-        detected_class_names = list(set([ann.class_name for ann in detected_annotations]))
-        detected_class_names.sort()  # 알파벳 순 정렬
-
-        print(f"[AUTO-ANNOTATE] Detected classes: {detected_class_names}")
-
-        # 클래스 이름 업데이트 (실제로 detection된 클래스만)
-        if detected_class_names:
-            dataset.class_names = detected_class_names
-            dataset.total_classes = len(detected_class_names)
-            print(f"[AUTO-ANNOTATE] Updated class names to detected classes: {dataset.class_names}")
-        else:
-            print("[AUTO-ANNOTATE] No classes detected, keeping original class names")
-
-        db.commit()
-
-        # Invalidate datasets cache after auto-annotation
-        invalidate_cache("datasets")
-        print("[AUTO-ANNOTATE] Cache invalidated")
-
-        result = {
-            "message": "Auto-annotation completed",
-            "dataset_id": request.dataset_id,
-            "model_id": request.model_id,
-            "status": "completed",
-            "total_images": len(images),
-            "annotated_images": annotated_images_count,
-            "total_annotations": total_annotations,
-            "confidence_threshold": conf_threshold
-        }
-        print(f"[AUTO-ANNOTATE] SUCCESS: {result}")
-        return result
-
-    except Exception as e:
-        # 에러 발생 시 상태 복구
-        print(f"[AUTO-ANNOTATE] ERROR: {str(e)}")
-        print(f"[AUTO-ANNOTATE] Error type: {type(e).__name__}")
-        import traceback
-        print(f"[AUTO-ANNOTATE] Traceback:\n{traceback.format_exc()}")
-        dataset.status = DatasetStatus.ERROR
-        db.commit()
-
-        raise HTTPException(
-            status_code=500,
-            detail=f"Auto-annotation failed: {str(e)}"
+    if not ontology_version:
+        ontology_version = LabelOntologyVersion(
+            project_id=dataset.project_id,
+            version_tag="v1.0",
+            description="Default ontology version for self-annotation"
         )
->>>>>>> feature/llm-pipeline
+        db.add(ontology_version)
+        db.commit()
+        db.refresh(ontology_version)
+
+    # Check if label class with this name already exists
+    display_name = label_class_data.get("display_name")
+    if not display_name:
+        raise HTTPException(status_code=400, detail="display_name is required")
+
+    existing_class = db.query(LabelClass).filter(
+        LabelClass.ontology_version_id == ontology_version.id,
+        LabelClass.display_name == display_name
+    ).first()
+
+    if existing_class:
+        # Return existing class instead of creating duplicate
+        return existing_class
+
+    # Create new label class
+    new_label_class = LabelClass(
+        ontology_version_id=ontology_version.id,
+        display_name=display_name,
+        color=label_class_data.get("color", "#FF0000"),
+        shape_type="bbox"  # Default to bbox for self-annotation
+    )
+
+    db.add(new_label_class)
+    db.commit()
+    db.refresh(new_label_class)
+
+    return new_label_class
+
+
+# ========== ANNOTATION CRUD APIs ==========
+
+@router.put("/annotations/{annotation_id}", response_model=AnnotationResponse)
+async def update_annotation(
+    annotation_id: int,
+    annotation_data: AnnotationCreate,
+    db: Session = Depends(get_db),
+    current_user: dict = Depends(get_current_user_dev)
+):
+    """Update an existing annotation"""
+    # Get annotation
+    annotation = db.query(Annotation).filter(Annotation.id == annotation_id).first()
+    if not annotation:
+        raise HTTPException(status_code=404, detail="Annotation not found")
+
+    # Verify asset exists
+    asset = db.query(Asset).filter(Asset.id == annotation_data.asset_id).first()
+    if not asset:
+        raise HTTPException(status_code=404, detail="Asset not found")
+
+    # Verify label class exists
+    label_class = db.query(LabelClass).filter(LabelClass.id == annotation_data.label_class_id).first()
+    if not label_class:
+        raise HTTPException(status_code=404, detail="Label class not found")
+
+    # Update annotation
+    annotation.asset_id = annotation_data.asset_id
+    annotation.label_class_id = annotation_data.label_class_id
+    annotation.model_version_id = annotation_data.model_version_id
+    annotation.geometry_type = annotation_data.geometry_type
+    annotation.geometry = annotation_data.geometry
+    annotation.is_normalized = annotation_data.is_normalized
+    annotation.source = annotation_data.source
+    annotation.confidence = annotation_data.confidence
+    annotation.annotator_name = annotation_data.annotator_name or current_user.get("name", "system")
+
+    db.commit()
+    db.refresh(annotation)
+
+    return annotation
+
+
+@router.delete("/annotations/{annotation_id}", status_code=status.HTTP_204_NO_CONTENT)
+async def delete_annotation(
+    annotation_id: int,
+    db: Session = Depends(get_db),
+    current_user: dict = Depends(get_current_user_dev)
+):
+    """Delete an annotation"""
+    # Get annotation
+    annotation = db.query(Annotation).filter(Annotation.id == annotation_id).first()
+    if not annotation:
+        raise HTTPException(status_code=404, detail="Annotation not found")
+
+    # Delete annotation
+    db.delete(annotation)
+    db.commit()
+
+    return Response(status_code=status.HTTP_204_NO_CONTENT)

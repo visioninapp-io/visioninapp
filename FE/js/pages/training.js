@@ -1,4 +1,3 @@
-<<<<<<< HEAD
 // Training Page Component - Real-time Training Monitoring
 
 class TrainingPage {

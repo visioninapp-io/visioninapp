@@ -21,64 +21,15 @@ class DeploymentStatus(str, enum.Enum):
 
 
 class Deployment(Base):
-    __tablename__ = "deployments"
+    __tablename__ = "deployment"
 
     id = Column(Integer, primary_key=True, index=True)
-    name = Column(String, unique=True, index=True)
-
-    model_id = Column(Integer, ForeignKey("models.id"))
-
-    target = Column(Enum(DeploymentTarget))
-    status = Column(Enum(DeploymentStatus), default=DeploymentStatus.DEPLOYING)
-
-    # Deployment configuration
-    device_type = Column(String)  # NVIDIA Jetson AGX, AWS Lambda, etc.
-    endpoint_url = Column(String, nullable=True)
-    api_key = Column(String, nullable=True)
-
-    configuration = Column(JSON, nullable=True)  # deployment-specific settings
-
-    # Performance metrics
-    total_requests = Column(Integer, default=0)
-    requests_today = Column(Integer, default=0)
-    avg_response_time = Column(Float, nullable=True)  # milliseconds
-    uptime_percentage = Column(Float, nullable=True)
-
-    # Monitoring
-    last_health_check = Column(DateTime, nullable=True)
-    health_status = Column(String, default="unknown")
-
-    deployed_at = Column(DateTime, nullable=True)
-    created_at = Column(DateTime, default=datetime.utcnow)
-    created_by = Column(String, index=True)
+    model_version_id = Column(Integer, ForeignKey("model_version.id"), nullable=False, index=True, comment="모델 버전ID")
+    
+    name = Column(String(50), nullable=False, comment="이름")
+    target = Column(Enum(DeploymentTarget), nullable=False, comment="배포위치")  # 'edge', 'cloud'
+    endpoint_url = Column(String(100), nullable=False, comment="엔드포인트")
+    deployed_at = Column(DateTime, nullable=False, default=datetime.utcnow, comment="배포일")
 
     # Relationships
-    model = relationship("Model", back_populates="deployments")
-    inference_logs = relationship("InferenceLog", back_populates="deployment")
-
-
-class InferenceLog(Base):
-    __tablename__ = "inference_logs"
-
-    id = Column(Integer, primary_key=True, index=True)
-    deployment_id = Column(Integer, ForeignKey("deployments.id"))
-
-    # Request info
-    request_id = Column(String, unique=True, index=True)
-    image_data = Column(Text, nullable=True)  # Base64 or URL
-
-    # Response info
-    predictions = Column(JSON)  # [{class, confidence, bbox}, ...]
-    confidence_scores = Column(JSON, nullable=True)
-
-    # Performance
-    inference_time = Column(Float)  # milliseconds
-    preprocessing_time = Column(Float, nullable=True)
-    postprocessing_time = Column(Float, nullable=True)
-
-    # Metadata
-    client_info = Column(JSON, nullable=True)
-    timestamp = Column(DateTime, default=datetime.utcnow, index=True)
-
-    # Relationships
-    deployment = relationship("Deployment", back_populates="inference_logs")
+    model_version = relationship("ModelVersion", back_populates="deployments")

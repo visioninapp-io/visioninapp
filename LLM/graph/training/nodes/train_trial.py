@@ -5,7 +5,7 @@ import json
 import os
 import uuid
 import time
-from typing import Any, Dict, Optional
+from typing import Any, Dict
 
 from graph.training.state import TrainState
 

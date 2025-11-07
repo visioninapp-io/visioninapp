@@ -90,11 +90,11 @@ class YOLOTrainingService:
                 train_params['project'] = project
             
             if progress_callback:
-                logger.info("✅ Progress callback provided - will track training progress")
+                logger.info(" Progress callback provided - will track training progress")
                 train_params['progress_callback'] = progress_callback
                 train_params['tick_interval'] = 1.0  # Progress updates every second
             else:
-                logger.warning("⚠️ No progress callback provided")
+                logger.warning(" No progress callback provided")
             
             # Add device if specified
             if device is not None:
@@ -117,7 +117,7 @@ class YOLOTrainingService:
                 'total_epochs': epochs
             }
             
-            logger.info("✅ Training completed successfully")
+            logger.info(" Training completed successfully")
             logger.info(f"  Model saved to: {self.adapter.save_dir}")
             
             return training_results

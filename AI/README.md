@@ -1,17 +1,18 @@
-<<<<<<< HEAD
 # AI Module - Model Training & Inference
 
 This module provides unified interfaces for model training and inference, with built-in support for YOLO models via Ultralytics.
 
 ## Features
 
-- 🚀 **Easy-to-use inference service** with automatic model downloading
-- 🏋️ **Training service** with progress callbacks and metrics tracking
+- 🏋️ **Message-driven training service** with real-time progress tracking
 - 🔄 **Model conversion service** for ONNX and TensorRT formats
-- 🔌 **Seamless integration** with Backend and Frontend
-- 📦 **Automatic fallback** to YOLOv8n when no custom model is available
-- 📊 **Real-time progress tracking** during training and inference
-- ⚡ **Optimized deployment** with format-specific optimizations
+- 🔍 **Inference service** for auto-annotation and object detection
+- 🐰 **RabbitMQ integration** for async job processing (training/conversion/inference)
+- 🔌 **Pure consumer/producer architecture** - no HTTP server overhead
+- 📊 **Real-time updates** sent automatically during processing
+- 📦 **Automatic model downloading** (YOLOv8n fallback)
+- ⚡ **Multi-service support** with unified message handling
+- 🎯 **Production-ready** with proper error handling and logging
 
 ## Quick Start
 
@@ -22,88 +23,162 @@ cd AI
 pip install -r requirements.txt
 ```
 
-### 1. Inference (Auto-Annotation)
+### Configuration
 
-```python
-from AI.inference_service import YOLOInferenceService
+The AI service now runs as a pure message-driven service. Configure RabbitMQ:
 
-# Create service (will auto-download yolov8n if needed)
-service = YOLOInferenceService("yolov8n.pt")
-service.load_model()
-
-# Run inference
-results = service.predict("path/to/image.jpg", conf=0.25)
-
-# Results format:
-# [{
-#     'class_id': 0,
-#     'class_name': 'person',
-#     'confidence': 0.89,
-#     'bbox': {'x_center': 0.5, 'y_center': 0.5, 'width': 0.3, 'height': 0.4},
-#     'bbox_xyxy': [100, 200, 300, 400]
-# }, ...]
+```bash
+# Set environment variables or create .env file
+export ENABLE_RABBITMQ=true
+export RABBITMQ_HOST=localhost
+export RABBITMQ_USER=guest
+export RABBITMQ_PASSWORD=guest
 ```
 
-### 2. Training
+### Starting the Service
 
-```python
-from AI.training_service import YOLOTrainingService
+```bash
+# Using startup script (recommended)
+./start.sh
 
-# Create training service
-service = YOLOTrainingService("yolov8n.pt")
-
-# Train with progress callback
-def progress_callback(status):
-    if status['event'] == 'epoch_end':
-        print(f"Epoch {status['epoch']}/{status['total_epochs']}")
-        print(f"Metrics: {status['metrics']}")
-
-results = service.train(
-    data_yaml='path/to/data.yaml',
-    epochs=100,
-    imgsz=640,
-    batch=16,
-    progress_callback=progress_callback
-)
-
-if results['success']:
-    best_model = service.get_best_model_path()
-    print(f"Model saved to: {best_model}")
+# Or directly
+python ai_service.py
 ```
 
-### 3. Model Conversion
+The service will:
+- ✅ Connect to RabbitMQ
+- 🎯 Listen for training requests on `train_request_q`
+- 🔄 Listen for conversion requests on `convert_request_q`
+- 🔍 Listen for inference requests on `inference_request_q`
+- 📤 Send real-time updates to respective update/result queues
+- 📋 Send final results back to backend
+
+### Testing the Service
+
+Use the comprehensive test suite to verify the message-driven service:
+
+```bash
+# Interactive test runner (recommended)
+python test_runner.py
+
+# Or run tests directly from tests/ directory
+cd tests
+python run_tests.py
+
+# Individual test files
+python test_individual_functions.py  # Unit tests (no RabbitMQ)
+python test_service_methods.py      # Service method tests
+python test_multi_service.py        # Full integration tests
+python test_message_service.py      # Training-only tests
+```
+
+See `tests/README.md` for detailed testing documentation.
+
+The multi-service test will:
+- 🔍 **Test inference**: Auto-annotation on a sample image
+- 🔄 **Test conversion**: Convert YOLOv8n to ONNX format
+- 🏋️ **Test training**: Train a model for 3 epochs
+- 👂 **Listen for real-time updates** from all services
+- 📊 **Display progress and final results**
+- ✅ **Validate complete message flows**
+
+### Manual Testing
+
+You can also send requests manually to any service:
+
+#### Training Request:
 
 ```python
-from AI.conversion_service import ModelConversionService
+import pika
+import json
 
-# Create conversion service
-service = ModelConversionService()
+# Connect to RabbitMQ
+connection = pika.BlockingConnection(pika.ConnectionParameters('localhost'))
+channel = connection.channel()
 
-# Convert to ONNX
-onnx_result = service.convert_model(
-    model_path='path/to/model.pt',
-    target_format='onnx',
-    imgsz=640,
-    batch_size=1,
-    dynamic=False,
-    simplify=True
+# Send training request
+message = {
+    "job_id": "my_job_123",
+    "dataset": {"name": "coco128.yaml"},
+    "hyperparams": {
+        "model": "yolov8n",
+        "epochs": 10,
+        "batch": 16,
+        "imgsz": 640
+    },
+    "output": {
+        "prefix": "runs/train",
+        "model_name": "my_model.pt"
+    }
+}
+
+channel.basic_publish(
+    exchange='',
+    routing_key='train_request_q',
+    body=json.dumps(message)
 )
+```
 
-# Convert to TensorRT
-tensorrt_result = service.convert_model(
-    model_path='path/to/model.pt',
-    target_format='tensorrt',
-    imgsz=640,
-    batch_size=1,
-    precision='fp16',
-    workspace=4
+#### Conversion Request:
+
+```python
+# Convert model to ONNX
+conversion_message = {
+    "job_id": "convert_123",
+    "model_path": "yolov8n.pt",
+    "target_format": "onnx",
+    "options": {
+        "imgsz": 640,
+        "batch_size": 1,
+        "dynamic": False,
+        "simplify": True
+    }
+}
+
+channel.basic_publish(
+    exchange='',
+    routing_key='convert_request_q',
+    body=json.dumps(conversion_message)
 )
+```
 
-if onnx_result['success']:
-    print(f"ONNX model: {onnx_result['output_path']}")
+#### Inference Request:
+
+```python
+# Run inference on image
+inference_message = {
+    "job_id": "inference_123",
+    "image_path": "path/to/image.jpg",
+    "model_path": "yolov8n.pt",  # Optional, uses default if not specified
+    "options": {
+        "conf": 0.25,
+        "iou": 0.45
+    }
+}
+
+channel.basic_publish(
+    exchange='',
+    routing_key='inference_request_q',
+    body=json.dumps(inference_message)
+)
 ```
 
 ## Architecture
+
+The AI service is a pure message-driven service using RabbitMQ for all communication:
+
+```
+┌─────────────┐    RabbitMQ Queues   ┌─────────────┐
+│   Backend   │ ──────────────────►  │ AI Service  │
+│             │  train_request_q     │             │
+│             │  convert_request_q   │ Training    │
+│             │  inference_request_q │ Conversion  │
+│             │                      │ Inference   │
+│             │ ◄──────────────────  │             │
+└─────────────┘  *_result_q queues   └─────────────┘
+```
+
+### File Structure:
 
 ```
 AI/
@@ -113,17 +188,25 @@ AI/
 │   ├── factory.py         # Model factory
 │   ├── trainer.py         # Training orchestration
 │   └── payload.py         # Payload-based API
-├── inference_service.py   # High-level inference API
 ├── training_service.py    # High-level training API
-├── conversion_service.py  # Model conversion service
-├── main.py               # FastAPI application
+├── conversion_service.py # Model conversion service
+├── inference_service.py  # Inference and auto-annotation service
+├── ai_service.py         # Message-driven AI service (main)
+├── multi_service_consumer.py # Multi-service RabbitMQ consumer
+├── rabbitmq_producer.py  # RabbitMQ producer
+├── config.py             # Configuration management
 ├── examples/              # Usage examples
-│   ├── train_yolo.py      # Basic training example
-│   ├── inference_example.py
-│   ├── training_example.py
-│   ├── conversion_example.py    # Model conversion examples
-│   └── api_conversion_example.py # API-based conversion
-└── requirements.txt
+│   └── be_consumer_example.py   # Backend consumer example
+├── tests/               # Comprehensive test suite
+│   ├── test_individual_functions.py # Unit tests
+│   ├── test_service_methods.py      # Service method tests
+│   ├── test_multi_service.py        # Integration tests
+│   ├── test_message_service.py      # Training tests
+│   ├── run_tests.py                 # Interactive test runner
+│   └── README.md                    # Testing documentation
+├── test_runner.py          # Main test runner
+├── start.sh              # Service startup script
+└── requirements.txt      # Multi-service dependencies
 ```
 
 ## Backend Integration
@@ -507,181 +590,3 @@ When adding new model frameworks:
 ## License
 
 See main project LICENSE file.
-=======
-YOLO Trainer (AI.model_trainer)
-===============================
-
-Minimal utilities to select a YOLO model (alias or .pt checkpoint), apply hyperparameters, and train via a simple payload API or inside FastAPI.
-
-Quick start
------------
-
-```bash
-pip install -r requirements.txt
-python -m AI.examples.train_yolo
-```
-
-One-call payload training
--------------------------
-
-```python
-from AI.model_trainer import train_from_payload
-
-# Detection (Ultralytics YOLO)
-payload = {
-    "model": "yolov8n",  # or "/abs/path/model.pt"
-    "hyperparameters": {"epochs": 50, "imgsz": 640, "batch": 16},
-    "fit_params": {"data": "/abs/path/data.yaml"}
-}
-trained, score = train_from_payload(payload)
-```
-
-Progress and metrics
---------------------
-
-You can receive epoch updates and final metrics (e.g., precision/recall/mAP50-95) via a callback:
-
-```python
-from AI.model_trainer import build_model, train_model
-
-events = []
-
-def on_progress(ev):
-    # ev = {"event": "epoch_end"|"train_end", "epoch": int, "total_epochs": int, "metrics": {...}, "save_dir": str}
-    events.append(ev)
-    print(ev)
-
-yolo = build_model("yolov8n", {"epochs": 10, "imgsz": 640})
-train_model(yolo, None, None, fit_params={
-    "data": "/abs/path/data.yaml",
-    "progress_callback": on_progress,
-    "tick_interval": 1.0  # send a 'tick' event every second (default 1.0)
-})
-
-# After training
-print("Final metrics:", getattr(yolo, "final_metrics", None))
-print("Runs saved under:", getattr(yolo, "save_dir", None))
-```
-
-Retrieving progress (backend snapshots + polling)
-------------------------------------------------
-
-Recommended pattern:
-- Use `progress_callback` to update a per-job snapshot in your backend (in-memory or Redis).
-- Frontend polls `GET /jobs/{id}` every 2–5s to retrieve the latest snapshot.
-
-Example (FastAPI skeleton):
-```python
-from typing import Any, Dict
-from uuid import uuid4
-from fastapi import FastAPI, BackgroundTasks, HTTPException
-from pydantic import BaseModel
-from AI.model_trainer import train_from_payload
-
-app = FastAPI()
-jobs: Dict[str, Dict[str, Any]] = {}
-
-class TrainPayload(BaseModel):
-    model: str
-    hyperparameters: Dict[str, Any] | None = None
-    fit_params: Dict[str, Any] | None = None
-
-def on_progress_factory(job_id: str):
-    def on_progress(ev: Dict[str, Any]):
-        # Store only the latest snapshot
-        jobs[job_id] = {**jobs.get(job_id, {}), "status": "running", "progress": ev, "updated_at": __import__("time").time()}
-    return on_progress
-
-def _run(job_id: str, payload: Dict[str, Any]):
-    jobs[job_id] = {"status": "running"}
-    try:
-        # inject server-side callback
-        p = dict(payload)
-        fp = dict(p.get("fit_params") or {})
-        fp["progress_callback"] = on_progress_factory(job_id)
-        p["fit_params"] = fp
-        _, score = train_from_payload(p)
-        jobs[job_id] = {**jobs.get(job_id, {}), "status": "completed", "score": score}
-    except Exception as e:
-        jobs[job_id] = {**jobs.get(job_id, {}), "status": "failed", "error": str(e)}
-
-@app.post("/train")
-def train(payload: TrainPayload, bg: BackgroundTasks):
-    job_id = str(uuid4())
-    jobs[job_id] = {"status": "queued"}
-    bg.add_task(_run, job_id, payload.dict(exclude_none=True))
-    return {"job_id": job_id}
-
-@app.get("/jobs/{job_id}")
-def get_job(job_id: str):
-    if job_id not in jobs:
-        raise HTTPException(404, "job not found")
-    return jobs[job_id]
-```
-
-Optional push (SSE)
--------------------
-If you prefer pushing updates, expose an SSE endpoint and `yield` each `on_progress` event to connected clients. Polling is simpler and adequate if you don’t need real-time streaming.
-
-Model selection
----------------
-
-- YOLO alias: "yolov8n", "yolov8s", etc. (auto-resolves to .pt)
-- YOLO checkpoint: absolute path to `.pt`
-
-Hyperparameters vs fit_params (YOLO)
-------------------------------------
-
-- hyperparameters: build-time settings (epochs, imgsz, batch, etc.).
-- fit_params: training-time args passed to Ultralytics (REQUIRED: `data` YAML path).
-
-```python
-from AI.model_trainer import build_model, train_model
-
-yolo = build_model("yolov8n", {"epochs": 50, "imgsz": 640, "batch": 16})
-train_model(yolo, None, None, fit_params={"data": "/abs/path/data.yaml"})
-```
-
-FastAPI usage (payload-based)
------------------------------
-
-```python
-from typing import Any, Dict
-from uuid import uuid4
-from fastapi import FastAPI, BackgroundTasks
-from pydantic import BaseModel
-from AI.model_trainer import train_from_payload
-
-app = FastAPI()
-jobs: Dict[str, Dict[str, Any]] = {}
-
-class TrainPayload(BaseModel):
-    model: str  # 'yolov8n' or '/path/model.pt'
-    hyperparameters: Dict[str, Any] | None = None
-    fit_params: Dict[str, Any] | None = None
-
-def _run(job_id: str, payload: Dict[str, Any]):
-    jobs[job_id] = {"status": "running"}
-    try:
-        _, score = train_from_payload(payload)
-        jobs[job_id] = {"status": "completed", "score": score}
-    except Exception as e:
-        jobs[job_id] = {"status": "failed", "error": str(e)}
-
-@app.post("/train")
-def train(payload: TrainPayload, bg: BackgroundTasks):
-    job_id = str(uuid4())
-    jobs[job_id] = {"status": "queued"}
-    bg.add_task(_run, job_id, payload.dict(exclude_none=True))
-    return {"job_id": job_id}
-```
-
-Notes
------
-
-- `X_train`/`y_train` are ignored for YOLO; pass dataset YAML via `fit_params.data`.
-- To use a custom model (e.g., YOLOv8 variant or your `model.pt`), set `model` accordingly.
-- Trained artifacts are managed by Ultralytics in `runs/` unless overridden.
-
-
->>>>>>> feature/llm-pipeline

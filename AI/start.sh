@@ -1,8 +1,8 @@
 #!/bin/bash
-# Start AI Service on GPU server
+# Start AI Message-driven Service
 
-echo "Starting AI Service..."
-echo "====================="
+echo "Starting AI Service (Message-driven)..."
+echo "======================================="
 
 # ✅ 명시적으로 Windows Python 경로 지정
 PYTHON="/c/Users/SSAFY/AppData/Local/Programs/Python/Python311/python.exe"
@@ -19,14 +19,27 @@ if [ $? -ne 0 ]; then
     exit 1
 fi
 
-# ✅ 포트 8001 사용 중인지 확인
-if lsof -Pi :8001 -sTCP:LISTEN -t >/dev/null ; then
-    echo "⚠️  Port 8001 is already in use!"
-    echo "Stop the existing service first:"
-    echo "   kill $(lsof -t -i:8001)"
-    exit 1
-fi
+# ✅ RabbitMQ 연결 확인 (선택사항)
+echo "🐰 Checking RabbitMQ connection..."
+"$PYTHON" -c "
+import pika
+import os
+try:
+    connection = pika.BlockingConnection(pika.ConnectionParameters(
+        host=os.getenv('RABBITMQ_HOST', 'localhost'),
+        port=int(os.getenv('RABBITMQ_PORT', '5672')),
+        credentials=pika.PlainCredentials(
+            os.getenv('RABBITMQ_USER', 'guest'),
+            os.getenv('RABBITMQ_PASSWORD', 'guest')
+        )
+    ))
+    connection.close()
+    print('✅ RabbitMQ connection successful')
+except Exception as e:
+    print(f'⚠️  RabbitMQ connection failed: {e}')
+    print('   Service will still start but may not receive messages')
+"
 
-# ✅ 서비스 시작
-echo "🚀 Starting AI Service on port 8001..."
-"$PYTHON" -m uvicorn main:app --host 0.0.0.0 --port 8001 --reload
+# ✅ 메시지 기반 서비스 시작
+echo "🚀 Starting AI Message-driven Service..."
+"$PYTHON" ai_service.py

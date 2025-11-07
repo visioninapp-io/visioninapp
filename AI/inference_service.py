@@ -1,229 +1,363 @@
 """
-AI Inference Service
-Provides a unified interface for model inference across different frameworks.
+YOLO Inference Service
+High-level interface for YOLO model inference and auto-annotation
 """
 
-from pathlib import Path
-from typing import List, Dict, Optional, Any, Union
 import logging
+import os
+from pathlib import Path
+from typing import List, Dict, Any, Optional, Union
+import torch
+from PIL import Image
+import numpy as np
 
 logger = logging.getLogger(__name__)
 
-
 class YOLOInferenceService:
-    """YOLO model inference service using ultralytics"""
+    """High-level YOLO inference service for auto-annotation"""
     
-    def __init__(self, model_spec: Union[str, Path] = "yolov8n.pt"):
+    def __init__(self, model_path: Optional[str] = None):
         """
-        Initialize YOLO inference service
+        Initialize inference service
         
         Args:
-            model_spec: Model specification - can be:
-                - "yolov8n.pt", "yolov8s.pt", etc. (will auto-download)
-                - Path to custom .pt file
-                - "yolov8n" (will add .pt automatically)
+            model_path: Path to model file (optional, will use default if not provided)
         """
-        from model_trainer.integrations.yolo import YOLOAdapter
-        
-        self.model_spec = str(model_spec)
-        self.adapter = None
+        self.model_path = model_path
+        self.model = None
+        self.device = None
         self.is_loaded = False
         
-    def load_model(self) -> bool:
-        """
-        Load the YOLO model
+        # Auto-detect device
+        self.device = "cuda" if torch.cuda.is_available() else "cpu"
+        logger.info(f"Inference device: {self.device}")
         
-        Returns:
-            True if successful, False otherwise
+        # Auto-load model if path provided
+        if model_path:
+            self.load_model(model_path)
+    
+    def load_model(self, model_path: Optional[str] = None):
         """
+        Load YOLO model
+        
+        Args:
+            model_path: Path to model file (optional)
+        """
+        if model_path:
+            self.model_path = model_path
+        
+        if not self.model_path:
+            # Use default YOLOv8n model
+            self.model_path = "yolov8n.pt"
+            logger.info("No model specified, using default YOLOv8n")
+        
         try:
-            from model_trainer.integrations.yolo import build_yolo_model
+            from ultralytics import YOLO
             
-            logger.info(f"Loading YOLO model: {self.model_spec}")
-            self.adapter = build_yolo_model(self.model_spec)
+            # Check if model file exists
+            model_path = Path(self.model_path)
+            if not model_path.exists() and not self.model_path.startswith('yolo'):
+                raise FileNotFoundError(f"Model file not found: {self.model_path}")
+            
+            logger.info(f"📦 Loading model: {self.model_path}")
+            self.model = YOLO(self.model_path)
+            
+            # Move to device
+            if hasattr(self.model, 'to'):
+                self.model.to(self.device)
+            
             self.is_loaded = True
+            logger.info(f"Model loaded successfully: {self.model_path}")
             
-            logger.info(f"✅ Model loaded successfully")
-            logger.info(f"   Model: {self.model_spec}")
-            logger.info(f"   Classes: {len(self.adapter._model.names)}")
-            
-            return True
+            # Log model info
+            if hasattr(self.model, 'names') and self.model.names:
+                logger.info(f" Model classes: {len(self.model.names)} ({list(self.model.names.values())[:5]}...)")
             
         except Exception as e:
-            logger.error(f"Failed to load model: {e}")
-            return False
+            logger.error(f" Failed to load model {self.model_path}: {e}")
+            self.is_loaded = False
+            raise RuntimeError(f"Model loading failed: {e}")
     
-    def predict(
-        self,
-        source: Union[str, Path],
-        conf: float = 0.25,
-        iou: float = 0.45,
-        **kwargs
-    ) -> List[Dict[str, Any]]:
+    def predict(self, 
+                image_path: Union[str, Path, Image.Image, np.ndarray],
+                conf: float = 0.25,
+                iou: float = 0.45,
+                imgsz: int = 640,
+                max_det: int = 300,
+                classes: Optional[List[int]] = None,
+                verbose: bool = False) -> List[Dict[str, Any]]:
         """
         Run inference on image(s)
         
         Args:
-            source: Image path or directory
+            image_path: Path to image file, PIL Image, or numpy array
             conf: Confidence threshold
-            iou: IOU threshold for NMS
-            **kwargs: Additional inference parameters
+            iou: IoU threshold for NMS
+            imgsz: Input image size
+            max_det: Maximum detections per image
+            classes: List of class IDs to detect (None for all)
+            verbose: Verbose output
             
         Returns:
-            List of detections with format:
-            [{
-                'class_id': int,
-                'class_name': str,
-                'confidence': float,
-                'bbox': {
-                    'x_center': float,  # normalized 0-1
-                    'y_center': float,
-                    'width': float,
-                    'height': float
-                },
-                'bbox_xyxy': [x1, y1, x2, y2]  # absolute coordinates
-            }, ...]
+            List of detection dictionaries
         """
         if not self.is_loaded:
-            if not self.load_model():
-                return []
+            raise RuntimeError("Model not loaded. Call load_model() first.")
         
         try:
-            results = self.adapter.predict(source, conf=conf, iou=iou, **kwargs)
+            logger.info(f" Running inference on: {image_path}")
+            logger.info(f"   Confidence: {conf}, IoU: {iou}, Image size: {imgsz}")
             
-            if not results or len(results) == 0:
-                return []
+            # Run inference
+            results = self.model.predict(
+                source=image_path,
+                conf=conf,
+                iou=iou,
+                imgsz=imgsz,
+                max_det=max_det,
+                classes=classes,
+                verbose=verbose,
+                save=False,
+                show=False
+            )
             
-            # Parse results
-            annotations = []
-            result = results[0]
+            # Process results
+            detections = []
+            for result in results:
+                detections.extend(self._process_result(result))
             
-            if not hasattr(result, 'boxes') or result.boxes is None:
-                return []
-            
-            boxes = result.boxes
-            img_height, img_width = result.orig_shape
-            
-            for box in boxes:
-                cls_id = int(box.cls[0])
-                confidence = float(box.conf[0])
-                cls_name = self.adapter._model.names[cls_id]
-                
-                # XYXY coordinates (absolute)
-                x1, y1, x2, y2 = box.xyxy[0].tolist()
-                
-                # YOLO format (normalized center + width/height)
-                x_center = ((x1 + x2) / 2) / img_width
-                y_center = ((y1 + y2) / 2) / img_height
-                width = (x2 - x1) / img_width
-                height = (y2 - y1) / img_height
-                
-                annotation = {
-                    'class_id': cls_id,
-                    'class_name': cls_name,
-                    'confidence': confidence,
-                    'bbox': {
-                        'x_center': x_center,
-                        'y_center': y_center,
-                        'width': width,
-                        'height': height
-                    },
-                    'bbox_xyxy': [x1, y1, x2, y2]
-                }
-                
-                annotations.append(annotation)
-            
-            return annotations
+            logger.info(f" Inference completed: {len(detections)} detections")
+            return detections
             
         except Exception as e:
-            logger.error(f"Inference failed: {e}")
-            return []
+            logger.error(f" Inference failed: {e}")
+            raise RuntimeError(f"Inference failed: {e}")
     
-    def get_model_info(self) -> Dict[str, Any]:
-        """
-        Get model information
+    def _process_result(self, result) -> List[Dict[str, Any]]:
+        """Process YOLO result into standardized format"""
+        detections = []
         
-        Returns:
-            Dictionary with model metadata
-        """
-        if not self.is_loaded:
-            return {
-                'model_spec': self.model_spec,
-                'is_loaded': False,
-                'num_classes': 0,
-                'class_names': [],
+        if result.boxes is None or len(result.boxes) == 0:
+            return detections
+        
+        # Get image dimensions
+        img_height, img_width = result.orig_shape
+        
+        # Process each detection
+        boxes = result.boxes
+        for i in range(len(boxes)):
+            # Get box coordinates (xyxy format)
+            x1, y1, x2, y2 = boxes.xyxy[i].cpu().numpy()
+            
+            # Convert to normalized center format (YOLO format)
+            x_center = (x1 + x2) / 2 / img_width
+            y_center = (y1 + y2) / 2 / img_height
+            width = (x2 - x1) / img_width
+            height = (y2 - y1) / img_height
+            
+            # Get class and confidence
+            class_id = int(boxes.cls[i].cpu().numpy())
+            confidence = float(boxes.conf[i].cpu().numpy())
+            
+            # Get class name
+            class_name = self.model.names.get(class_id, f"class_{class_id}")
+            
+            detection = {
+                'class_id': class_id,
+                'class_name': class_name,
+                'confidence': confidence,
+                'bbox': {
+                    'x_center': float(x_center),
+                    'y_center': float(y_center),
+                    'width': float(width),
+                    'height': float(height)
+                },
+                'bbox_xyxy': [float(x1), float(y1), float(x2), float(y2)],
+                'image_size': {
+                    'width': img_width,
+                    'height': img_height
+                }
             }
+            
+            detections.append(detection)
         
-        return {
-            'model_spec': self.model_spec,
-            'is_loaded': True,
-            'num_classes': len(self.adapter._model.names),
-            'class_names': list(self.adapter._model.names.values()),
-        }
-
-
-class InferenceServiceFactory:
-    """Factory for creating inference services"""
+        return detections
     
-    @staticmethod
-    def create_yolo_service(model_spec: Union[str, Path] = "yolov8n.pt") -> YOLOInferenceService:
-        """Create a YOLO inference service"""
-        return YOLOInferenceService(model_spec)
-    
-    @staticmethod
-    def auto_detect_and_create(model_path: Union[str, Path]) -> Optional[YOLOInferenceService]:
+    def predict_batch(self, 
+                     image_paths: List[Union[str, Path]],
+                     conf: float = 0.25,
+                     iou: float = 0.45,
+                     imgsz: int = 640,
+                     max_det: int = 300,
+                     classes: Optional[List[int]] = None,
+                     verbose: bool = False) -> Dict[str, List[Dict[str, Any]]]:
         """
-        Auto-detect model type and create appropriate service
+        Run inference on multiple images
         
         Args:
-            model_path: Path to model file
+            image_paths: List of image paths
+            conf: Confidence threshold
+            iou: IoU threshold for NMS
+            imgsz: Input image size
+            max_det: Maximum detections per image
+            classes: List of class IDs to detect (None for all)
+            verbose: Verbose output
             
         Returns:
-            Inference service instance or None
+            Dictionary mapping image paths to detection lists
         """
-        model_str = str(model_path).lower()
+        if not self.is_loaded:
+            raise RuntimeError("Model not loaded. Call load_model() first.")
         
-        # Check if it's a YOLO model
-        if 'yolo' in model_str or model_str.endswith('.pt'):
-            return YOLOInferenceService(model_path)
+        results = {}
         
-        logger.error(f"Could not detect model type for: {model_path}")
-        return None
+        logger.info(f" Running batch inference on {len(image_paths)} images")
+        
+        for image_path in image_paths:
+            try:
+                detections = self.predict(
+                    image_path=image_path,
+                    conf=conf,
+                    iou=iou,
+                    imgsz=imgsz,
+                    max_det=max_det,
+                    classes=classes,
+                    verbose=verbose
+                )
+                results[str(image_path)] = detections
+                
+            except Exception as e:
+                logger.error(f" Failed to process {image_path}: {e}")
+                results[str(image_path)] = []
+        
+        total_detections = sum(len(dets) for dets in results.values())
+        logger.info(f" Batch inference completed: {total_detections} total detections")
+        
+        return results
+    
+    def get_model_info(self) -> Dict[str, Any]:
+        """Get information about the loaded model"""
+        if not self.is_loaded:
+            return {"error": "Model not loaded"}
+        
+        info = {
+            "model_path": self.model_path,
+            "device": self.device,
+            "is_loaded": self.is_loaded
+        }
+        
+        # Add model-specific info
+        try:
+            if hasattr(self.model, 'names') and self.model.names:
+                info["classes"] = len(self.model.names)
+                info["class_names"] = list(self.model.names.values())
+            
+            if hasattr(self.model, 'model') and hasattr(self.model.model, 'yaml'):
+                info["model_yaml"] = self.model.model.yaml
+                
+        except Exception as e:
+            logger.warning(f"Could not get model info: {e}")
+        
+        return info
+    
+    def annotate_for_backend(self, 
+                           image_path: Union[str, Path],
+                           conf: float = 0.25,
+                           iou: float = 0.45) -> Dict[str, Any]:
+        """
+        Run inference and format results for backend auto-annotation
+        
+        Args:
+            image_path: Path to image file
+            conf: Confidence threshold
+            iou: IoU threshold
+            
+        Returns:
+            Formatted annotation data for backend
+        """
+        try:
+            detections = self.predict(
+                image_path=image_path,
+                conf=conf,
+                iou=iou
+            )
+            
+            # Format for backend
+            annotations = []
+            for det in detections:
+                annotation = {
+                    "class_id": det["class_id"],
+                    "class_name": det["class_name"],
+                    "confidence": det["confidence"],
+                    "x_center": det["bbox"]["x_center"],
+                    "y_center": det["bbox"]["y_center"],
+                    "width": det["bbox"]["width"],
+                    "height": det["bbox"]["height"]
+                }
+                annotations.append(annotation)
+            
+            return {
+                "success": True,
+                "image_path": str(image_path),
+                "annotations": annotations,
+                "total_detections": len(annotations),
+                "model_info": {
+                    "model_path": self.model_path,
+                    "confidence_threshold": conf,
+                    "iou_threshold": iou
+                }
+            }
+            
+        except Exception as e:
+            logger.error(f" Auto-annotation failed for {image_path}: {e}")
+            return {
+                "success": False,
+                "error": str(e),
+                "image_path": str(image_path),
+                "annotations": []
+            }
 
 
-# Convenience function for quick inference
-def predict_with_yolo(
-    image_path: Union[str, Path],
-    model_spec: Union[str, Path] = "yolov8n.pt",
-    conf: float = 0.25
-) -> List[Dict[str, Any]]:
+# Convenience functions
+def auto_annotate_image(image_path: Union[str, Path], 
+                       model_path: Optional[str] = None,
+                       conf: float = 0.25,
+                       iou: float = 0.45) -> Dict[str, Any]:
     """
-    Quick inference with YOLO
+    Convenience function for auto-annotation
     
     Args:
         image_path: Path to image
-        model_spec: Model specification (default: yolov8n.pt)
+        model_path: Path to model (optional, uses default)
         conf: Confidence threshold
+        iou: IoU threshold
         
     Returns:
-        List of detections
+        Annotation results
     """
-    service = YOLOInferenceService(model_spec)
-    return service.predict(image_path, conf=conf)
+    service = YOLOInferenceService(model_path)
+    return service.annotate_for_backend(image_path, conf, iou)
 
-
-if __name__ == "__main__":
-    # Example usage
-    logging.basicConfig(level=logging.INFO)
+def batch_auto_annotate(image_paths: List[Union[str, Path]], 
+                       model_path: Optional[str] = None,
+                       conf: float = 0.25,
+                       iou: float = 0.45) -> Dict[str, Dict[str, Any]]:
+    """
+    Convenience function for batch auto-annotation
     
-    # Test with default YOLOv8n model
-    service = YOLOInferenceService("yolov8n.pt")
-    service.load_model()
+    Args:
+        image_paths: List of image paths
+        model_path: Path to model (optional, uses default)
+        conf: Confidence threshold
+        iou: IoU threshold
+        
+    Returns:
+        Dictionary mapping image paths to annotation results
+    """
+    service = YOLOInferenceService(model_path)
+    results = {}
     
-    info = service.get_model_info()
-    print(f"Model Info: {info}")
+    for image_path in image_paths:
+        results[str(image_path)] = service.annotate_for_backend(image_path, conf, iou)
     
-    # Example inference (uncomment and provide real image path)
-    # results = service.predict("path/to/image.jpg", conf=0.25)
-    # print(f"Detections: {results}")
-
+    return results

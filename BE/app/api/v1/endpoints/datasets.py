@@ -7,7 +7,6 @@ import io
 import zipfile
 import base64
 from datetime import datetime
-import hashlib
 from app.core.database import get_db
 from app.core.auth import get_current_user
 from app.models.dataset import Dataset, Annotation, DatasetVersion
@@ -545,9 +544,6 @@ async def upload_images_to_dataset(
             metadata = upload["metadata"]
             storage_uri = metadata["relative_path"]
             
-            # SHA256 계산
-            sha256_hash = calculate_sha256_from_s3(storage_uri)
-            
             # stored_filename은 이미 dataset_name_sequence_number.extension 형식
             # 예: pothole_1.jpg
             stored_filename = metadata.get("stored_filename", "")
@@ -557,7 +553,6 @@ async def upload_images_to_dataset(
                 name=stored_filename,  # dataset_name_sequence_number.extension 형식
                 type=AssetType.IMAGE,
                 storage_uri=storage_uri,
-                sha256=sha256_hash,
                 bytes=metadata["file_size"],
                 width=metadata.get("width"),
                 height=metadata.get("height"),
@@ -1117,22 +1112,6 @@ Created: {dataset.created_at}
 # Presigned URL 기반 업로드/다운로드 엔드포인트
 # ============================================================
 
-def calculate_sha256_from_s3(s3_key: str) -> str:
-    """S3 파일의 SHA256 해시 계산"""
-    try:
-        # S3에서 파일 다운로드하여 해시 계산
-        file_data = file_storage.download_from_s3(s3_key)
-        if file_data:
-            return hashlib.sha256(file_data).hexdigest()
-        else:
-            # 파일이 없으면 s3_key 기반 임시 해시 생성
-            return hashlib.sha256(s3_key.encode()).hexdigest()[:64]
-    except Exception as e:
-        print(f"[WARN] Failed to calculate SHA256 for {s3_key}: {e}")
-        # 실패 시 s3_key 기반 임시 해시
-        return hashlib.sha256(s3_key.encode()).hexdigest()[:64]
-
-
 @router.post("/{dataset_id}/upload-complete-batch")
 async def confirm_upload_complete_batch(
     dataset_id: int,
@@ -1202,8 +1181,6 @@ async def confirm_upload_complete_batch(
                     else:
                         asset_type = AssetType.IMAGE  # default
                     
-                    sha256_hash = ""  # 빈 문자열
-                    
                     # S3 파일명 추출 (datasets/포트홀/images/포트홀_1.jpg → 포트홀_1.jpg)
                     s3_filename = s3_key.split('/')[-1] if '/' in s3_key else s3_key
                     
@@ -1213,7 +1190,6 @@ async def confirm_upload_complete_batch(
                         name=s3_filename,  # ERD의 에셋명 필드 (S3 파일명)
                         type=asset_type,
                         storage_uri=s3_key,
-                        sha256=sha256_hash,
                         bytes=item.file_size,
                         width=item.width,
                         height=item.height,

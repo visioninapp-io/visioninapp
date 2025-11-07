@@ -19,7 +19,6 @@ class Asset(Base):
     name = Column(String(255), nullable=False, comment="에셋명")
     type = Column(Enum(AssetType), nullable=False, comment="타입")
     storage_uri = Column(Text, nullable=False, comment="파일 경로")
-    sha256 = Column(String(64), nullable=False, comment="무결성")
     bytes = Column(BigInteger, nullable=True, comment="파일 크기")
     
     # 이미지 관련 필드

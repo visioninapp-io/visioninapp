@@ -14,6 +14,7 @@ from dotenv import load_dotenv
 load_dotenv()
 
 CFG_PATH = os.path.join(os.path.dirname(__file__), "..", "configs", "app.yaml")
+S3_BUCKET = os.getenv("S3_BUCKET", "visioninapp-bucket")
 logger = setup_logger()
 
 def _paths():
@@ -89,7 +90,7 @@ def handle_train(mq: MQ, exchanges: dict, msg: dict):
 
         # --- 결과 업로드 ---
         best_pt = os.path.join(out_dir, "train", "weights", "best.pt")
-        bucket = msg["output"]["s3_bucket"]
+        bucket = S3_BUCKET
         model_name = msg["output"].get("model_name", "best.pt")
         key = f"{msg['output']['prefix'].rstrip('/')}/{model_name}"
 
@@ -141,7 +142,7 @@ def handle_onnx(mq: MQ, exchanges: dict, msg: dict):
         to_onnx(tmp_pt, out_onnx)
 
         progress.send("upload", 90, "upload onnx")
-        bucket = msg["output"]["s3_bucket"]
+        bucket = S3_BUCKET
         model_name = msg["output"].get("model_name", "best.onnx")
         key = f"{msg['output']['prefix'].rstrip('/')}/{model_name}"
         upload_s3(out_onnx, bucket, key)
@@ -196,7 +197,7 @@ def handle_trt(mq: MQ, exchanges: dict, msg: dict):
 
         # 업로드
         progress.send("upload", 90, "upload engine")
-        bucket     = msg["output"]["s3_bucket"]
+        bucket     = S3_BUCKET
         model_name = msg["output"].get("model_name", "best.engine")
         key        = f"{msg['output']['prefix'].rstrip('/')}/{model_name}"
         upload_s3(out_engine, bucket, key)

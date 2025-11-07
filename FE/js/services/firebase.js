@@ -41,6 +41,17 @@ class FirebaseAuthService {
                     this.onAuthStateChanged(user);
                 });
 
+                // token refresh
+                this.auth.onIdTokenChanged(async (user) => {
+                    if (user) {
+                        const token = await user.getIdToken();
+                        if (window.apiService) {
+                        window.apiService.setAuthToken(token);
+                        }
+                        console.log('Firebase ID token refreshed automatically');
+                    }
+                });
+
                 console.log('Firebase initialized successfully');
             }
 

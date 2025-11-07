@@ -6,10 +6,10 @@ from pydantic import BaseModel, field_validator
 import io
 import zipfile
 import base64
+import re
 from datetime import datetime
-import hashlib
 from app.core.database import get_db
-from app.core.auth import get_current_user, get_current_user_dev
+from app.core.auth import get_current_user
 from app.models.dataset import Dataset, Annotation, DatasetVersion
 from app.models.label_class import LabelClass
 from app.utils.project_helper import get_or_create_default_project
@@ -33,7 +33,7 @@ from app.schemas.dataset_asset import (
     UploadCompleteBatchRequest as AssetUploadCompleteBatchRequest
 )
 from app.utils.file_storage import file_storage
-from app.services.presigned_url_service import presigned_url_service
+from app.services.presigned_url_service import presigned_url_service, sanitize_dataset_name_for_s3
 from app.core.config import settings
 import time
 
@@ -85,7 +85,7 @@ class BatchDownloadUrlRequest(BaseModel):
 @router.get("/stats", response_model=DatasetStats)
 async def get_dataset_stats(
     db: Session = Depends(get_db),
-    current_user: dict = Depends(get_current_user_dev)
+    current_user: dict = Depends(get_current_user)
 ):
     """Get overall dataset statistics for current user"""
     # Get user's default project
@@ -140,7 +140,7 @@ async def get_datasets(
     skip: int = 0,
     limit: int = 10000,
     db: Session = Depends(get_db),
-    current_user: dict = Depends(get_current_user_dev)
+    current_user: dict = Depends(get_current_user)
 ):
     """Get all datasets for current user"""
     # Get user's default project
@@ -189,7 +189,7 @@ async def get_datasets(
 async def create_dataset(
     dataset: DatasetCreate,
     db: Session = Depends(get_db),
-    current_user: dict = Depends(get_current_user_dev)
+    current_user: dict = Depends(get_current_user)
 ):
     """Create a new dataset (ERD 기준)"""
     # Get or create default project for user
@@ -230,7 +230,7 @@ async def create_dataset(
 async def get_dataset(
     dataset_id: int,
     db: Session = Depends(get_db),
-    current_user: dict = Depends(get_current_user_dev)
+    current_user: dict = Depends(get_current_user)
 ):
     """Get a specific dataset with computed fields"""
     dataset = db.query(Dataset).filter(Dataset.id == dataset_id).first()
@@ -271,7 +271,7 @@ async def update_dataset(
     dataset_id: int,
     dataset_update: DatasetUpdate,
     db: Session = Depends(get_db),
-    current_user: dict = Depends(get_current_user_dev)
+    current_user: dict = Depends(get_current_user)
 ):
     """Update a dataset (ERD 기준)"""
     db_dataset = db.query(Dataset).filter(Dataset.id == dataset_id).first()
@@ -311,15 +311,23 @@ async def update_dataset(
 async def delete_dataset(
     dataset_id: int,
     db: Session = Depends(get_db),
-    current_user: dict = Depends(get_current_user_dev)
+    current_user: dict = Depends(get_current_user)
 ):
-    """Delete a dataset"""
+    """Delete a dataset and its associated files from S3"""
     dataset = db.query(Dataset).filter(Dataset.id == dataset_id).first()
     if not dataset:
         raise HTTPException(status_code=404, detail="Dataset not found")
 
     print(f"[DELETE DATASET] Deleting dataset {dataset_id}: {dataset.name}")
     
+    try:
+        # Delete all files from S3
+        file_storage.delete_dataset_files(dataset.name)
+    except Exception as e:
+        print(f"[WARNING] Failed to delete S3 files for dataset {dataset_id}: {e}")
+        # Continue with database deletion even if S3 deletion fails
+    
+    # Delete from database (cascade will handle related records)
     db.delete(dataset)
     db.commit()
 
@@ -332,7 +340,7 @@ async def get_dataset_images(
     page: int = 1,
     limit: int = 10000,
     db: Session = Depends(get_db),
-    current_user: dict = Depends(get_current_user_dev)
+    current_user: dict = Depends(get_current_user)
 ):
     """
     Get images in a dataset with base64 encoding
@@ -390,7 +398,7 @@ async def get_dataset_images(
 async def generate_presigned_upload_urls(
     request: UploadDatasetRequest = Body(...),
     db: Session = Depends(get_db),
-    current_user: dict = Depends(get_current_user_dev)
+    current_user: dict = Depends(get_current_user)
 ):
     """
     데이터셋 생성 및 업로드용 Presigned URL 발급
@@ -448,7 +456,7 @@ async def generate_presigned_upload_urls(
     
     try:
         # Get current asset count to determine starting number
-        # This ensures sequential numbering: dataset_name_1, dataset_name_2, etc.
+        # Use max number from existing filenames to prevent conflicts with different extensions
         assets, total_count = get_assets_from_dataset(
             db=db,
             dataset_id=dataset.id,
@@ -456,7 +464,20 @@ async def generate_presigned_upload_urls(
             page=1,
             limit=100000  # Get all for counting
         )
-        start_number = total_count + 1
+        
+        # Extract maximum number from existing asset names to ensure sequential numbering
+        # This prevents conflicts like pothole_1.jpg and pothole_1.jpeg
+        max_number = 0
+        safe_dataset_name = sanitize_dataset_name_for_s3(dataset.name)
+        pattern = re.compile(rf"^{re.escape(safe_dataset_name)}_(\d+)\.")
+        
+        for asset in assets:
+            match = pattern.match(asset.name)
+            if match:
+                number = int(match.group(1))
+                max_number = max(max_number, number)
+        
+        start_number = max_number + 1
         
         # Generate presigned URLs
         urls = presigned_url_service.generate_batch_upload_urls(
@@ -493,7 +514,7 @@ async def upload_images_to_dataset(
     dataset_id: int,
     files: List[UploadFile] = File(...),
     db: Session = Depends(get_db),
-    current_user: dict = Depends(get_current_user_dev)
+    current_user: dict = Depends(get_current_user)
 ):
     """Upload images to a specific dataset"""
     dataset = db.query(Dataset).filter(Dataset.id == dataset_id).first()
@@ -504,8 +525,37 @@ async def upload_images_to_dataset(
         raise HTTPException(status_code=400, detail="No files provided")
 
     try:
-        # Upload images to S3
-        successful_uploads, failed_uploads = await file_storage.save_images_batch(files, dataset.id)
+        # 현재 dataset의 asset 개수 확인 (순번 부여를 위해)
+        # Use max number from existing filenames to prevent conflicts with different extensions
+        assets, total_count = get_assets_from_dataset(
+            db=db,
+            dataset_id=dataset.id,
+            asset_type=None,  # All assets regardless of type
+            page=1,
+            limit=100000  # Get all for counting
+        )
+        
+        # Extract maximum number from existing asset names to ensure sequential numbering
+        # This prevents conflicts like pothole_1.jpg and pothole_1.jpeg
+        max_number = 0
+        safe_dataset_name = sanitize_dataset_name_for_s3(dataset.name)
+        pattern = re.compile(rf"^{re.escape(safe_dataset_name)}_(\d+)\.")
+        
+        for asset in assets:
+            match = pattern.match(asset.name)
+            if match:
+                number = int(match.group(1))
+                max_number = max(max_number, number)
+        
+        start_number = max_number + 1
+
+        # Upload images to S3 with dataset name and sequence numbers
+        successful_uploads, failed_uploads = await file_storage.save_images_batch(
+            files, 
+            dataset.id,
+            dataset.name,  # dataset name for filename generation
+            start_number   # starting sequence number
+        )
 
         # DatasetVersion 및 Split 생성/조회
         # 에셋 추가 시 새 버전 생성
@@ -522,18 +572,15 @@ async def upload_images_to_dataset(
             metadata = upload["metadata"]
             storage_uri = metadata["relative_path"]
             
-            # SHA256 계산
-            sha256_hash = calculate_sha256_from_s3(storage_uri)
-            
-            # S3 파일명 추출 (datasets/포트홀/images/포트홀_1.jpg → 포트홀_1.jpg)
-            s3_filename = storage_uri.split('/')[-1] if '/' in storage_uri else storage_uri
+            # stored_filename은 이미 dataset_name_sequence_number.extension 형식
+            # 예: pothole_1.jpg
+            stored_filename = metadata.get("stored_filename", "")
             
             asset = Asset(
                 dataset_split_id=dataset_split.id,
-                name=s3_filename,  # ERD의 에셋명 필드 (S3 파일명)
+                name=stored_filename,  # dataset_name_sequence_number.extension 형식
                 type=AssetType.IMAGE,
                 storage_uri=storage_uri,
-                sha256=sha256_hash,
                 bytes=metadata["file_size"],
                 width=metadata.get("width"),
                 height=metadata.get("height"),
@@ -574,7 +621,7 @@ async def get_image_annotations(
     image_id: int,
     min_confidence: Optional[float] = None,
     db: Session = Depends(get_db),
-    current_user: dict = Depends(get_current_user_dev)
+    current_user: dict = Depends(get_current_user)
 ):
     """
     Get all annotations for a specific asset
@@ -603,7 +650,7 @@ async def get_image_annotations(
 async def create_annotation(
     annotation: AnnotationCreate,
     db: Session = Depends(get_db),
-    current_user: dict = Depends(get_current_user_dev)
+    current_user: dict = Depends(get_current_user)
 ):
     """
     Create a new annotation
@@ -640,7 +687,7 @@ async def create_annotation(
 async def auto_annotate_dataset(
     request: AutoAnnotationRequest,
     db: Session = Depends(get_db),
-    current_user: dict = Depends(get_current_user_dev)
+    current_user: dict = Depends(get_current_user)
 ):
     """Trigger auto-annotation for a dataset using YOLO model (via AI service)"""
     print(f"[AUTO-ANNOTATE] Received request: dataset_id={request.dataset_id}, model_id={request.model_id}, conf={getattr(request, 'confidence_threshold', 0.25)}")
@@ -860,7 +907,7 @@ async def download_single_image(
     dataset_id: int,
     image_id: int,
     db: Session = Depends(get_db),
-    current_user: dict = Depends(get_current_user_dev)
+    current_user: dict = Depends(get_current_user)
 ):
     """
     Download a single asset from a dataset
@@ -932,7 +979,7 @@ async def download_dataset(
     dataset_id: int,
     include_annotations: bool = True,
     db: Session = Depends(get_db),
-    current_user: dict = Depends(get_current_user_dev)
+    current_user: dict = Depends(get_current_user)
 ):
     """
     Download entire dataset as a ZIP file (images + videos)
@@ -1093,28 +1140,12 @@ Created: {dataset.created_at}
 # Presigned URL 기반 업로드/다운로드 엔드포인트
 # ============================================================
 
-def calculate_sha256_from_s3(s3_key: str) -> str:
-    """S3 파일의 SHA256 해시 계산"""
-    try:
-        # S3에서 파일 다운로드하여 해시 계산
-        file_data = file_storage.download_from_s3(s3_key)
-        if file_data:
-            return hashlib.sha256(file_data).hexdigest()
-        else:
-            # 파일이 없으면 s3_key 기반 임시 해시 생성
-            return hashlib.sha256(s3_key.encode()).hexdigest()[:64]
-    except Exception as e:
-        print(f"[WARN] Failed to calculate SHA256 for {s3_key}: {e}")
-        # 실패 시 s3_key 기반 임시 해시
-        return hashlib.sha256(s3_key.encode()).hexdigest()[:64]
-
-
 @router.post("/{dataset_id}/upload-complete-batch")
 async def confirm_upload_complete_batch(
     dataset_id: int,
     request: AssetUploadCompleteBatchRequest,
     db: Session = Depends(get_db),
-    current_user: dict = Depends(get_current_user_dev)
+    current_user: dict = Depends(get_current_user)
 ):
     """
     S3 업로드 완료 알림 - Asset 테이블에 메타데이터 저장
@@ -1151,43 +1182,33 @@ async def confirm_upload_complete_batch(
     successful = []
     failed = []
     
+    # 청크 처리로 메모리 사용 최적화 및 DB 연결 점유 시간 단축
+    CHUNK_SIZE = 10  # 10개씩 처리 (100 → 10으로 축소)
+    
     try:
-        for item in request.items:
-            try:
-                s3_key = item.s3_key
-                
-                # S3 파일 존재 확인
-                if not presigned_url_service.check_object_exists(s3_key):
-                    failed.append({
-                        "filename": item.original_filename,
-                        "error": "File not found in S3"
-                    })
-                    continue
-                
-                # Asset 타입 판별
-                if '/videos/' in s3_key:
-                    asset_type = AssetType.VIDEO
-                elif '/images/' in s3_key:
-                    asset_type = AssetType.IMAGE
-                else:
-                    asset_type = AssetType.IMAGE  # default
-                
-                # SHA256 계산
-                sha256_hash = calculate_sha256_from_s3(s3_key)
-                
-                # 같은 dataset_split 내에서 이미 존재하는 Asset 확인 (sha256 기준)
-                existing_asset = db.query(Asset).filter(
-                    Asset.dataset_split_id == dataset_split.id,
-                    Asset.sha256 == sha256_hash
-                ).first()
-                
-                if existing_asset:
-                    # 같은 split 내에 이미 존재하는 경우 기존 Asset 사용
-                    asset = existing_asset
-                    # storage_uri가 다를 수 있으므로 업데이트
-                    if asset.storage_uri != s3_key:
-                        asset.storage_uri = s3_key
-                else:
+        for i in range(0, len(request.items), CHUNK_SIZE):
+            chunk = request.items[i:i + CHUNK_SIZE]
+            
+            for item in chunk:
+                try:
+                    s3_key = item.s3_key
+                    
+                    # S3 파일 존재 확인
+                    if not presigned_url_service.check_object_exists(s3_key):
+                        failed.append({
+                            "filename": item.original_filename,
+                            "error": "File not found in S3"
+                        })
+                        continue
+                    
+                    # Asset 타입 판별
+                    if '/videos/' in s3_key:
+                        asset_type = AssetType.VIDEO
+                    elif '/images/' in s3_key:
+                        asset_type = AssetType.IMAGE
+                    else:
+                        asset_type = AssetType.IMAGE  # default
+                    
                     # S3 파일명 추출 (datasets/포트홀/images/포트홀_1.jpg → 포트홀_1.jpg)
                     s3_filename = s3_key.split('/')[-1] if '/' in s3_key else s3_key
                     
@@ -1197,7 +1218,6 @@ async def confirm_upload_complete_batch(
                         name=s3_filename,  # ERD의 에셋명 필드 (S3 파일명)
                         type=asset_type,
                         storage_uri=s3_key,
-                        sha256=sha256_hash,
                         bytes=item.file_size,
                         width=item.width,
                         height=item.height,
@@ -1207,27 +1227,27 @@ async def confirm_upload_complete_batch(
                         codec=None
                     )
                     db.add(asset)
-                
-                db.flush()  # ID를 즉시 생성하기 위해 flush
-                
-                successful.append({
-                    "filename": item.original_filename,
-                    "s3_key": s3_key,
-                    "asset_id": asset.id,
-                    "type": asset_type.value
-                })
-                
-            except Exception as e:
-                failed.append({
-                    "filename": getattr(item, "original_filename", "unknown"),
-                    "error": str(e)
-                })
-                print(f"[ERROR] Failed to process upload item: {e}")
-                import traceback
-                traceback.print_exc()
-        
-        # 변경사항 커밋
-        db.commit()
+                    
+                    db.flush()  # ID를 즉시 생성하기 위해 flush
+                    
+                    successful.append({
+                        "filename": item.original_filename,
+                        "s3_key": s3_key,
+                        "asset_id": asset.id,
+                        "type": asset_type.value
+                    })
+                    
+                except Exception as e:
+                    failed.append({
+                        "filename": getattr(item, "original_filename", "unknown"),
+                        "error": str(e)
+                    })
+                    print(f"[ERROR] Failed to process upload item: {e}")
+                    import traceback
+                    traceback.print_exc()
+            
+            # 청크마다 커밋하여 DB 연결 점유 시간 단축
+            db.commit()
         
         print(f"[UPLOAD] Successfully processed {len(successful)} assets for dataset {dataset_id}")
         
@@ -1257,7 +1277,7 @@ async def get_dataset_assets(
     page: int = 1,
     limit: int = 10000,
     db: Session = Depends(get_db),
-    current_user: dict = Depends(get_current_user_dev)
+    current_user: dict = Depends(get_current_user)
 ):
     """
     데이터셋의 assets(이미지/동영상) 목록 조회
@@ -1316,7 +1336,7 @@ async def get_dataset_assets(
 async def get_asset_download_url(
     asset_id: int,
     db: Session = Depends(get_db),
-    current_user: dict = Depends(get_current_user_dev)
+    current_user: dict = Depends(get_current_user)
 ):
     """
     Asset 단건 다운로드용 Presigned URL 발급
@@ -1378,7 +1398,7 @@ async def generate_presigned_download_urls_batch(
     dataset_id: int,
     request: BatchDownloadUrlRequest,
     db: Session = Depends(get_db),
-    current_user: dict = Depends(get_current_user_dev)
+    current_user: dict = Depends(get_current_user)
 ):
     """
     Asset 다운로드용 Presigned URL 발급 (단일/배치 모두 처리)
@@ -1462,7 +1482,7 @@ async def generate_presigned_download_urls_batch(
 async def get_dataset_label_classes(
     dataset_id: int,
     db: Session = Depends(get_db),
-    current_user: dict = Depends(get_current_user_dev)
+    current_user: dict = Depends(get_current_user)
 ):
     """Get all label classes for a dataset (for self-annotation)"""
     from app.models.label_ontology_version import LabelOntologyVersion
@@ -1502,7 +1522,7 @@ async def create_label_class(
     dataset_id: int,
     label_class_data: dict = Body(...),
     db: Session = Depends(get_db),
-    current_user: dict = Depends(get_current_user_dev)
+    current_user: dict = Depends(get_current_user)
 ):
     """Create a new label class for a dataset (for self-annotation)"""
     from app.models.label_ontology_version import LabelOntologyVersion
@@ -1563,7 +1583,7 @@ async def update_annotation(
     annotation_id: int,
     annotation_data: AnnotationCreate,
     db: Session = Depends(get_db),
-    current_user: dict = Depends(get_current_user_dev)
+    current_user: dict = Depends(get_current_user)
 ):
     """Update an existing annotation"""
     # Get annotation
@@ -1602,7 +1622,7 @@ async def update_annotation(
 async def delete_annotation(
     annotation_id: int,
     db: Session = Depends(get_db),
-    current_user: dict = Depends(get_current_user_dev)
+    current_user: dict = Depends(get_current_user)
 ):
     """Delete an annotation"""
     # Get annotation
@@ -1615,3 +1635,82 @@ async def delete_annotation(
     db.commit()
 
     return Response(status_code=status.HTTP_204_NO_CONTENT)
+
+
+# ========== LABEL FILE APIs (S3) ==========
+
+class LabelUploadUrlRequest(BaseModel):
+    """Label 업로드용 Presigned URL 요청"""
+    filename: str
+
+
+@router.post("/{dataset_id}/labels/presigned-upload-url")
+async def get_label_presigned_upload_url(
+    dataset_id: int,
+    request: LabelUploadUrlRequest,
+    db: Session = Depends(get_db),
+    current_user: dict = Depends(get_current_user)
+):
+    """
+    Label 파일 업로드용 Presigned URL 발급
+
+    - Label 파일은 datasets/{dataset_name}/labels/{base_filename}.txt 경로에 저장
+    - 이미지 파일명과 매핑 (예: image1.jpg -> image1.txt)
+    - 프론트엔드가 Presigned URL로 직접 S3에 업로드
+    - URL 만료 시간: 1시간
+    """
+    # 데이터셋 확인
+    dataset = db.query(Dataset).filter(Dataset.id == dataset_id).first()
+    if not dataset:
+        raise HTTPException(status_code=404, detail="Dataset not found")
+
+    # Presigned URL 생성
+    try:
+        url_data = presigned_url_service.generate_label_upload_url(
+            dataset_name=dataset.name,
+            image_filename=request.filename
+        )
+        return url_data
+    except Exception as e:
+        raise HTTPException(
+            status_code=500,
+            detail=f"Label upload URL 생성 실패: {str(e)}"
+        )
+
+
+@router.delete("/{dataset_id}/labels/{image_filename}")
+async def delete_label_file(
+    dataset_id: int,
+    image_filename: str,
+    db: Session = Depends(get_db),
+    current_user: dict = Depends(get_current_user)
+):
+    """
+    S3에서 Label 파일 삭제
+
+    - Label 파일명은 이미지 파일명에서 파생 (예: image1.jpg -> image1.txt)
+    - datasets/{dataset_name}/labels/{base_filename}.txt 경로에서 삭제
+    """
+    # 데이터셋 확인
+    dataset = db.query(Dataset).filter(Dataset.id == dataset_id).first()
+    if not dataset:
+        raise HTTPException(status_code=404, detail="Dataset not found")
+
+    # Label 파일 삭제
+    try:
+        success = presigned_url_service.delete_label_file(
+            dataset_name=dataset.name,
+            image_filename=image_filename
+        )
+        if success:
+            return {"message": "Label 파일 삭제 완료", "filename": image_filename}
+        else:
+            raise HTTPException(
+                status_code=500,
+                detail="Label 파일 삭제 실패"
+            )
+    except Exception as e:
+        raise HTTPException(
+            status_code=500,
+            detail=f"Label 파일 삭제 실패: {str(e)}"
+        )

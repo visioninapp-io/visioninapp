@@ -323,3 +323,42 @@ body {
 ::-webkit-scrollbar-thumb:hover {
     background: var(--primary-dark);
 }
+
+/* LLM Modal Format Buttons - Responsive Text */
+.format-option-btn {
+    font-size: 0.85rem;
+}
+
+.format-option-btn .format-icon {
+    font-size: 1.25rem;
+    margin-bottom: 0.5rem;
+}
+
+.format-option-btn .format-title {
+    font-size: 0.9rem;
+    font-weight: 600;
+}
+
+.format-option-btn .format-desc {
+    font-size: 0.7rem;
+}
+
+/* Medium screens and up */
+@media (min-width: 768px) {
+    .format-option-btn {
+        font-size: 1rem;
+    }
+    
+    .format-option-btn .format-icon {
+        font-size: 1.75rem;
+        margin-bottom: 0.75rem;
+    }
+    
+    .format-option-btn .format-title {
+        font-size: 1rem;
+    }
+    
+    .format-option-btn .format-desc {
+        font-size: 0.75rem;
+    }
+}

@@ -20,6 +20,9 @@
 
     <!-- Custom CSS -->
     <link rel="stylesheet" href="./css/style.css">
+
+    <!-- favicon -->
+    <link rel="icon" type="image/svg+xml" href="./css/favicon.svg">
 </head>
 <body>
     <!-- Navigation -->
@@ -38,7 +41,7 @@
                 <ul class="navbar-nav ms-auto" id="navMenu">
                     <li class="nav-item">
                         <a class="nav-link active" href="#/">
-                            <i class="bi bi-home me-1"></i>Home
+                            <i class="bi bi-house me-1"></i>Home
                         </a>
                     </li>
                     <li class="nav-item">
@@ -177,6 +180,9 @@
     <script src="./js/config/firebase-config.js"></script>
     <script src="./js/services/firebase.js"></script>
 
+    <!-- Utils -->
+    <script src="./js/utils/label-converter.js"></script>
+
     <!-- Page Components -->
     <script src="./js/pages/home.js"></script>
     <script src="./js/pages/datasets.js"></script>
@@ -187,10 +193,12 @@
     <script src="./js/pages/generate.js"></script>
     <script src="./js/pages/export.js"></script>
     <script src="./js/pages/training.js"></script>
+    <script src="./js/pages/llm-modal.js"></script>
     <script src="./js/pages/conversion.js"></script>
     <script src="./js/pages/evaluation.js"></script>
     <script src="./js/pages/deployment.js"></script>
     <script src="./js/pages/monitoring.js"></script>
+    
 
     <!-- Main App -->
     <script src="./js/app.js"></script>

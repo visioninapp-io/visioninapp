@@ -1,10 +1,22 @@
-import os, pathlib, tarfile
-import boto3
-import requests, pathlib
+import os
+import pathlib
+import tarfile
 from concurrent.futures import ThreadPoolExecutor, as_completed
-from boto3.s3.transfer import TransferConfig
 
-_s3 = boto3.client("s3", region_name=os.getenv("AWS_DEFAULT_REGION", "ap-northeast-2"))
+import boto3
+from boto3.s3.transfer import TransferConfig
+from dotenv import load_dotenv
+
+# .env 로드 (현재 실행 디렉토리 기준 또는 상위에서 자동 탐색)
+load_dotenv()
+
+# boto3 S3 클라이언트 - 명시적으로 자격 증명 주입
+_s3 = boto3.client(
+    "s3",
+    aws_access_key_id=os.getenv("AWS_ACCESS_KEY_ID"),
+    aws_secret_access_key=os.getenv("AWS_SECRET_ACCESS_KEY"),
+    region_name=os.getenv("AWS_DEFAULT_REGION", "ap-northeast-2"),
+)
 
 def _parse_s3(s3_uri: str):
     assert s3_uri.startswith("s3://")
@@ -34,12 +46,10 @@ def download_s3_folder(prefix: str, dataset_name: str,
     - prefix 예: "datasets/myset/" 또는 "datasets/myset"
     - 반환: 로컬 저장 루트 디렉토리 경로
     """
-    # 환경
     bucket = os.getenv("S3_BUCKET", "visioninapp-bucket")
     local_root = os.getenv("LOCAL_DATA_ROOT", "data/datasets")
     local_dir = os.path.join(local_root, dataset_name)
 
-    # prefix 정규화 (항상 슬래시 끝)
     prefix = prefix.strip("/")
     norm_prefix = prefix + "/"
 
@@ -50,7 +60,6 @@ def download_s3_folder(prefix: str, dataset_name: str,
         use_threads=True,
     )
 
-    # 목록 수집
     paginator = _s3.get_paginator("list_objects_v2")
     objects: list[tuple[str, int]] = []
     for page in paginator.paginate(Bucket=bucket, Prefix=norm_prefix):
@@ -74,15 +83,13 @@ def download_s3_folder(prefix: str, dataset_name: str,
     with ThreadPoolExecutor(max_workers=workers) as ex:
         futs = []
         for key, size in objects:
-            # S3 키 → prefix 기준 상대경로 (POSIX 안전)
             rel_posix = key[len(norm_prefix):] if key.startswith(norm_prefix) else key
-            # 로컬 경로로 변환
             rel_native = rel_posix.replace("/", os.sep)
             local_path = os.path.join(local_dir, rel_native)
 
             pathlib.Path(local_path).parent.mkdir(parents=True, exist_ok=True)
             if _should_skip(local_path, size):
-                continue  # 존재 & 동일 크기 → 스킵
+                continue
 
             futs.append(ex.submit(
                 _s3.download_file,

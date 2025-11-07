@@ -12,16 +12,17 @@ def main():
     payload = {
         "job_id": "abc12345",
         "dataset": {
-            "s3_prefix": "datasets/dataset_4/",
-            "name": "dataset_4"
+            "s3_prefix": "datasets/dog_sample/",
+            "name": "dog_sample"
         },
         "output": {
             "s3_bucket": "visioninapp-bucket",
-            "prefix": "result/test/"
+            "model_name": "dog_sample.pt",
+            "prefix": "models/dog_sample/"
         },
         "hyperparams": {
             "model": "yolo12n",        # 필요시 "yolov12n.pt" 등으로 교체
-            "epochs": 100,
+            "epochs": 1,
             "imgsz": 640,
             "batch": 16,
             "device": None,            # 미지정 시 Ultralytics 기본

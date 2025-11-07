@@ -134,6 +134,10 @@ class FileStorage:
         try:
             contents = await file.read()
 
+            # Calculate SHA256 hash at upload time (before S3 upload)
+            import hashlib
+            sha256_hash = hashlib.sha256(contents).hexdigest()
+
             # Validate image content if requested
             if validate_content:
                 try:
@@ -188,7 +192,8 @@ class FileStorage:
                 "height": height,
                 "format": img_format,
                 "s3_key": s3_key,
-                "s3_bucket": settings.AWS_BUCKET_NAME
+                "s3_bucket": settings.AWS_BUCKET_NAME,
+                "sha256": sha256_hash  # SHA256 hash calculated at upload time
             }
 
         except ClientError as e:

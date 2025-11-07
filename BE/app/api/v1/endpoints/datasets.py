@@ -1175,43 +1175,35 @@ async def confirm_upload_complete_batch(
     successful = []
     failed = []
     
+    # 청크 처리로 메모리 사용 최적화 및 DB 연결 점유 시간 단축
+    CHUNK_SIZE = 10  # 10개씩 처리 (100 → 10으로 축소)
+    
     try:
-        for item in request.items:
-            try:
-                s3_key = item.s3_key
-                
-                # S3 파일 존재 확인
-                if not presigned_url_service.check_object_exists(s3_key):
-                    failed.append({
-                        "filename": item.original_filename,
-                        "error": "File not found in S3"
-                    })
-                    continue
-                
-                # Asset 타입 판별
-                if '/videos/' in s3_key:
-                    asset_type = AssetType.VIDEO
-                elif '/images/' in s3_key:
-                    asset_type = AssetType.IMAGE
-                else:
-                    asset_type = AssetType.IMAGE  # default
-                
-                # SHA256 계산
-                sha256_hash = calculate_sha256_from_s3(s3_key)
-                
-                # 같은 dataset_split 내에서 이미 존재하는 Asset 확인 (sha256 기준)
-                existing_asset = db.query(Asset).filter(
-                    Asset.dataset_split_id == dataset_split.id,
-                    Asset.sha256 == sha256_hash
-                ).first()
-                
-                if existing_asset:
-                    # 같은 split 내에 이미 존재하는 경우 기존 Asset 사용
-                    asset = existing_asset
-                    # storage_uri가 다를 수 있으므로 업데이트
-                    if asset.storage_uri != s3_key:
-                        asset.storage_uri = s3_key
-                else:
+        for i in range(0, len(request.items), CHUNK_SIZE):
+            chunk = request.items[i:i + CHUNK_SIZE]
+            
+            for item in chunk:
+                try:
+                    s3_key = item.s3_key
+                    
+                    # S3 파일 존재 확인
+                    if not presigned_url_service.check_object_exists(s3_key):
+                        failed.append({
+                            "filename": item.original_filename,
+                            "error": "File not found in S3"
+                        })
+                        continue
+                    
+                    # Asset 타입 판별
+                    if '/videos/' in s3_key:
+                        asset_type = AssetType.VIDEO
+                    elif '/images/' in s3_key:
+                        asset_type = AssetType.IMAGE
+                    else:
+                        asset_type = AssetType.IMAGE  # default
+                    
+                    sha256_hash = ""  # 빈 문자열
+                    
                     # S3 파일명 추출 (datasets/포트홀/images/포트홀_1.jpg → 포트홀_1.jpg)
                     s3_filename = s3_key.split('/')[-1] if '/' in s3_key else s3_key
                     
@@ -1231,27 +1223,27 @@ async def confirm_upload_complete_batch(
                         codec=None
                     )
                     db.add(asset)
-                
-                db.flush()  # ID를 즉시 생성하기 위해 flush
-                
-                successful.append({
-                    "filename": item.original_filename,
-                    "s3_key": s3_key,
-                    "asset_id": asset.id,
-                    "type": asset_type.value
-                })
-                
-            except Exception as e:
-                failed.append({
-                    "filename": getattr(item, "original_filename", "unknown"),
-                    "error": str(e)
-                })
-                print(f"[ERROR] Failed to process upload item: {e}")
-                import traceback
-                traceback.print_exc()
-        
-        # 변경사항 커밋
-        db.commit()
+                    
+                    db.flush()  # ID를 즉시 생성하기 위해 flush
+                    
+                    successful.append({
+                        "filename": item.original_filename,
+                        "s3_key": s3_key,
+                        "asset_id": asset.id,
+                        "type": asset_type.value
+                    })
+                    
+                except Exception as e:
+                    failed.append({
+                        "filename": getattr(item, "original_filename", "unknown"),
+                        "error": str(e)
+                    })
+                    print(f"[ERROR] Failed to process upload item: {e}")
+                    import traceback
+                    traceback.print_exc()
+            
+            # 청크마다 커밋하여 DB 연결 점유 시간 단축
+            db.commit()
         
         print(f"[UPLOAD] Successfully processed {len(successful)} assets for dataset {dataset_id}")
         

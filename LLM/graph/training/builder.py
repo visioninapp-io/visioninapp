@@ -1,6 +1,8 @@
 # run_init_context.py
 from pathlib import Path
 import json
+import uuid
+
 
 from langgraph.graph import StateGraph, START, END
 
@@ -24,6 +26,7 @@ def builder(user_query: str, dataset_path: str):
         state.config_path = "training.yaml"
 
     state.run_name   = RUN_NAME
+    job_id = str(uuid.uuid4()).replace("-", "")
 
     graph = StateGraph(TrainState)
     graph.add_node("init_context", NODE_REGISTRY["init_context"])
@@ -115,5 +118,6 @@ def builder(user_query: str, dataset_path: str):
 
     final_state = train_graph.invoke({
         "user_query": user_query,
-        "dataset_version": dataset_path
+        "dataset_version": dataset_path,
+        "job_id": job_id
     })

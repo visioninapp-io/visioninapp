@@ -57,3 +57,4 @@ class TrainState(BaseModel):
     error: Optional[str] = None                    # 오류 메시지
     notes: Optional[str] = None                    # LLM이 남긴 설명/의도
     timestamp: Optional[str] = None                # 마지막 갱신 시간
+    job_id: Optional[str] = None

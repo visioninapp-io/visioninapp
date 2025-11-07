@@ -1,3 +1,5 @@
 .env
 runs/
+
 data/
+src/*.pt

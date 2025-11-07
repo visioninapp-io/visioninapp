@@ -60,15 +60,12 @@ def get_or_create_dataset_version(
     ).first()
     
     if not version:
-        # 최신 온톨로지 버전 조회 (독립적 관리)
-        ontology = get_latest_label_ontology_version(db, dataset.project_id)
-        if not ontology:
-            # 최신 온톨로지 버전이 없으면 기본 버전 생성
-            ontology = get_or_create_label_ontology_version(
-                db, 
-                dataset.project_id, 
-                "v1.0"
-            )
+        # 온톨로지 v1.0 고정 (단일 온톨로지 정책)
+        ontology = get_or_create_label_ontology_version(
+            db, 
+            dataset.project_id, 
+            "v1.0"
+        )
         
         version = DatasetVersion(
             dataset_id=dataset_id,
@@ -143,15 +140,12 @@ def create_new_dataset_version(
             # 첫 번째 버전
             version_tag = "v1.0"
     
-    # 최신 온톨로지 버전 조회 (독립적 관리)
-    ontology = get_latest_label_ontology_version(db, dataset.project_id)
-    if not ontology:
-        # 최신 온톨로지 버전이 없으면 기본 버전 생성
-        ontology = get_or_create_label_ontology_version(
-            db, 
-            dataset.project_id, 
-            "v1.0"
-        )
+    # 온톨로지 v1.0 고정 (단일 온톨로지 정책)
+    ontology = get_or_create_label_ontology_version(
+        db, 
+        dataset.project_id, 
+        "v1.0"
+    )
     
     # 새 DatasetVersion 생성
     version = DatasetVersion(
@@ -201,8 +195,8 @@ def get_assets_from_dataset(
     Returns:
         (assets, total_count)
     """
-    # 최신 DatasetVersion 조회
-    version = get_latest_dataset_version(db, dataset_id)
+    # v0 버전 조회 (고정 정책)
+    version = get_or_create_dataset_version(db, dataset_id, 'v0')
     
     if not version:
         # 버전이 없으면 빈 리스트 반환

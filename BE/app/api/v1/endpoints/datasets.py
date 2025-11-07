@@ -1,4 +1,4 @@
-from fastapi import APIRouter, Depends, HTTPException, UploadFile, File, status, Form, Body
+from fastapi import APIRouter, Depends, HTTPException, status, Body
 from fastapi.responses import StreamingResponse, Response, RedirectResponse
 from sqlalchemy.orm import Session
 from typing import List, Optional
@@ -15,9 +15,7 @@ from app.models.label_class import LabelClass
 from app.utils.project_helper import get_or_create_default_project
 from app.utils.dataset_helper import (
     get_or_create_dataset_version,
-    create_new_dataset_version,
     get_or_create_dataset_split,
-    get_latest_dataset_version,
     get_assets_from_dataset,
     format_assets_as_images,
     format_asset_as_image
@@ -509,113 +507,6 @@ async def generate_presigned_upload_urls(
         )
 
 
-@router.post("/{dataset_id}/images/upload", status_code=status.HTTP_201_CREATED)
-async def upload_images_to_dataset(
-    dataset_id: int,
-    files: List[UploadFile] = File(...),
-    db: Session = Depends(get_db),
-    current_user: dict = Depends(get_current_user)
-):
-    """Upload images to a specific dataset"""
-    dataset = db.query(Dataset).filter(Dataset.id == dataset_id).first()
-    if not dataset:
-        raise HTTPException(status_code=404, detail="Dataset not found")
-
-    if not files or len(files) == 0:
-        raise HTTPException(status_code=400, detail="No files provided")
-
-    try:
-        # 현재 dataset의 asset 개수 확인 (순번 부여를 위해)
-        # Use max number from existing filenames to prevent conflicts with different extensions
-        assets, total_count = get_assets_from_dataset(
-            db=db,
-            dataset_id=dataset.id,
-            asset_type=None,  # All assets regardless of type
-            page=1,
-            limit=100000  # Get all for counting
-        )
-        
-        # Extract maximum number from existing asset names to ensure sequential numbering
-        # This prevents conflicts like pothole_1.jpg and pothole_1.jpeg
-        max_number = 0
-        safe_dataset_name = sanitize_dataset_name_for_s3(dataset.name)
-        pattern = re.compile(rf"^{re.escape(safe_dataset_name)}_(\d+)\.")
-        
-        for asset in assets:
-            match = pattern.match(asset.name)
-            if match:
-                number = int(match.group(1))
-                max_number = max(max_number, number)
-        
-        start_number = max_number + 1
-
-        # Upload images to S3 with dataset name and sequence numbers
-        successful_uploads, failed_uploads = await file_storage.save_images_batch(
-            files, 
-            dataset.id,
-            dataset.name,  # dataset name for filename generation
-            start_number   # starting sequence number
-        )
-
-        # DatasetVersion 및 Split 생성/조회
-        # 에셋 추가 시 새 버전 생성
-        from app.utils.dataset_helper import create_new_dataset_version
-        dataset_version = create_new_dataset_version(db, dataset.id)
-        dataset_split = get_or_create_dataset_split(
-            db,
-            dataset_version.id,
-            DatasetSplitType.UNASSIGNED
-        )
-
-        # Asset 생성
-        for upload in successful_uploads:
-            metadata = upload["metadata"]
-            storage_uri = metadata["relative_path"]
-            
-            # stored_filename은 이미 dataset_name_sequence_number.extension 형식
-            # 예: pothole_1.jpg
-            stored_filename = metadata.get("stored_filename", "")
-            
-            asset = Asset(
-                dataset_split_id=dataset_split.id,
-                name=stored_filename,  # dataset_name_sequence_number.extension 형식
-                type=AssetType.IMAGE,
-                storage_uri=storage_uri,
-                bytes=metadata["file_size"],
-                width=metadata.get("width"),
-                height=metadata.get("height"),
-                duration_ms=None,
-                fps=None,
-                frame=None,
-                codec=None
-            )
-            db.add(asset)
-
-        db.commit()
-
-        # 전체 Asset 개수 계산
-        total_assets = db.query(Asset).join(DatasetSplit).filter(
-            DatasetSplit.dataset_version_id == dataset_version.id
-        ).count()
-
-        response = {
-            "message": f"Successfully uploaded {len(successful_uploads)} images",
-            "dataset_id": dataset_id,
-            "total_assets": total_assets,
-            "successful_uploads": len(successful_uploads),
-            "failed_uploads": len(failed_uploads)
-        }
-
-        if failed_uploads:
-            response["failed_files"] = failed_uploads
-
-        return response
-
-    except Exception as e:
-        db.rollback()
-        raise HTTPException(status_code=500, detail=f"Upload failed: {str(e)}")
-
-
 @router.get("/images/{image_id}/annotations", response_model=List[AnnotationResponse])
 async def get_image_annotations(
     image_id: int,
@@ -766,7 +657,8 @@ async def auto_annotate_dataset(
         print(f"[AUTO-ANNOTATE] Base upload directory: {base_upload_dir.absolute()}")
 
         # DatasetVersion에서 LabelClass 찾기
-        dataset_version = get_latest_dataset_version(db, request.dataset_id)
+        # v0 고정 정책 적용
+        dataset_version = get_or_create_dataset_version(db, request.dataset_id, 'v0')
         if not dataset_version:
             raise HTTPException(status_code=400, detail="Dataset version not found")
         
@@ -1171,8 +1063,8 @@ async def confirm_upload_complete_batch(
         raise HTTPException(status_code=404, detail="Dataset not found")
     
     # DatasetVersion 및 Split 생성/조회
-    # 에셋 추가 시 새 버전 생성
-    dataset_version = create_new_dataset_version(db, dataset_id)
+    # v0/UNASSIGNED 고정 정책 적용 (버전 고정으로 Training 안정화)
+    dataset_version = get_or_create_dataset_version(db, dataset_id, 'v0')
     dataset_split = get_or_create_dataset_split(
         db, 
         dataset_version.id, 

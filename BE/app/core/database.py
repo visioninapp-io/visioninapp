@@ -21,8 +21,8 @@ else:
 engine = create_engine(
     DATABASE_URL,
     pool_pre_ping=True,  # 연결 유효성 검사
-    pool_size=10,  # 기본 커넥션 풀 크기
-    max_overflow=20,  # 최대 오버플로우 커넥션
+    pool_size=20,  # 기본 커넥션 풀 크기
+    max_overflow=30,  # 최대 오버플로우 커넥션
     pool_recycle=3600,  # 1시간 후 커넥션 재사용
     echo=False  # SQL 로깅 (디버깅 시 True)
 )

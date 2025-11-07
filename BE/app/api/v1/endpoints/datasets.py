@@ -6,6 +6,7 @@ from pydantic import BaseModel, field_validator
 import io
 import zipfile
 import base64
+import re
 from datetime import datetime
 from app.core.database import get_db
 from app.core.auth import get_current_user
@@ -32,7 +33,7 @@ from app.schemas.dataset_asset import (
     UploadCompleteBatchRequest as AssetUploadCompleteBatchRequest
 )
 from app.utils.file_storage import file_storage
-from app.services.presigned_url_service import presigned_url_service
+from app.services.presigned_url_service import presigned_url_service, sanitize_dataset_name_for_s3
 from app.core.config import settings
 import time
 
@@ -455,7 +456,7 @@ async def generate_presigned_upload_urls(
     
     try:
         # Get current asset count to determine starting number
-        # This ensures sequential numbering: dataset_name_1, dataset_name_2, etc.
+        # Use max number from existing filenames to prevent conflicts with different extensions
         assets, total_count = get_assets_from_dataset(
             db=db,
             dataset_id=dataset.id,
@@ -463,7 +464,20 @@ async def generate_presigned_upload_urls(
             page=1,
             limit=100000  # Get all for counting
         )
-        start_number = total_count + 1
+        
+        # Extract maximum number from existing asset names to ensure sequential numbering
+        # This prevents conflicts like pothole_1.jpg and pothole_1.jpeg
+        max_number = 0
+        safe_dataset_name = sanitize_dataset_name_for_s3(dataset.name)
+        pattern = re.compile(rf"^{re.escape(safe_dataset_name)}_(\d+)\.")
+        
+        for asset in assets:
+            match = pattern.match(asset.name)
+            if match:
+                number = int(match.group(1))
+                max_number = max(max_number, number)
+        
+        start_number = max_number + 1
         
         # Generate presigned URLs
         urls = presigned_url_service.generate_batch_upload_urls(
@@ -512,6 +526,7 @@ async def upload_images_to_dataset(
 
     try:
         # 현재 dataset의 asset 개수 확인 (순번 부여를 위해)
+        # Use max number from existing filenames to prevent conflicts with different extensions
         assets, total_count = get_assets_from_dataset(
             db=db,
             dataset_id=dataset.id,
@@ -519,7 +534,20 @@ async def upload_images_to_dataset(
             page=1,
             limit=100000  # Get all for counting
         )
-        start_number = total_count + 1
+        
+        # Extract maximum number from existing asset names to ensure sequential numbering
+        # This prevents conflicts like pothole_1.jpg and pothole_1.jpeg
+        max_number = 0
+        safe_dataset_name = sanitize_dataset_name_for_s3(dataset.name)
+        pattern = re.compile(rf"^{re.escape(safe_dataset_name)}_(\d+)\.")
+        
+        for asset in assets:
+            match = pattern.match(asset.name)
+            if match:
+                number = int(match.group(1))
+                max_number = max(max_number, number)
+        
+        start_number = max_number + 1
 
         # Upload images to S3 with dataset name and sequence numbers
         successful_uploads, failed_uploads = await file_storage.save_images_batch(

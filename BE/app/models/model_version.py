@@ -2,6 +2,7 @@ from sqlalchemy import Column, Integer, String, DateTime, ForeignKey, Text, JSON
 from sqlalchemy.orm import relationship
 from datetime import datetime
 from app.core.database import Base
+from app.utils.timezone import get_kst_now_naive
 
 
 class ModelVersion(Base):
@@ -19,7 +20,7 @@ class ModelVersion(Base):
     training_config = Column(JSON, nullable=False, comment="하이퍼파라미터")
     incremental_info = Column(JSON, nullable=False, comment="증분학습 전략")
     is_frozen = Column(Boolean, nullable=False, default=False, comment="수정 불가 여부")
-    created_at = Column(DateTime, nullable=False, default=datetime.utcnow, comment="생성일")
+    created_at = Column(DateTime, nullable=False, default=get_kst_now_naive, comment="생성일")
 
     # Relationships
     model = relationship("Model", back_populates="versions", foreign_keys=[model_id])

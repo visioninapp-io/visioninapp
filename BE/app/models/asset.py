@@ -3,6 +3,7 @@ from sqlalchemy.orm import relationship
 from datetime import datetime
 import enum
 from app.core.database import Base
+from app.utils.timezone import get_kst_now_naive
 
 
 class AssetType(str, enum.Enum):
@@ -31,7 +32,7 @@ class Asset(Base):
     frame = Column(Integer, nullable=True, comment="비디오 프레임")
     codec = Column(Text, nullable=True, comment="비디오 코덱")
     
-    created_at = Column(DateTime, nullable=False, default=datetime.utcnow, comment="생성일")
+    created_at = Column(DateTime, nullable=False, default=get_kst_now_naive, comment="생성일")
 
     # Relationships
     dataset_split = relationship("DatasetSplit", back_populates="assets")

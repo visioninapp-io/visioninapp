@@ -164,8 +164,8 @@ def process_export_job(export_id: int):
         job.download_url = f"/api/v1/export/{job.id}/download"
         job.status = "completed"
 
-        from datetime import datetime
-        job.completed_at = datetime.utcnow()
+        from app.utils.timezone import get_kst_now_naive
+        job.completed_at = get_kst_now_naive()
 
         db.commit()
 

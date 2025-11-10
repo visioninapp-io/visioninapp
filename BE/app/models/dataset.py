@@ -3,6 +3,7 @@ from sqlalchemy.orm import relationship
 from datetime import datetime
 import enum
 from app.core.database import Base
+from app.utils.timezone import get_kst_now_naive
 
 
 class GeometryType(str, enum.Enum):
@@ -20,7 +21,7 @@ class Dataset(Base):
     project_id = Column(Integer, ForeignKey("project.id"), nullable=False, index=True, comment="소속 프로젝트")
     name = Column(String(255), nullable=False, comment="데이터셋명")
     description = Column(Text, nullable=True, comment="설명")
-    created_at = Column(DateTime, nullable=False, default=datetime.utcnow, comment="생성일")
+    created_at = Column(DateTime, nullable=False, default=get_kst_now_naive, comment="생성일")
 
     # Relationships
     project = relationship("Project", back_populates="datasets")
@@ -47,7 +48,7 @@ class Annotation(Base):
     source = Column(Text, nullable=True, comment="생성 주석")  # 'human', 'model'
     confidence = Column(Float, nullable=False, default=1.0, comment="모델 신뢰도")
     annotator_name = Column(Text, nullable=False, default="system", comment="라벨러")
-    created_at = Column(DateTime, nullable=False, default=datetime.utcnow, comment="생성")
+    created_at = Column(DateTime, nullable=False, default=get_kst_now_naive, comment="생성")
 
     # Relationships
     asset = relationship("Asset", back_populates="annotations")
@@ -64,7 +65,7 @@ class DatasetVersion(Base):
     ontology_version_id = Column(Integer, ForeignKey("label_ontology_version.id"), nullable=False, index=True, comment="온톨로지 버전ID")
     version_tag = Column(String(50), nullable=False, comment="버전 태그")
     is_frozen = Column(Boolean, nullable=False, default=False, comment="수정 불가 여부")
-    created_at = Column(DateTime, nullable=False, default=datetime.utcnow, comment="생성일")
+    created_at = Column(DateTime, nullable=False, default=get_kst_now_naive, comment="생성일")
 
     # Relationships
     dataset = relationship("Dataset", back_populates="versions")
@@ -92,6 +93,6 @@ class ExportJob(Base):
     status = Column(String(50), default="pending")  # pending, processing, completed, failed
     error_message = Column(Text, nullable=True)
 
-    created_at = Column(DateTime, default=datetime.utcnow)
+    created_at = Column(DateTime, default=get_kst_now_naive)
     completed_at = Column(DateTime, nullable=True)
     created_by = Column(String(100))

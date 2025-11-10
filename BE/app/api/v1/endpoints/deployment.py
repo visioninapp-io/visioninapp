@@ -3,6 +3,7 @@ from sqlalchemy.orm import Session
 from typing import List
 import uuid
 from datetime import datetime
+from app.utils.timezone import get_kst_now_naive
 from app.core.database import get_db
 from app.core.auth import get_current_user
 from app.models.deployment import Deployment
@@ -189,7 +190,7 @@ async def health_check(
     return {
         "deployment_id": deployment_id,
         "health_status": "healthy",
-        "last_check": datetime.utcnow()
+        "last_check": get_kst_now_naive()
     }
 
 
@@ -204,7 +205,7 @@ async def start_deployment(
     if not deployment:
         raise HTTPException(status_code=404, detail="Deployment not found")
 
-    deployment.deployed_at = datetime.utcnow()
+    deployment.deployed_at = get_kst_now_naive()
 
     db.commit()
 

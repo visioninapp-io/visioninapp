@@ -12,12 +12,12 @@ class ModelArtifact(Base):
     id = Column(Integer, primary_key=True, index=True)
     model_version_id = Column(Integer, ForeignKey("model_version.id"), nullable=False, index=True, comment="소속 모델 버전ID")
     
-    format = Column(Text, nullable=False, comment="형식")  # 'onnx', 'pth', 'tf'
-    device = Column(Text, nullable=False, comment="실행 환경")  # 'cpu', 'gpu'
-    precision = Column(Float, nullable=False, comment="정밀도")
-    storage_uri = Column(Text, nullable=False, comment="파일 경로")
-    sha256 = Column(String(64), nullable=False, unique=True, comment="무결성")
-    size_bytes = Column(BigInteger, nullable=False, comment="파일 크기")
+    format = Column(Text, nullable=True, comment="형식")  # 'onnx', 'pth', 'tf'
+    device = Column(Text, nullable=True, comment="실행 환경")  # 'cpu', 'gpu'
+    precision = Column(Float, nullable=True, comment="정밀도")
+    storage_uri = Column(Text, nullable=True, comment="파일 경로")
+    sha256 = Column(String(64), nullable=True, unique=True, comment="무결성")
+    size_bytes = Column(BigInteger, nullable=True, comment="파일 크기")
     opset = Column(Integer, nullable=True, comment="ONNX용 오프셋")
     ir_version = Column(Integer, nullable=True, comment="IR 버전")
     compat = Column(JSON, nullable=True, comment="환경 호환성")

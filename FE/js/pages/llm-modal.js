@@ -260,7 +260,7 @@ function updateDatasetSelect() {
     llmModalState.datasets.forEach(dataset => {
         const option = document.createElement('option');
         option.value = String(dataset.id);  // 문자열로 변환
-        option.textContent = `${dataset.name} (${dataset.total_images || 0} images)`;
+        option.textContent = `${dataset.name} (${dataset.total_assets || dataset.total_images || 0} images)`;
         // 타입을 명확히 비교
         if (String(dataset.id) === String(llmModalState.selectedDatasetId)) {
             option.selected = true;

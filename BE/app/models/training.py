@@ -3,6 +3,7 @@ from sqlalchemy.orm import relationship
 from datetime import datetime
 import enum
 from app.core.database import Base
+from app.utils.timezone import get_kst_now_naive
 
 
 class TrainingStatus(str, enum.Enum):
@@ -51,7 +52,7 @@ class TrainingJob(Base):
     training_log = Column(Text, nullable=True)
     error_message = Column(Text, nullable=True)
 
-    created_at = Column(DateTime, default=datetime.utcnow)
+    created_at = Column(DateTime, default=get_kst_now_naive)
     created_by = Column(String(100), index=True)
 
     # Relationships

@@ -2,6 +2,7 @@ from sqlalchemy import Column, Integer, String, DateTime, ForeignKey, Text, JSON
 from sqlalchemy.orm import relationship
 from datetime import datetime
 from app.core.database import Base
+from app.utils.timezone import get_kst_now_naive
 
 
 class LabelClass(Base):
@@ -14,7 +15,7 @@ class LabelClass(Base):
     shape_type = Column(Text, nullable=True, comment="형태")  # 'bbox', 'polygon', 'keypoint' 등
     color = Column(String(20), nullable=False, comment="표시색상")
     keypoint_spec = Column(JSON, nullable=True, comment="포즈스켈레톤정의")
-    created_at = Column(DateTime, nullable=False, default=datetime.utcnow, comment="생성일")
+    created_at = Column(DateTime, nullable=False, default=get_kst_now_naive, comment="생성일")
 
     # Relationships
     ontology_version = relationship("LabelOntologyVersion", back_populates="label_classes")

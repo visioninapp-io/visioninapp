@@ -3,6 +3,7 @@ from sqlalchemy.orm import relationship
 from datetime import datetime
 import enum
 from app.core.database import Base
+from app.utils.timezone import get_kst_now_naive
 
 
 class ModelFramework(str, enum.Enum):
@@ -30,7 +31,7 @@ class Model(Base):
     name = Column(String(255), nullable=False, comment="모델명")
     task = Column(Text, nullable=True, comment="작업")  # 'object_detection', 'segmentation'
     description = Column(Text, nullable=True, comment="설명")
-    created_at = Column(DateTime, nullable=False, default=datetime.utcnow, comment="생성일")
+    created_at = Column(DateTime, nullable=False, default=get_kst_now_naive, comment="생성일")
 
     # Relationships
     project = relationship("Project", back_populates="models")

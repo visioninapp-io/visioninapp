@@ -2,6 +2,7 @@ from sqlalchemy import Column, Integer, String, DateTime, ForeignKey, Boolean, T
 from sqlalchemy.orm import relationship
 from datetime import datetime
 from app.core.database import Base
+from app.utils.timezone import get_kst_now_naive
 
 
 class ModelArtifact(Base):
@@ -20,7 +21,7 @@ class ModelArtifact(Base):
     opset = Column(Integer, nullable=True, comment="ONNX용 오프셋")
     ir_version = Column(Integer, nullable=True, comment="IR 버전")
     compat = Column(JSON, nullable=True, comment="환경 호환성")
-    created_at = Column(DateTime, nullable=False, default=datetime.utcnow, comment="생성일")
+    created_at = Column(DateTime, nullable=False, default=get_kst_now_naive, comment="생성일")
     
     # Relationships
     model_version = relationship("ModelVersion", back_populates="artifacts", foreign_keys=[model_version_id])

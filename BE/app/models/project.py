@@ -2,6 +2,7 @@ from sqlalchemy import Column, Integer, String, DateTime, Text
 from sqlalchemy.orm import relationship
 from datetime import datetime
 from app.core.database import Base
+from app.utils.timezone import get_kst_now_naive
 
 
 class Project(Base):
@@ -11,7 +12,7 @@ class Project(Base):
     id = Column(Integer, primary_key=True, index=True)
     name = Column(String(255), nullable=False, comment="프로젝트명")
     description = Column(Text, nullable=True, comment="설명")
-    created_at = Column(DateTime, nullable=True, default=datetime.utcnow, comment="생성일")
+    created_at = Column(DateTime, nullable=True, default=get_kst_now_naive, comment="생성일")
 
     # Relationships
     datasets = relationship("Dataset", back_populates="project", cascade="all, delete-orphan")

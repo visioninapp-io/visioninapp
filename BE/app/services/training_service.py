@@ -13,6 +13,7 @@ from pathlib import Path
 from typing import Dict, Optional, Callable
 import json
 from datetime import datetime, timedelta
+from app.utils.timezone import get_kst_now_naive
 
 
 class ObjectDetectionDataset(Dataset):
@@ -190,7 +191,7 @@ class TrainingEngine:
 
         try:
             # Update status to running
-            self._update_job_status(TrainingStatus.RUNNING, started_at=datetime.utcnow())
+            self._update_job_status(TrainingStatus.RUNNING, started_at=get_kst_now_naive())
 
             # Extract config
             dataset_id = config['dataset_id']
@@ -306,7 +307,7 @@ class TrainingEngine:
 
                 # Update job progress
                 progress = ((epoch + 1) / epochs) * 100
-                estimated_completion = datetime.utcnow() + timedelta(
+                estimated_completion = get_kst_now_naive() + timedelta(
                     seconds=(epochs - epoch - 1) * 60  # Rough estimate
                 )
 
@@ -326,7 +327,7 @@ class TrainingEngine:
 
             # Training completed
             self._save_model(config)
-            self._update_job_status(TrainingStatus.COMPLETED, completed_at=datetime.utcnow())
+            self._update_job_status(TrainingStatus.COMPLETED, completed_at=get_kst_now_naive())
 
         except Exception as e:
             error_msg = f"Training failed: {str(e)}"
@@ -633,7 +634,7 @@ class TrainingEngine:
                         current_loss=loss,
                         current_accuracy=map50 * 100,  # Use mAP as "accuracy"
                         progress_percentage=progress,
-                        estimated_completion=datetime.utcnow() + timedelta(
+                        estimated_completion=get_kst_now_naive() + timedelta(
                             seconds=(epochs_total - epoch - 1) * 60
                         )
                     )
@@ -719,7 +720,7 @@ class TrainingEngine:
                 print(f"[YOLO Training] ⚠️ Best model not found at {best_pt}")
             
             # Update job status
-            self._update_job_status(TrainingStatus.COMPLETED, completed_at=datetime.utcnow())
+            self._update_job_status(TrainingStatus.COMPLETED, completed_at=get_kst_now_naive())
             print("[YOLO Training] ✅ All done!")
             
         except Exception as e:

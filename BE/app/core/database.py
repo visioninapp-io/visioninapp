@@ -15,7 +15,8 @@ mysql_database = settings.MYSQL_DATABASE
 if settings.DATABASE_URL and "mysql" in settings.DATABASE_URL.lower():
     DATABASE_URL = settings.DATABASE_URL
 else:
-    DATABASE_URL = f"mysql+pymysql://{mysql_user}:{mysql_password}@{mysql_host}:{mysql_port}/{mysql_database}?charset=utf8mb4"
+    # KST 타임존 설정 추가
+    DATABASE_URL = f"mysql+pymysql://{mysql_user}:{mysql_password}@{mysql_host}:{mysql_port}/{mysql_database}?charset=utf8mb4&init_command=SET time_zone='%2B09:00'"
 
 # MySQL 엔진 설정 (커넥션 풀링 및 최적화)
 engine = create_engine(

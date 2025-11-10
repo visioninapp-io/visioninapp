@@ -22,6 +22,8 @@ def _params():
 def get_channel():
     conn = pika.BlockingConnection(_params())
     ch = conn.channel()
+    ch.exchange_declare(exchange="jobs.cmd", exchange_type="topic", durable=True)
+    ch.exchange_declare(exchange="jobs.events", exchange_type="topic", durable=True)
     ch.queue_declare(queue=settings.TRAIN_REQUEST_QUEUE, durable=True)
     ch.confirm_delivery()
     ch.basic_qos(prefetch_count=10)

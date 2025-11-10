@@ -90,6 +90,9 @@ class DatasetResponse(DatasetBase):
     
     # 계산된 필드들 (동적으로 계산)
     total_assets: Optional[int] = None  # Asset 개수
+    total_images: Optional[int] = None  # 이미지 개수
+    annotated_images: Optional[int] = None  # 어노테이션된 이미지 개수
+    total_classes: Optional[int] = None  # 클래스 개수
     total_annotations: Optional[int] = None  # Annotation 개수
     version_count: Optional[int] = None  # 버전 개수
 
@@ -103,6 +106,8 @@ class DatasetStats(BaseModel):
     total_images: int  # 이미지 개수
     total_datasets: int  # 데이터셋 개수
     total_annotations: int  # 총 어노테이션 개수
+    total_classes: int  # 전체 클래스 개수
+    auto_annotation_rate: int  # 어노테이션 완료율 (퍼센트)
 
 
 class AutoAnnotationRequest(BaseModel):

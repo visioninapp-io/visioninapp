@@ -88,6 +88,7 @@ async def get_dataset_stats(
     """Get overall dataset statistics for current user"""
     # Get user's default project
     from app.models.project import Project
+    from app.models.label_ontology_version import LabelOntologyVersion
     default_project = get_or_create_default_project(db, current_user["uid"])
     
     # Get datasets from user's project
@@ -97,6 +98,7 @@ async def get_dataset_stats(
     # Asset에서 통계 계산
     total_assets = 0
     total_images = 0
+    total_annotated_images = 0
     
     if dataset_ids:
         for dataset_id in dataset_ids:
@@ -117,19 +119,41 @@ async def get_dataset_stats(
                 limit=100000
             )
             total_images += len(image_assets)
+            
+            # 어노테이션된 이미지 개수
+            annotated_asset_ids = db.query(Annotation.asset_id).join(Asset).join(DatasetSplit).join(DatasetVersion).filter(
+                DatasetVersion.dataset_id == dataset_id,
+                Asset.type == AssetType.IMAGE
+            ).distinct().all()
+            total_annotated_images += len(annotated_asset_ids)
     
     # 전체 Annotation 개수 계산
     total_annotations = db.query(Annotation).join(Asset).join(DatasetSplit).join(DatasetVersion).filter(
         DatasetVersion.dataset_id.in_(dataset_ids)
     ).count() if dataset_ids else 0
     
+    # 전체 클래스 개수 계산 - 모든 데이터셋에서 실제 사용된 클래스 고유 개수
+    total_classes = 0
+    if dataset_ids:
+        used_class_ids = db.query(Annotation.label_class_id).join(Asset).join(DatasetSplit).join(DatasetVersion).filter(
+            DatasetVersion.dataset_id.in_(dataset_ids)
+        ).distinct().all()
+        total_classes = len(used_class_ids)
+    
     total_datasets = len(user_datasets)
+    
+    # auto_annotation_rate 계산 (프론트엔드 호환성)
+    auto_annotation_rate = 0
+    if total_images > 0:
+        auto_annotation_rate = round((total_annotated_images / total_images) * 100)
 
     return {
         "total_assets": total_assets,
         "total_images": total_images,
         "total_datasets": total_datasets,
-        "total_annotations": total_annotations
+        "total_annotations": total_annotations,
+        "total_classes": total_classes,
+        "auto_annotation_rate": auto_annotation_rate
     }
 
 
@@ -161,6 +185,28 @@ async def get_datasets(
         )
         total_assets = len(assets)
         
+        # 이미지 개수 계산
+        image_assets, _ = get_assets_from_dataset(
+            db=db,
+            dataset_id=d.id,
+            asset_type=AssetType.IMAGE,
+            limit=100000
+        )
+        total_images = len(image_assets)
+        
+        # 어노테이션된 이미지 개수 계산
+        annotated_asset_ids = db.query(Annotation.asset_id).join(Asset).join(DatasetSplit).join(DatasetVersion).filter(
+            DatasetVersion.dataset_id == d.id,
+            Asset.type == AssetType.IMAGE
+        ).distinct().all()
+        annotated_images = len(annotated_asset_ids)
+        
+        # 클래스 개수 계산 - 실제로 이 데이터셋에서 사용된 클래스만 카운트
+        used_class_ids = db.query(Annotation.label_class_id).join(Asset).join(DatasetSplit).join(DatasetVersion).filter(
+            DatasetVersion.dataset_id == d.id
+        ).distinct().all()
+        total_classes = len(used_class_ids)
+        
         # Annotation 개수 계산
         total_annotations = db.query(Annotation).join(Asset).join(DatasetSplit).join(DatasetVersion).filter(
             DatasetVersion.dataset_id == d.id
@@ -176,6 +222,9 @@ async def get_datasets(
             "description": d.description,
             "created_at": d.created_at,
             "total_assets": total_assets,
+            "total_images": total_images,
+            "annotated_images": annotated_images,
+            "total_classes": total_classes,
             "total_annotations": total_annotations,
             "version_count": version_count
         })
@@ -219,6 +268,9 @@ async def create_dataset(
         "description": db_dataset.description,
         "created_at": db_dataset.created_at,
         "total_assets": 0,
+        "total_images": 0,
+        "annotated_images": 0,
+        "total_classes": 0,
         "total_annotations": 0,
         "version_count": 0
     }
@@ -244,6 +296,28 @@ async def get_dataset(
     )
     total_assets = len(assets)
     
+    # 이미지 개수 계산
+    image_assets, _ = get_assets_from_dataset(
+        db=db,
+        dataset_id=dataset.id,
+        asset_type=AssetType.IMAGE,
+        limit=100000
+    )
+    total_images = len(image_assets)
+    
+    # 어노테이션된 이미지 개수 계산
+    annotated_asset_ids = db.query(Annotation.asset_id).join(Asset).join(DatasetSplit).join(DatasetVersion).filter(
+        DatasetVersion.dataset_id == dataset.id,
+        Asset.type == AssetType.IMAGE
+    ).distinct().all()
+    annotated_images = len(annotated_asset_ids)
+    
+    # 클래스 개수 계산 - 실제로 이 데이터셋에서 사용된 클래스만 카운트
+    used_class_ids = db.query(Annotation.label_class_id).join(Asset).join(DatasetSplit).join(DatasetVersion).filter(
+        DatasetVersion.dataset_id == dataset.id
+    ).distinct().all()
+    total_classes = len(used_class_ids)
+    
     # Annotation 개수 계산
     total_annotations = db.query(Annotation).join(Asset).join(DatasetSplit).join(DatasetVersion).filter(
         DatasetVersion.dataset_id == dataset.id
@@ -259,6 +333,9 @@ async def get_dataset(
         "description": dataset.description,
         "created_at": dataset.created_at,
         "total_assets": total_assets,
+        "total_images": total_images,
+        "annotated_images": annotated_images,
+        "total_classes": total_classes,
         "total_annotations": total_annotations,
         "version_count": version_count
     }
@@ -288,6 +365,29 @@ async def update_dataset(
     # Return with computed fields
     assets, _ = get_assets_from_dataset(db=db, dataset_id=db_dataset.id, asset_type=None, limit=100000)
     total_assets = len(assets)
+    
+    # 이미지 개수 계산
+    image_assets, _ = get_assets_from_dataset(
+        db=db,
+        dataset_id=db_dataset.id,
+        asset_type=AssetType.IMAGE,
+        limit=100000
+    )
+    total_images = len(image_assets)
+    
+    # 어노테이션된 이미지 개수 계산
+    annotated_asset_ids = db.query(Annotation.asset_id).join(Asset).join(DatasetSplit).join(DatasetVersion).filter(
+        DatasetVersion.dataset_id == db_dataset.id,
+        Asset.type == AssetType.IMAGE
+    ).distinct().all()
+    annotated_images = len(annotated_asset_ids)
+    
+    # 클래스 개수 계산 - 실제로 이 데이터셋에서 사용된 클래스만 카운트
+    used_class_ids = db.query(Annotation.label_class_id).join(Asset).join(DatasetSplit).join(DatasetVersion).filter(
+        DatasetVersion.dataset_id == db_dataset.id
+    ).distinct().all()
+    total_classes = len(used_class_ids)
+    
     total_annotations = db.query(Annotation).join(Asset).join(DatasetSplit).join(DatasetVersion).filter(
         DatasetVersion.dataset_id == db_dataset.id
     ).count()
@@ -300,6 +400,9 @@ async def update_dataset(
         "description": db_dataset.description,
         "created_at": db_dataset.created_at,
         "total_assets": total_assets,
+        "total_images": total_images,
+        "annotated_images": annotated_images,
+        "total_classes": total_classes,
         "total_annotations": total_annotations,
         "version_count": version_count
     }
@@ -1376,34 +1479,26 @@ async def get_dataset_label_classes(
     db: Session = Depends(get_db),
     current_user: dict = Depends(get_current_user)
 ):
-    """Get all label classes for a dataset (for self-annotation)"""
-    from app.models.label_ontology_version import LabelOntologyVersion
-
+    """Get label classes actually used in this dataset (based on annotations)"""
     # Get dataset
     dataset = db.query(Dataset).filter(Dataset.id == dataset_id).first()
     if not dataset:
         raise HTTPException(status_code=404, detail="Dataset not found")
 
-    # Get project's default ontology version
-    # Try to find existing ontology version for this project
-    ontology_version = db.query(LabelOntologyVersion).filter(
-        LabelOntologyVersion.project_id == dataset.project_id
-    ).first()
-
-    # If no ontology version exists, create a default one
-    if not ontology_version:
-        ontology_version = LabelOntologyVersion(
-            project_id=dataset.project_id,
-            version_tag="v1.0",
-            description="Default ontology version for self-annotation"
-        )
-        db.add(ontology_version)
-        db.commit()
-        db.refresh(ontology_version)
-
-    # Get label classes for this ontology version
+    # Get label class IDs actually used in this dataset's annotations
+    used_class_ids = db.query(Annotation.label_class_id).join(Asset).join(DatasetSplit).join(DatasetVersion).filter(
+        DatasetVersion.dataset_id == dataset_id
+    ).distinct().all()
+    
+    if not used_class_ids:
+        return []
+    
+    # Extract IDs from tuples
+    class_ids = [class_id[0] for class_id in used_class_ids]
+    
+    # Get the actual LabelClass objects
     label_classes = db.query(LabelClass).filter(
-        LabelClass.ontology_version_id == ontology_version.id
+        LabelClass.id.in_(class_ids)
     ).all()
 
     return label_classes

@@ -19,8 +19,8 @@ from app.schemas.training import (
 )
 from app.rabbitmq.producer import send_train_request
 
-# LLM 기반 학습 파이프라인 (LLM 폴더에서 직접 import)
-from graph.training.builder import builder
+# LLM 기반 학습 파이프라인 (llm 모듈에서 import)
+from llm.graph.training.builder import builder
 
 logger = logging.getLogger(__name__)
 router = APIRouter()
@@ -247,6 +247,7 @@ def run_llm_training_pipeline(job_id: int, user_query: str, dataset_path: str):
     백그라운드에서 LangGraph 기반 학습 실행
     """
     import asyncio
+    from app.core.database import SessionLocal
     
     db = SessionLocal()
     job = None
@@ -259,7 +260,9 @@ def run_llm_training_pipeline(job_id: int, user_query: str, dataset_path: str):
         logger.info(f"[LLM Training] Starting job {job_id}: {user_query}")
         
         # LLM 기반 학습 파이프라인 실행
-        builder(user_query, dataset_path)
+        # builder 함수에 job_id도 전달 (builder 함수 시그니처: builder(user_query, dataset_path, job_id))
+        job_id_str = str(job_id)
+        builder(user_query, dataset_path, job_id_str)
         
         job.status = TrainingStatus.COMPLETED
         job.training_logs = "AI training completed successfully"

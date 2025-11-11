@@ -488,8 +488,8 @@ class APIService {
             // Step 1: Get presigned URLs
             const filenames = Array.from(files).map(f => f.name);
             const urlRequest = {
-                filenames,
-                content_type: files[0]?.type || 'image/jpeg'
+                filenames
+                // content_type 제거 - 백엔드가 각 파일의 확장자로 자동 감지
             };
 
             if (datasetId) {

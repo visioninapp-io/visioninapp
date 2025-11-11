@@ -808,6 +808,20 @@ class APIService {
         return this.post('/training/', data);
     }
 
+    /**
+     * LLM 기반 자연어 학습 요청
+     * @param {Object} data - LLM 학습 요청 데이터
+     * @param {string} data.user_query - 자연어 학습 요청 (예: 'yolov8n으로 20 에포크 학습해줘')
+     * @param {string} data.dataset_name - 데이터셋 이름
+     * @param {string} data.dataset_s3_prefix - S3 데이터셋 경로 (예: 'datasets/myset/')
+     * @param {string} [data.run_name] - 학습 작업 이름 (선택사항, 자동 생성)
+     * @returns {Promise} TrainingJobResponse
+     */
+    async createLLMTraining(data) {
+        console.log('[API] Starting LLM training:', data);
+        return this.post('/training/llm', data);
+    }
+
     async updateTrainingJob(id, data) {
         console.log(`[API] Updating training job ${id}:`, data);
         return this.put(`/training/${id}`, data);

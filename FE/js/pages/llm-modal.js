@@ -6,7 +6,8 @@ let llmModalState = {
     query: "",
     selectedDatasetId: null,
     datasets: [],
-    timers: []
+    timers: [],
+    trainingJob: null  // 학습 작업 정보 저장
 };
 
 // Show LLM Modal
@@ -22,7 +23,8 @@ async function showLLMModal() {
         query: "",
         selectedDatasetId: null,
         datasets: [],
-        timers: []
+        timers: [],
+        trainingJob: null
     };
 
     // Show modal first
@@ -277,22 +279,124 @@ function onDatasetChange(datasetId) {
     console.log('[LLM Modal] Selected dataset:', llmModalState.selectedDatasetId);
 }
 
-function submitQuery() {
+async function submitQuery() {
+    console.log('[LLM Modal] submitQuery() called');
+    console.log('[LLM Modal] Current state:', {
+        query: llmModalState.query,
+        selectedDatasetId: llmModalState.selectedDatasetId,
+        datasetsCount: llmModalState.datasets.length
+    });
+    
     const input = document.getElementById('llm-query-input');
     if (!input || !input.value.trim()) {
+        console.warn('[LLM Modal] Query input is empty');
         showToast('Please enter a query', 'warning');
         return;
     }
 
     // Dataset selection is required
     if (!llmModalState.selectedDatasetId) {
+        console.warn('[LLM Modal] No dataset selected');
         showToast('Please select a dataset', 'warning');
         return;
     }
+    
+    console.log('[LLM Modal] Validation passed, proceeding with API call...');
 
     llmModalState.query = input.value.trim();
-    llmModalState.currentStep = 2;
-    renderStep(2);
+    
+    // Submit button 비활성화
+    const submitBtn = document.getElementById('llm-submit-btn');
+    if (submitBtn) {
+        submitBtn.disabled = true;
+        submitBtn.innerHTML = '<span class="spinner-border spinner-border-sm me-2"></span>Starting...';
+    }
+
+    try {
+        // 데이터셋 정보 가져오기
+        const dataset = llmModalState.datasets.find(d => d.id === llmModalState.selectedDatasetId);
+        if (!dataset) {
+            showToast('Dataset not found', 'error');
+            if (submitBtn) {
+                submitBtn.disabled = false;
+                submitBtn.innerHTML = 'Start Training →';
+            }
+            return;
+        }
+
+        // S3 prefix 생성 (데이터셋에 s3_prefix가 있으면 사용, 없으면 기본값)
+        const s3Prefix = dataset.s3_prefix || dataset.s3Prefix || `datasets/${dataset.name}/`;
+        
+        console.log('[LLM Modal] Starting training with:', {
+            query: llmModalState.query,
+            dataset: dataset.name,
+            s3Prefix: s3Prefix
+        });
+
+        // apiService 확인
+        if (!apiService) {
+            console.error('[LLM Modal] apiService is not defined!');
+            showToast('API Service is not available', 'error');
+            if (submitBtn) {
+                submitBtn.disabled = false;
+                submitBtn.innerHTML = 'Start Training →';
+            }
+            return;
+        }
+
+        if (typeof apiService.createLLMTraining !== 'function') {
+            console.error('[LLM Modal] apiService.createLLMTraining is not a function!');
+            showToast('LLM training API is not available', 'error');
+            if (submitBtn) {
+                submitBtn.disabled = false;
+                submitBtn.innerHTML = 'Start Training →';
+            }
+            return;
+        }
+
+        console.log('[LLM Modal] Calling apiService.createLLMTraining...');
+        
+        // LLM 학습 요청
+        const response = await apiService.createLLMTraining({
+            user_query: llmModalState.query,
+            dataset_name: dataset.name,
+            dataset_s3_prefix: s3Prefix,
+            run_name: `llm_${dataset.name}_${Date.now()}`
+        });
+        
+        console.log('[LLM Modal] API call completed, response:', response);
+
+        console.log('[LLM Modal] Training started successfully:', response);
+        showToast('Training started successfully!', 'success');
+        
+        // 학습 작업 정보 저장
+        llmModalState.trainingJob = response;
+        
+        // Step 2로 이동
+        llmModalState.currentStep = 2;
+        renderStep(2);
+        
+    } catch (error) {
+        console.error('[LLM Modal] Training error:', error);
+        console.error('[LLM Modal] Error details:', {
+            message: error.message,
+            detail: error.detail,
+            stack: error.stack,
+            fullError: error
+        });
+        
+        const errorMessage = error.message || error.detail || error.toString();
+        showToast(`Training failed: ${errorMessage}`, 'error');
+        
+        // Submit button 다시 활성화
+        if (submitBtn) {
+            submitBtn.disabled = false;
+            submitBtn.innerHTML = 'Start Training →';
+        }
+        
+        // Step 2로 이동하지 않도록 return
+        return;
+    }
 }
 
 // Step 2: Training Progress
@@ -414,18 +518,58 @@ function startTrainingProgress() {
 
 // Step 3: Completion
 function renderCompletionStep(container) {
+    const job = llmModalState.trainingJob;
+    const jobInfo = job ? `
+        <div class="card border-0 bg-light mb-4">
+            <div class="card-body">
+                <h6 class="card-title fw-semibold mb-3">Training Job Info</h6>
+                <div class="text-start">
+                    <div class="mb-2">
+                        <small class="text-muted">Job Name:</small>
+                        <div class="fw-semibold">${job.name || 'N/A'}</div>
+                    </div>
+                    <div class="mb-2">
+                        <small class="text-muted">Status:</small>
+                        <div>
+                            <span class="badge bg-${job.status === 'RUNNING' ? 'primary' : job.status === 'COMPLETED' ? 'success' : 'secondary'}">
+                                ${job.status || 'PENDING'}
+                            </span>
+                        </div>
+                    </div>
+                    ${job.architecture ? `
+                    <div class="mb-2">
+                        <small class="text-muted">Architecture:</small>
+                        <div class="fw-semibold">${job.architecture}</div>
+                    </div>
+                    ` : ''}
+                    ${job.hyperparameters?.epochs ? `
+                    <div class="mb-2">
+                        <small class="text-muted">Epochs:</small>
+                        <div class="fw-semibold">${job.hyperparameters.epochs}</div>
+                    </div>
+                    ` : ''}
+                </div>
+            </div>
+        </div>
+    ` : '';
+
     container.innerHTML = `
         <div class="text-center">
             <div class="mb-4">
                 <span class="display-1 text-success">✓</span>
             </div>
-            <h3 class="fw-bold mb-2">Training Complete!</h3>
-            <p class="text-muted mb-5">Model training has been successfully completed.</p>
+            <h3 class="fw-bold mb-2">Training Started!</h3>
+            <p class="text-muted mb-4">Model training has been successfully started.</p>
+            
+            ${jobInfo}
 
             <!-- Action Button -->
             <div class="d-grid gap-2">
                 <button class="btn btn-primary btn-lg" onclick="resetLLMModal()">
                     🔄 New Model Training
+                </button>
+                <button class="btn btn-outline-secondary" onclick="closeLLMModal()">
+                    Close
                 </button>
             </div>
         </div>
@@ -440,6 +584,7 @@ function resetLLMModal() {
     llmModalState.currentStep = 1;
     llmModalState.query = "";
     llmModalState.selectedDatasetId = null;
+    llmModalState.trainingJob = null;
     renderStep(1);
     // Update dataset select after reset
     updateDatasetSelect();

@@ -1,7 +1,7 @@
 # subscriber_test.py
 import os, json, pika
 
-AMQP_URL    = os.getenv("RABBITMQ_URL", "amqp://admin:ssafy1234@k13s303.p.ssafy.io:5672/%2F")
+AMQP_URL    = os.getenv("RABBITMQ_URL", "amqp://admin:1234@k13s303.p.ssafy.io:5672/%2F")
 EXCHANGE    = os.getenv("RMQ_EXCHANGE", "jobs.cmd")     # topic exchange
 ROUTING_KEY = os.getenv("RMQ_ROUTING_KEY", "health.test")
 QUEUE       = os.getenv("RMQ_QUEUE", "rmq.health.q")    # 테스트용 고정 큐

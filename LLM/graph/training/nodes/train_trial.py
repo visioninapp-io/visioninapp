@@ -2,261 +2,288 @@
 from __future__ import annotations
 
 import json
-from pathlib import Path
-from typing import Any, Dict, Optional
 import os
-import shutil
+import uuid
+import time
+from typing import Any, Dict
+from tools.s3_client import download_s3
 
 from graph.training.state import TrainState
-from utils.default_weight import ensure_weight_local
 
-# Ultralytics (optional)
-try:
-    from ultralytics import YOLO  # type: ignore
-    _ULTRA = True
-except Exception:
-    _ULTRA = False
+# --- RabbitMQ settings ---
+RABBITMQ_URL    = os.getenv("RABBITMQ_URL", "amqp://admin:ssafy1234@k13s303.p.ssafy.io:5672/%2F")
+# 학습 요청 보낼 exchange (GPU 서버 main.py에서 train 큐 바인딩된 cmd용)
+EXCHANGE_CMD = os.getenv("RMQ_EXCHANGE_CMD", "jobs.cmd")
 
+# 진행률/완료 이벤트 받을 exchange (Progress에서 사용하는 events용)
+EXCHANGE_EVENTS = os.getenv("RMQ_EXCHANGE_EVENTS", "jobs.events")
+
+RK_START = "train.start"             # 학습 요청
+RK_DONE_FMT = "job.{job_id}.done"    # 완료 이벤트 routing key
+S3_BUCKET = os.getenv("S3_BUCKET", "visioninapp-bucket")
+
+# ------------------------ 유틸 ------------------------
+
+def _clean_str(val: Any) -> str | None:
+    if val is None:
+        return None
+    if isinstance(val, str):
+        s = val.strip()
+        if not s or s.lower() in ("null", "none"):
+            return None
+        return s
+    # str이 아니어도 들어오면 문자열로 캐스팅
+    s = str(val).strip()
+    return s or None
+
+
+def _select_model_from_params(params: Dict[str, Any]) -> str | None:
+    """
+    모델 이름 선택 규칙:
+    1) model
+    2) model_name
+    3) model_variant
+    4) model_varient (오타 대응)
+    위 순서대로 유효한 값을 찾는다.
+    """
+    for key in ("model", "model_name", "model_variant"):
+        v = _clean_str(params.get(key))
+        if v:
+            return v
+    return None
 
 def _merge_train_params(state: TrainState) -> Dict[str, Any]:
-    """
-    학습 파라미터 병합 규칙:
-    YAML.train 기본값  <- HPO best_trial.params  <- 사용자 train_overrides (최우선)
-    """
     cfg = state.train_cfg or {}
+
     base = (cfg.get("train") or {}).copy()
     best = ((state.best_trial or {}).get("params") or {}).copy()
     over = (state.train_overrides or {}).copy()
 
+    # 먼저 base/best/over를 한 데 합치고
     merged = {**base, **best, **over}
 
-    # 최소 세트 보정(기본값)
+    # 🔹 여기서 모델 이름을 안정적으로 뽑는다
+    selected_model = _select_model_from_params(merged)
+    if selected_model:
+        merged["model"] = selected_model
+    else:
+        # 유효한 값이 진짜로 하나도 없을 때만 기본값 사용
+        merged["model"] = "yolo12n"
+
+    # 기본값들 (이미 값 있으면 건들지 않음)
     merged.setdefault("epochs", 100)
     merged.setdefault("batch", 16)
     merged.setdefault("imgsz", 640)
-    merged.setdefault("workers", 8)
-    merged.setdefault("optimizer", merged.get("optimizer", "SGD"))
-    merged.setdefault("lr0", 0.001)
-    merged.setdefault("lrf", 0.01)
-    merged.setdefault("weight_decay", 5e-4)
-    merged.setdefault("momentum", 0.937)
-    merged.setdefault("patience", 20)
 
-    return merged
+    # None / "null" 등은 깔끔하게 제거
+    cleaned = {}
+    for k, v in merged.items():
+        if isinstance(v, str):
+            vv = v.strip()
+            if not vv or vv.lower() in ("null", "none"):
+                continue
+            cleaned[k] = vv
+        elif v is not None:
+            cleaned[k] = v
 
-def _normalize_hub_name(name: str) -> str:
-    s = (name or "").strip().lower()
-    s = s.replace("yolov11", "yolo11")  # 흔한 오타 보정, 필요시 확장
-    if s and not s.endswith((".pt", ".yaml")):
-        s += ".pt"
-    return s
-
-def _resolve_weights(state: TrainState) -> Optional[str]:
-    over = (getattr(state, "train_overrides", None) or {})
-    user_over = over.get("model_name") or over.get("weights")
-    if user_over:
-        return _normalize_hub_name(user_over)
-
-    ctx = state.context or {}
-    dm = (ctx.get("decide_mode") or {}).get("mode", "")
-    last_ckpt = getattr(state, "last_ckpt", None)
-    base_model = getattr(state, "base_model", None)
-
-    if dm == "path_resume" and last_ckpt:
-        return last_ckpt
-    if dm == "path_finetune" and base_model:
-        return base_model
-
-    mv = getattr(state, "model_variant", None)
-    if mv:
-        return _normalize_hub_name(mv)
-
-    tr = (state.train_cfg or {}).get("train") or {}
-    if tr.get("model_name"):
-        return _normalize_hub_name(tr["model_name"])
-
-    return "yolo11n.pt"  # 안전 폴백
+    return cleaned
 
 
-def _extract_metrics_ultralytics(model: Any) -> Dict[str, Any]:
+def _infer_dataset(state: TrainState) -> Dict[str, str]:
+    over = state.train_overrides or {}
+    if isinstance(over.get("dataset"), dict):
+        ds = over["dataset"]
+        name = str(ds.get("name") or "").strip()
+        s3_prefix = str(ds.get("s3_prefix") or "").strip()
+        if name and s3_prefix:
+            return {"name": name, "s3_prefix": s3_prefix}
+
+    cfg = state.train_cfg or {}
+    data_cfg = cfg.get("data") or {}
+    ver = (state.dataset_version or data_cfg.get("dataset_version") or "").strip()
+    name = ver.split("@")[0] if "@" in ver else (ver or "dataset").strip()
+    if not name:
+        name = "dataset"
+    return {"name": name, "s3_prefix": f"datasets/{name}/"}
+
+
+def _infer_output(state: TrainState, dataset_name: str) -> Dict[str, str]:
+    over = state.train_overrides or {}
+    if isinstance(over.get("output"), dict):
+        out = over["output"]
+        prefix = str(out.get("prefix") or "").strip()
+        model_name = str(out.get("model_name") or "").strip()
+        metrics_name = str(out.get("metrics_name") or "").strip() or "results.csv"
+        if prefix and model_name:
+            return {"s3_bucket": S3_BUCKET, "prefix": prefix, "model_name": model_name, "metrics_name": metrics_name}
+
+    return {
+        "prefix": f"models/{dataset_name}/train",
+        "model_name": f"{dataset_name}.pt",
+        "metrics_name": "results.csv",
+    }
+
+
+# ------------------- RabbitMQ 통신 -------------------
+
+def _publish_to_rabbitmq(message: Dict[str, Any]) -> None:
+    import pika
+
+    params = pika.URLParameters(RABBITMQ_URL)
+    conn = pika.BlockingConnection(params)
+    ch = conn.channel()
+
+    # 요청은 cmd exchange로
+    ch.exchange_declare(exchange=EXCHANGE_CMD, exchange_type="topic", durable=True)
+
+    body = json.dumps(message, ensure_ascii=False).encode("utf-8")
+    ch.basic_publish(
+        exchange=EXCHANGE_CMD,
+        routing_key=RK_START,
+        body=body,
+        properties=pika.BasicProperties(
+            delivery_mode=2,
+            content_type="application/json",
+        ),
+    )
+    conn.close()
+
+
+
+def _wait_for_done(job_id: str, timeout_sec: int = 10800) -> Dict[str, Any]:
     """
-    다양한 버전 호환을 위해 가능한 경로를 순차적으로 시도.
+    GPU 서버가 events exchange (EXCHANGE_EVENTS)에
+    job.{job_id}.done 메시지를 보낼 때까지 대기
     """
-    # 1) 최신 trainer 인터페이스
-    try:
-        tr = getattr(model, "trainer", None)
-        if tr is not None:
-            # 일부 버전: tr.metrics or tr.metrics.results_dict
-            md = getattr(tr, "metrics", None)
-            if isinstance(md, dict):
-                return md
-            if hasattr(md, "results_dict"):
-                return dict(md.results_dict)
-    except Exception:
-        pass
+    import pika
 
-    # 2) results 반환 / save_dir의 metrics.json
-    try:
-        save_dir = Path(getattr(model.trainer, "save_dir"))  # type: ignore
-        mfile = save_dir / "results.json"
-        if mfile.exists():
-            return json.loads(mfile.read_text(encoding="utf-8"))
-        mfile = save_dir / "metrics.json"
-        if mfile.exists():
-            return json.loads(mfile.read_text(encoding="utf-8"))
-    except Exception:
-        pass
+    params = pika.URLParameters(RABBITMQ_URL)
+    conn = pika.BlockingConnection(params)
+    ch = conn.channel()
 
-    return {}
+    # ✅ done/progress 는 events exchange 에서 온다
+    ch.exchange_declare(exchange=EXCHANGE_EVENTS, exchange_type="topic", durable=True)
 
+    q = ch.queue_declare(queue="", exclusive=True, auto_delete=True)
+    qname = q.method.queue
+
+    rk_done = RK_DONE_FMT.format(job_id=job_id)
+    ch.queue_bind(exchange=EXCHANGE_EVENTS, queue=qname, routing_key=rk_done)
+
+    deadline = time.monotonic() + timeout_sec
+    result_payload = None
+
+    for method, properties, body in ch.consume(qname, inactivity_timeout=1.0):
+        if method is None:
+            if time.monotonic() > deadline:
+                break
+            continue
+
+        try:
+            data = json.loads(body.decode("utf-8"))
+        except Exception:
+            data = {"status": "error", "error": "invalid JSON"}
+
+        # Progress.done 구조와 일치하는지 확인
+        if (
+            str(data.get("job_id")) == job_id
+            and data.get("event") == "done"
+        ):
+            result_payload = data
+            ch.basic_ack(method.delivery_tag)
+            break
+
+        ch.basic_ack(method.delivery_tag)
+
+    ch.queue_unbind(exchange=EXCHANGE_EVENTS, queue=qname, routing_key=rk_done)
+    conn.close()
+
+    if result_payload is None:
+        return {
+            "job_id": job_id,
+            "status": "timeout",
+            "error": "no done event received",
+        }
+    return result_payload
+
+
+
+# ------------------- 메인 노드 -------------------
 
 def train_trial(state: TrainState) -> TrainState:
     """
-    - 데이터/디바이스/AMP/가중치/하이퍼파라미터를 정리해서 실제 학습 실행
-    - 성공 시: state.model_path, state.metrics, context.train_trial 요약 채움
-    - 실패/미설치 시: 안전 폴백(모의 결과)
+    EC2 → GPU 학습 요청 발행 전용
+    절대 학습 수행 금지. 메시지 구조는 GPU 서버 요구사항에 맞춤.
     """
-    # --- 입력 준비 ---
-    data_info = state.data or {}
-    data_yaml = data_info.get("yaml_path")
-    if not data_yaml:
-        raise ValueError("[train_trial] data.yaml 경로가 없습니다. load_dataset 노드를 확인하세요.")
+    job_id = (state.job_id or str(uuid.uuid4())).replace(" ", "")
+    merged = _merge_train_params(state)
+    ds = _infer_dataset(state)
+    out = _infer_output(state, ds["name"])
 
-    params = _merge_train_params(state)
+    # split 정보가 있으면 추가
+    over = state.train_overrides or {}
 
-    ctx = state.context or {}
-    device = ctx.get("device", "cpu")
-    amp = bool(ctx.get("amp", False))
-    amp_dtype = ctx.get("amp_dtype", "fp16" if amp else "fp32")
+    if "model" not in over:
+        if "model_name" in over:
+            over["model"] = over["model_name"]
+        elif "model_variant" in over:
+            over["model"] = over["model_variant"]
 
-    weights = _resolve_weights(state)
-    freeze_backbone = bool(((state.train_cfg or {}).get("resume") or {}).get("freeze_backbone", False))
-    run_dir = Path(ctx.get("log_dir", "./runs"))
-    run_dir.mkdir(parents=True, exist_ok=True)
+    state.train_overrides = over
 
-    # Ultralytics 실행 인자 구성
-    train_args = {
-        "data": data_yaml,
-        "epochs": int(params["epochs"]),
-        "imgsz": int(params["imgsz"]),
-        "batch": int(params["batch"]),
-        "device": device,
-        "workers": int(params["workers"]),
-        "optimizer": params["optimizer"],
-        "lr0": float(params["lr0"]),
-        "lrf": float(params["lrf"]),
-        "weight_decay": float(params["weight_decay"]),
-        "momentum": float(params["momentum"]),
-        "patience": int(params["patience"]),
-        # 로깅/출력
-        "project": str(run_dir),
-        "name": "train_trial",
-        "save": True,
-        # AMP 관리 (버전에 따라 'amp'/'half'/'amp' 키가 다를 수 있어 try로)
+    split = over.get("split")
+    split_seed = over.get("split_seed")
+    move_files = over.get("move_files")
+
+    payload = {
+        "job_id": job_id,
+        "dataset": ds,
+        "output": out,
+        "hyperparams": merged,     # GPU가 학습 시 사용할 파라미터
     }
-    # train_trial.py 내부, train_args 만든 뒤에 이어서:
-    AUG_KEYS = [
-        "augment", "mosaic", "mixup", "copy_paste",
-        "fliplr", "flipud",
-        "hsv_h", "hsv_s", "hsv_v",
-        "degrees", "translate", "scale", "shear", "perspective",
-        # 필요시 확장: "erasing", "blur", ...
-    ]
-    for k in AUG_KEYS:
-        if k in params:  # params = _merge_train_params(state) 결과
-            train_args[k] = params[k]
 
-    print("[train_trial] train_args: ", json.dumps(train_args, indent=2, ensure_ascii=False))
+    # optional fields
+    if split is not None:
+        payload["split"] = split
+    if split_seed is not None:
+        payload["split_seed"] = split_seed
+    if move_files is not None:
+        payload["move_files"] = move_files
+    print(payload)
+    # 1️⃣ 학습 요청 발행
+    _publish_to_rabbitmq(payload)
 
-    # AMP/precision 힌트
-    if amp:
-        # 일부 버전은 'amp' bool, 일부는 자동 처리. 안전하게 그냥 둠.
-        train_args["amp"] = True
-    # freeze 옵션은 버전에 따라 'freeze'로 레이어 범위 전달이 일반적
-    if freeze_backbone:
-        train_args["freeze"] = 10  # 보수적 예시(백본 앞단 일부)
+    # 2️⃣ 완료 이벤트 대기 (job.{job_id}.done)
+    wait_sec = int(os.getenv("TRAIN_WAIT_TIMEOUT_SEC", "10800"))
+    result = _wait_for_done(job_id, wait_sec)
 
-    if weights:
-        weights = str(ensure_weight_local(state, _normalize_hub_name(weights)))
+    # 3️⃣ 결과 반영
+    ctx = state.context or {}
+    ctx["train_trial"] = {
+        "exchange": EXCHANGE_CMD,
+        "rk_start": RK_START,
+        "rk_done": RK_DONE_FMT.format(job_id=job_id),
+        "payload": payload,
+        "result": result,
+    }
+    state.context = ctx
+    state.job_id = job_id
 
-    # --- Ultralytics 유무에 따른 실행 ---
-    if not _ULTRA:
-        # 안전 폴백(모의)
-        state.model_path = None
-        state.metrics = {"mAP50-95": 0.0, "note": "ultralytics not installed (mock run)"}
-        c = state.context or {}
-        c["train_trial"] = {
-            "ran": False,
-            "reason": "ultralytics_not_available",
-            "device": device,
-            "amp_dtype": amp_dtype,
-            "weights": weights,
-            "args": train_args,
-        }
-        state.context = c
-        print("[train_trial] Ultralytics 미설치: 모의 결과로 대체합니다.")
+    # 4️⃣ 결과 상태 정리
+    if result.get("event") == "done":
+        artifact = result.get("artifact") or {}
+        metrics = result.get("metrics") or {}
+        state.model_path = artifact.get("model_path") or artifact.get("s3_path")
+        state.metrics = metrics
+        state.action = "TRAIN_COMPLETED"
         return state
 
-    # 실제 학습 실행
-    try:
-        print(f"[train_trial] starting: device={device} amp={amp_dtype} weights={weights}")
-        model = YOLO(weights) if weights else YOLO()  # weights 없으면 family default 사용
-        results = model.train(**train_args)
-
-        # best 가중치 경로
-        best_path = None
-        try:
-            best_path = str(Path(getattr(model.trainer, "best")))  # type: ignore
-        except Exception:
-            # save_dir/weights/best.pt 추정
-            try:
-                save_dir = Path(getattr(model.trainer, "save_dir"))  # type: ignore
-                cand = save_dir / "weights" / "best.pt"
-                if cand.exists():
-                    best_path = str(cand)
-            except Exception:
-                pass
-
-        # 메트릭 추출
-        metrics = _extract_metrics_ultralytics(model)
-        # 중요한 메트릭 별칭 보정
-        if "metrics/mAP50-95(B)" in metrics and "mAP50-95" not in metrics:
-            metrics["mAP50-95"] = metrics["metrics/mAP50-95(B)"]
-
-        state.model_path = best_path
-        state.metrics = metrics or {}
-
-        # 컨텍스트 로그
-        c = state.context or {}
-        c["train_trial"] = {
-            "ran": True,
-            "save_dir": str(getattr(model.trainer, "save_dir", "")),
-            "best_path": best_path,
-            "device": device,
-            "amp_dtype": amp_dtype,
-            "weights": weights,
-            "args": train_args,
-            "headline_metric": state.metrics.get("mAP50-95") or state.metrics.get("map50-95") or None,
-        }
-        state.context = c
-
-        print(f"[train_trial] done: best={best_path} mAP50-95={c['train_trial']['headline_metric']}")
+    elif result.get("status") == "timeout":
+        state.action = "TRAIN_TIMEOUT"
+        state.error = result.get("error")
         return state
 
-    except Exception as e:
-        # 실패 시 안전 폴백
-        state.model_path = None
-        state.metrics = {"mAP50-95": 0.0, "error": str(e)}
-        c = state.context or {}
-        c["train_trial"] = {
-            "ran": False,
-            "reason": "exception",
-            "error": str(e),
-            "device": device,
-            "amp_dtype": amp_dtype,
-            "weights": weights,
-            "args": train_args,
-        }
-        state.context = c
-        print(f"[train_trial] 학습 실패: {e}")
+    else:
+        state.action = "TRAIN_FAILED"
+        state.error = result.get("error") or "unknown error"
         return state

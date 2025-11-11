@@ -18,3 +18,5 @@ AI/converted_models/**
 *.onnx
 
 *.engine
+
+.venv/

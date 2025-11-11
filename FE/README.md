@@ -59,7 +59,7 @@ uvicorn main:app --reload
 cd FE
 python -m http.server 8080
 ```
-`http://localhost:8080`에서 접속
+`http://localhost:8080`에서 접속.
 
 #### 옵션 C: 브라우저로 직접 열기
 `FE/index.html` 파일을 더블클릭하여 브라우저로 열기

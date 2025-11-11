@@ -1,5 +1,6 @@
-from fastapi import APIRouter, Depends, HTTPException, status
+from fastapi import APIRouter, Depends, HTTPException, status, BackgroundTasks
 from sqlalchemy.orm import Session
+from typing import List, Dict, Any
 from datetime import datetime
 import logging, uuid, re
 
@@ -17,6 +18,9 @@ from app.schemas.training import (
     TrainingJobCreate, TrainingJobUpdate, TrainingJobResponse
 )
 from app.rabbitmq.producer import send_train_request
+
+# LLM 기반 학습 파이프라인 (LLM 폴더에서 직접 import)
+from graph.training.builder import builder
 
 logger = logging.getLogger(__name__)
 router = APIRouter()
@@ -160,3 +164,131 @@ async def create_training_job(
         db_job.training_logs = f"Failed to start training: {e}"
         db.commit()
         raise HTTPException(status_code=500, detail=str(e))
+
+
+@router.post("/llm", response_model=TrainingJobResponse, status_code=status.HTTP_201_CREATED)
+async def create_llm_training(
+    request: Dict[str, Any],
+    background_tasks: BackgroundTasks,
+    db: Session = Depends(get_db),
+    current_user: dict = Depends(get_current_user)
+):
+    """
+    LLM 기반 AI Modal Training
+    사용자의 자연어 요청을 분석하여 최적의 학습 파라미터 자동 설정
+    """
+    # 프론트엔드에서 user_query 또는 query로 보낼 수 있음
+    user_query = request.get("user_query") or request.get("query", "")
+    user_query = user_query.strip() if user_query else ""
+    dataset_name = request.get("dataset_name", "")
+    dataset_s3_prefix = request.get("dataset_s3_prefix", "")
+    
+    if not user_query:
+        raise HTTPException(status_code=400, detail="Query is required")
+    if not dataset_name:
+        raise HTTPException(status_code=400, detail="Dataset name is required")
+    
+    # TrainingJob 생성
+    job_name = f"AI-{dataset_name}-{datetime.utcnow().strftime('%Y%m%d%H%M%S')}"
+    db_job = TrainingJob(
+        name=job_name,
+        dataset_id=None,
+        architecture="AI-Auto",  # LLM이 자동으로 결정
+        hyperparameters={
+            "user_query": user_query,
+            "dataset_name": dataset_name,
+            "dataset_s3_prefix": dataset_s3_prefix,
+            "ai_mode": True
+        },
+        status=TrainingStatus.PENDING,
+        created_by=current_user["uid"]
+    )
+    db.add(db_job)
+    db.commit()
+    db.refresh(db_job)
+    
+    # LangGraph 학습 파이프라인을 백그라운드에서 실행
+    background_tasks.add_task(
+        run_llm_training_pipeline,
+        job_id=db_job.id,
+        user_query=user_query,
+        dataset_path=dataset_name  # or dataset_s3_prefix
+    )
+    
+    # 상태를 RUNNING으로 변경
+    db_job.status = TrainingStatus.RUNNING
+    db.commit()
+    db.refresh(db_job)
+    
+    # TrainingJobResponse 생성 (hyperparameters에서 dataset 정보 추출)
+    hp = db_job.hyperparameters or {}
+    response_data = TrainingJobResponse(
+        id=db_job.id,
+        name=db_job.name,
+        architecture=db_job.architecture,
+        model_id=db_job.model_id,
+        dataset_name=hp.get("dataset_name", dataset_name),
+        dataset_s3_prefix=hp.get("dataset_s3_prefix", dataset_s3_prefix),
+        hyperparameters=hp,
+        status=db_job.status,
+        s3_log_uri=getattr(db_job, "s3_log_uri", None),
+        external_job_id=hp.get("external_job_id"),
+        created_at=db_job.created_at,
+        created_by=db_job.created_by,
+        completed_at=db_job.completed_at,
+        error_message=db_job.error_message,
+    )
+    
+    return response_data
+
+
+def run_llm_training_pipeline(job_id: int, user_query: str, dataset_path: str):
+    """
+    백그라운드에서 LangGraph 기반 학습 실행
+    """
+    import asyncio
+    
+    db = SessionLocal()
+    job = None
+    try:
+        job = db.query(TrainingJob).filter(TrainingJob.id == job_id).first()
+        if not job:
+            logger.error(f"[LLM Training] Job {job_id} not found")
+            return
+            
+        logger.info(f"[LLM Training] Starting job {job_id}: {user_query}")
+        
+        # LLM 기반 학습 파이프라인 실행
+        builder(user_query, dataset_path)
+        
+        job.status = TrainingStatus.COMPLETED
+        job.training_logs = "AI training completed successfully"
+        db.commit()
+        logger.info(f"[LLM Training] Job {job_id} completed")
+        
+    except (asyncio.CancelledError, KeyboardInterrupt):
+        # 서버 종료 시 백그라운드 태스크가 취소되는 경우 조용히 종료
+        logger.info(f"[LLM Training] Job {job_id} cancelled (server shutdown)")
+        if job:
+            job.status = TrainingStatus.FAILED
+            job.training_logs = "Training cancelled due to server shutdown"
+            try:
+                db.commit()
+            except Exception:
+                pass  # DB 연결이 이미 끊어진 경우 무시
+        return  # 조용히 종료
+        
+    except Exception as e:
+        logger.error(f"[LLM Training] Job {job_id} failed: {e}", exc_info=True)
+        if job:
+            try:
+                job.status = TrainingStatus.FAILED
+                job.training_logs = f"AI Training failed: {str(e)}"
+                db.commit()
+            except Exception:
+                pass  # DB 연결이 이미 끊어진 경우 무시
+    finally:
+        try:
+            db.close()
+        except Exception:
+            pass  # DB 연결이 이미 끊어진 경우 무시

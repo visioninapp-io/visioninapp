@@ -53,6 +53,8 @@ class Settings(BaseSettings):
     RABBITMQ_PASSWORD: str = ""
     RABBITMQ_VHOST: str = "/"
     RABBITMQ_SSL: bool = False
+    RABBITMQ_URL: str = ""  # Full RabbitMQ URL (optional, alternative to individual fields)
+    EXCHANGE: str = "jobs.cmd"  # RabbitMQ exchange name
 
     TRAIN_REQUEST_QUEUE: str = "train_request_q"
 
@@ -69,6 +71,9 @@ class Settings(BaseSettings):
 
     AI_SERVICE_URL: str = "http://localhost:8001"   # 추후 gpu 서버로 변경
 
+    # LLM / OpenAI Configuration
+    OPENAI_API_KEY: str = ""
+    OPENAI_API_BASE: str = "https://api.openai.com/v1"
 
     class Config:
         env_file = ".env"

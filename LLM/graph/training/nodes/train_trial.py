@@ -138,10 +138,13 @@ def train_trial(state: TrainState) -> TrainState:
     EC2 → GPU 학습 요청 발행 전용
     절대 학습 수행 금지. 메시지 구조는 GPU 서버 요구사항에 맞춤.
     """
+    print("[train_trial] Starting train_trial node...")
     job_id = (state.job_id or str(uuid.uuid4())).replace(" ", "")
+    print(f"[train_trial] Job ID: {job_id}")
     merged = _merge_train_params(state)
     ds = _infer_dataset(state)
     out = _infer_output(state, ds["name"])
+    print(f"[train_trial] Dataset: {ds}, Output: {out}")
 
     # split 정보가 있으면 추가
     over = state.train_overrides or {}
@@ -165,11 +168,21 @@ def train_trial(state: TrainState) -> TrainState:
         payload["move_files"] = move_files
 
     # 1️⃣ 학습 요청 발행
-    _publish_to_rabbitmq(payload)
+    print(f"[train_trial] Publishing training request to RabbitMQ: {json.dumps(payload, ensure_ascii=False, indent=2)}")
+    try:
+        _publish_to_rabbitmq(payload)
+        print(f"[train_trial] ✅ Training request published successfully")
+    except Exception as e:
+        print(f"[train_trial] ❌ Failed to publish training request: {e}")
+        state.error = f"Failed to publish training request: {str(e)}"
+        state.action = "TRAIN_FAILED"
+        return state
 
     # 2️⃣ 완료 이벤트 대기 (job.{job_id}.done)
     wait_sec = int(os.getenv("TRAIN_WAIT_TIMEOUT_SEC", "10800"))
+    print(f"[train_trial] Waiting for GPU server response (timeout: {wait_sec}s)...")
     result = _wait_for_done(job_id, wait_sec)
+    print(f"[train_trial] Received result: {json.dumps(result, ensure_ascii=False, indent=2)}")
 
     # 3️⃣ 결과 반영
     ctx = state.context or {}

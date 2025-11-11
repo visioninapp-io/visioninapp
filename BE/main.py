@@ -1,14 +1,7 @@
-import sys
-from pathlib import Path
-
-# LLM 폴더를 Python 경로에 추가 (절대 경로로 LLM 폴더 사용)
-LLM_PATH = Path(__file__).parent.parent / "LLM"
-if LLM_PATH.exists():
-    sys.path.insert(0, str(LLM_PATH))
-
 from fastapi import FastAPI
 from fastapi.middleware.cors import CORSMiddleware
 from fastapi.staticfiles import StaticFiles
+from pathlib import Path
 from app.core.config import settings
 from app.core.database import engine, Base
 from app.core.auth import init_firebase

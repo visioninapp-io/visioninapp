@@ -18,7 +18,7 @@ load_dotenv()
 CONFIG_PATH  = "configs/training.yaml"  # 없으면 None로 두세요 (프로젝트 루트의 training.yaml 탐색)
 RUN_NAME     = "devtest"
 
-def builder(user_query: str, dataset_path: str):
+def builder(user_query: str, dataset_path: str, job_id: str):
     state = TrainState()
     if CONFIG_PATH and Path(CONFIG_PATH).exists():
         state.config_path = CONFIG_PATH
@@ -26,7 +26,6 @@ def builder(user_query: str, dataset_path: str):
         state.config_path = "training.yaml"
 
     state.run_name   = RUN_NAME
-    job_id = str(uuid.uuid4()).replace("-", "")
 
     graph = StateGraph(TrainState)
     graph.add_node("init_context", NODE_REGISTRY["init_context"])

@@ -17,6 +17,9 @@ class LabelClass(Base):
     keypoint_spec = Column(JSON, nullable=True, comment="포즈스켈레톤정의")
     created_at = Column(DateTime, nullable=False, default=get_kst_now_naive, comment="생성일")
 
+    # yolo data.yml 인덱스(0-based)
+    yolo_index = Column(Integer, nullable=True, index=True)
+
     # Relationships
     ontology_version = relationship("LabelOntologyVersion", back_populates="label_classes")
     annotations = relationship("Annotation", back_populates="label_class")

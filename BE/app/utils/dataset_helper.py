@@ -1,13 +1,16 @@
 """데이터셋 관련 헬퍼 함수"""
 from sqlalchemy.orm import Session
+from sqlalchemy import func
 from typing import Optional
-from app.models.dataset import Dataset, DatasetVersion
+from app.models.dataset import Dataset, DatasetVersion, Annotation
 from app.models.dataset_split import DatasetSplit, DatasetSplitType
 from app.models.label_ontology_version import LabelOntologyVersion
 from app.models.label_class import LabelClass
 from app.models.asset import Asset, AssetType
 from app.models.project import Project
 
+import boto3, yaml
+from app.core.config import settings
 
 def get_or_create_label_ontology_version(
     db: Session, 
@@ -257,3 +260,70 @@ def enrich_version_response(db: Session, version: DatasetVersion) -> dict:
         "splits": splits_data,
         "total_assets": total_assets
     }
+
+def ensure_yolo_index_for_dataset(db: Session, dataset_id: int, label_class: LabelClass) -> int:
+    """
+    이 데이터셋에서 label_class가 처음 쓰이는 경우 yolo_index를 0부터 순차로 부여.
+    이미 값이 있으면 그대로 반환.
+    """
+    if label_class.yolo_index is not None:
+        return label_class.yolo_index
+
+    # 이 데이터셋에서 이미 쓰인 클래스들의 최대 yolo_index
+    max_idx = (
+        db.query(func.max(LabelClass.yolo_index))
+          .join(Annotation, Annotation.label_class_id == LabelClass.id)
+          .join(Asset, Asset.id == Annotation.asset_id)
+          .join(DatasetSplit, DatasetSplit.id == Asset.dataset_split_id)
+          .join(DatasetVersion, DatasetVersion.id == DatasetSplit.dataset_version_id)
+          .filter(DatasetVersion.dataset_id == dataset_id)
+          .scalar()
+    )
+    next_idx = 0 if max_idx is None else int(max_idx) + 1
+    label_class.yolo_index = next_idx
+    db.add(label_class)
+    db.flush()  # 같은 트랜잭션 내에서 바로 보이게
+    return next_idx
+
+
+def upload_data_yaml_for_dataset(db: Session, dataset_id: int) -> str:
+    """
+    해당 데이터셋에서 '실제로 사용된' 라벨클래스들을 yolo_index 순으로 names에 넣어
+    YOLO 학습용 data.yaml을 S3에 업로드한다.
+    (train/val 경로 제외, nc + names만, names는 한 줄 배열)
+    """
+    # 데이터셋명 폴더
+    dataset = db.query(Dataset).filter(Dataset.id == dataset_id).first()
+    dataset_name = dataset.name or f"dataset_{dataset_id}"
+
+    # 사용된 클래스(어노테이션 존재 기준)만, yolo_index 오름차순
+    rows = (
+        db.query(LabelClass)
+          .join(Annotation, Annotation.label_class_id == LabelClass.id)
+          .join(Asset, Asset.id == Annotation.asset_id)
+          .join(DatasetSplit, DatasetSplit.id == Asset.dataset_split_id)
+          .join(DatasetVersion, DatasetVersion.id == DatasetSplit.dataset_version_id)
+          .filter(DatasetVersion.dataset_id == dataset_id, LabelClass.yolo_index.isnot(None))
+          .distinct()
+          .order_by(LabelClass.yolo_index.asc())
+          .all()
+    )
+    names = [lc.display_name for lc in rows]
+
+    names_inline = yaml.dump(names, allow_unicode=True, default_flow_style=True).strip()
+    body = f"nc: {len(names)}\nnames: {names_inline}\n"
+
+    s3 = boto3.client(
+        "s3",
+        aws_access_key_id=settings.AWS_ACCESS_KEY_ID,
+        aws_secret_access_key=settings.AWS_SECRET_ACCESS_KEY,
+        region_name=settings.AWS_REGION,
+    )
+    key = f"datasets/{dataset_name}/data.yaml"
+    s3.put_object(
+        Bucket=settings.AWS_BUCKET_NAME,
+        Key=key,
+        Body=body.encode("utf-8"),
+        ContentType="text/yaml"
+    )
+    return key

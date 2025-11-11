@@ -1,6 +1,7 @@
 from fastapi import APIRouter, Depends, HTTPException, status, Body
 from fastapi.responses import StreamingResponse, Response, RedirectResponse
 from sqlalchemy.orm import Session
+from sqlalchemy import func
 from typing import List, Optional
 from pydantic import BaseModel, field_validator
 import io
@@ -18,7 +19,9 @@ from app.utils.dataset_helper import (
     get_or_create_dataset_split,
     get_assets_from_dataset,
     format_assets_as_images,
-    format_asset_as_image
+    format_asset_as_image,
+    ensure_yolo_index_for_dataset,
+    upload_data_yaml_for_dataset
 )
 from app.models.asset import Asset, AssetType
 from app.models.dataset_split import DatasetSplit, DatasetSplitType
@@ -646,20 +649,24 @@ async def create_annotation(
     db: Session = Depends(get_db),
     current_user: dict = Depends(get_current_user)
 ):
-    """
-    Create a new annotation
-    """
-    # Asset 존재 확인
     asset = db.query(Asset).filter(Asset.id == annotation.asset_id).first()
     if not asset:
         raise HTTPException(status_code=404, detail="Asset not found")
 
-    # LabelClass 존재 확인
     label_class = db.query(LabelClass).filter(LabelClass.id == annotation.label_class_id).first()
     if not label_class:
         raise HTTPException(status_code=404, detail="Label class not found")
-    
-    # Annotation 생성
+
+    # dataset_id 추출
+    dataset_version = db.query(DatasetVersion).filter(
+        DatasetVersion.id == asset.dataset_split.dataset_version_id
+    ).first()
+    dataset_id = dataset_version.dataset_id
+
+    # 이 데이터셋에서 처음 쓰이면 yolo_index 부여
+    before = label_class.yolo_index
+    ensure_yolo_index_for_dataset(db, dataset_id, label_class)
+
     db_annotation = Annotation(
         asset_id=annotation.asset_id,
         label_class_id=annotation.label_class_id,
@@ -674,6 +681,11 @@ async def create_annotation(
     db.add(db_annotation)
     db.commit()
     db.refresh(db_annotation)
+
+    # 처음 등장(= yolo_index가 방금 부여)했다면 data.yaml 갱신
+    if before is None:
+        upload_data_yaml_for_dataset(db, dataset_id)
+
     return db_annotation
 
 
@@ -832,6 +844,8 @@ async def auto_annotate_dataset(
                         print(f"[AUTO-ANNOTATE] Warning: Label class '{class_name}' not found in ontology, skipping")
                         continue
                     
+                    ensure_yolo_index_for_dataset(db, request.dataset_id, label_class)    
+
                     # Geometry 데이터 구성
                     geometry_data = {
                         "bbox": {
@@ -867,7 +881,7 @@ async def auto_annotate_dataset(
 
         # Commit all annotations
         db.commit()
-        
+        upload_data_yaml_for_dataset(db, request.dataset_id)
         print(f"[AUTO-ANNOTATE] Successfully created {total_annotations} annotations for {annotated_images_count} images")
 
         result = {
@@ -1063,9 +1077,17 @@ Created: {dataset.created_at}
                                 # Create YOLO format annotation
                                 annotation_lines = []
                                 for ann in annotations:
-                                    # LabelClass에서 class_id 가져오기
+                                    # LabelClass에서 class_id 가져오기 (YOLO용 yolo_index 사용)
                                     label_class = db.query(LabelClass).filter(LabelClass.id == ann.label_class_id).first()
-                                    class_id = label_class.id if label_class else 0
+
+                                    # 이 데이터셋에서 처음 쓰이면 yolo_index 부여 (안전)
+                                    ensure_yolo_index_for_dataset(db, dataset_id, label_class) if label_class else None
+
+                                    class_id = (
+                                        label_class.yolo_index
+                                        if (label_class and label_class.yolo_index is not None)
+                                        else 0
+                                    )
                                     
                                     # Geometry에서 좌표 추출
                                     if ann.geometry and isinstance(ann.geometry, dict):
@@ -1511,19 +1533,15 @@ async def create_label_class(
     db: Session = Depends(get_db),
     current_user: dict = Depends(get_current_user)
 ):
-    """Create a new label class for a dataset (for self-annotation)"""
     from app.models.label_ontology_version import LabelOntologyVersion
 
-    # Get dataset
     dataset = db.query(Dataset).filter(Dataset.id == dataset_id).first()
     if not dataset:
         raise HTTPException(status_code=404, detail="Dataset not found")
 
-    # Get or create project's default ontology version
     ontology_version = db.query(LabelOntologyVersion).filter(
         LabelOntologyVersion.project_id == dataset.project_id
     ).first()
-
     if not ontology_version:
         ontology_version = LabelOntologyVersion(
             project_id=dataset.project_id,
@@ -1534,8 +1552,7 @@ async def create_label_class(
         db.commit()
         db.refresh(ontology_version)
 
-    # Check if label class with this name already exists
-    display_name = label_class_data.get("display_name")
+    display_name = (label_class_data.get("display_name") or "").strip()
     if not display_name:
         raise HTTPException(status_code=400, detail="display_name is required")
 
@@ -1545,20 +1562,29 @@ async def create_label_class(
     ).first()
 
     if existing_class:
-        # Return existing class instead of creating duplicate
+        # 이 데이터셋에서 처음 쓰이면 yolo_index 부여
+        ensure_yolo_index_for_dataset(db, dataset_id, existing_class)
+        db.commit()
+        upload_data_yaml_for_dataset(db, dataset_id)
         return existing_class
 
-    # Create new label class
+    # 새 클래스 생성
     new_label_class = LabelClass(
         ontology_version_id=ontology_version.id,
         display_name=display_name,
         color=label_class_data.get("color", "#FF0000"),
-        shape_type="bbox"  # Default to bbox for self-annotation
+        shape_type="bbox"
     )
-
     db.add(new_label_class)
+    db.flush()
+
+    # 이 데이터셋용 yolo_index 0-based 부여
+    ensure_yolo_index_for_dataset(db, dataset_id, new_label_class)
     db.commit()
     db.refresh(new_label_class)
+
+    # data.yaml(nc+names만) 업로드
+    upload_data_yaml_for_dataset(db, dataset_id)
 
     return new_label_class
 

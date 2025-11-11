@@ -57,22 +57,6 @@ _LLM_TEMPLATE = """
 }}
 """
 
-def _parse_with_rules(uq: str) -> Dict[str, Any]:
-    parsed: Dict[str, Any] = {}
-
-    # ... (기존 epoch, imgsz, batch 등 파싱)
-
-    # YOLO 모델 토큰 캡처
-    # 예: yolo5, yolov5, yolo5n, yolov8s, yolo11, yolo11n ...
-    m = re.search(r"(yolov?\d{1,2}[a-z0-9\-]*)", uq)
-    if m:
-        token = m.group(1)
-        norm = normalize_yolo_model_name(token)
-        if norm:
-            parsed["model_variant"] = norm
-
-    return parsed
-
 def _clean_dict(d: Dict[str, Any]) -> Dict[str, Any]:
     """None / 빈 dict 제거."""
     return {
@@ -118,7 +102,8 @@ def param_synthesizer(state: TrainState) -> TrainState:
     # --- 기본 device / precision 추론 ---
     device = (
         parsed.get("device")
-        or getattr(state, "device", "0")
+        or ctx.get("device")
+        or getattr(state, "device", None)
         or "0"
     )
 
@@ -189,7 +174,15 @@ def param_synthesizer(state: TrainState) -> TrainState:
         # LLM 미사용 시, parsed/user_overrides 기반으로만 진행
         generated = {}
 
-    raw = generated.get("model") or generated.get("model_name") or generated.get("model_variant")
+    # LLM 결과에서 모델 찾기, 없으면 parsed에서 찾기
+    raw = (
+        generated.get("model") 
+        or generated.get("model_name") 
+        or generated.get("model_variant")
+        or parsed.get("model_variant")
+        or parsed.get("model")
+        or parsed.get("model_name")
+    )
     norm = normalize_yolo_model_name(raw)
     if norm:
         generated["model"] = norm

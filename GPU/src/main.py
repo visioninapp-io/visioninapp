@@ -10,6 +10,7 @@ from core.convert_onnx import to_onnx
 from core.convert_trt import to_tensorrt
 from core.prepare_yolo_dataset import prepare_yolo_dataset  # ✅ 추가: 데이터셋 준비(분할/검증)
 
+from pika.exceptions import ChannelWrongStateError, ConnectionWrongStateError
 from dotenv import load_dotenv
 load_dotenv()
 
@@ -51,7 +52,7 @@ def handle_train(mq: MQ, exchanges: dict, msg: dict):
     """
     logger.info("[trainer] 모델 학습 시작")
     job_id = msg["job_id"]
-    _, pub_ch = mq.channel()
+    conn, pub_ch = mq.channel()
     progress = Progress(pub_ch, exchanges["events"], job_id)
     data_root, models_root = _paths()
 
@@ -112,7 +113,13 @@ def handle_train(mq: MQ, exchanges: dict, msg: dict):
         progress.error("train", str(e))
     finally:
         logger.info("[trainer] 모델 학습 종료")
-        pub_ch.close()
+        for obj in (pub_ch, conn):
+            try:
+                obj.close()
+            except (ChannelWrongStateError, ConnectionWrongStateError):
+                pass
+            except Exception:
+                pass
 
 def handle_onnx(mq: MQ, exchanges: dict, msg: dict):
     """
@@ -130,7 +137,7 @@ def handle_onnx(mq: MQ, exchanges: dict, msg: dict):
     """
     logger.info("[convert_onnx] onnx 변환 시작")
     job_id = msg["job_id"]
-    _, pub_ch = mq.channel()
+    conn, pub_ch = mq.channel()
     progress = Progress(pub_ch, exchanges["events"], job_id)
     try:
         progress.send("convert.onnx.download", 10, "download model")
@@ -152,7 +159,13 @@ def handle_onnx(mq: MQ, exchanges: dict, msg: dict):
         progress.error("convert.onnx", str(e))
     finally:
         logger.info("[convert_onnx] onnx 변환 종료")
-        pub_ch.close()
+        for obj in (pub_ch, conn):
+            try:
+                obj.close()
+            except (ChannelWrongStateError, ConnectionWrongStateError):
+                pass
+            except Exception:
+                pass
 
 def handle_trt(mq: MQ, exchanges: dict, msg: dict):
     """
@@ -175,7 +188,7 @@ def handle_trt(mq: MQ, exchanges: dict, msg: dict):
     """
     logger.info("[convert_trt] tensorRT 변환 시작")
     job_id = msg["job_id"]
-    _, pub_ch = mq.channel()
+    conn, pub_ch = mq.channel()
     progress = Progress(pub_ch, exchanges["events"], job_id)
     try:
         # PT 모델 다운로드
@@ -208,7 +221,13 @@ def handle_trt(mq: MQ, exchanges: dict, msg: dict):
         progress.error("convert.trt", str(e))
     finally:
         logger.info("[convert_trt] tensorRT 변환 종료")
-        pub_ch.close()
+        for obj in (pub_ch, conn):
+            try:
+                obj.close()
+            except (ChannelWrongStateError, ConnectionWrongStateError):
+                pass
+            except Exception:
+                pass
 
 def main():
     cfg = load_config(CFG_PATH)

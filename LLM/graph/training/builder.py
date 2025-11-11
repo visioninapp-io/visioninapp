@@ -18,7 +18,7 @@ load_dotenv()
 CONFIG_PATH  = "configs/training.yaml"  # 없으면 None로 두세요 (프로젝트 루트의 training.yaml 탐색)
 RUN_NAME     = "devtest"
 
-def builder(user_query: str, dataset_path: str):
+def builder(user_query: str, dataset_path: str, job_id: str):
     state = TrainState()
     if CONFIG_PATH and Path(CONFIG_PATH).exists():
         state.config_path = CONFIG_PATH
@@ -44,11 +44,11 @@ def builder(user_query: str, dataset_path: str):
     graph.add_node("train_trial", NODE_REGISTRY["train_trial"])
     graph.add_node("evaluate_trial", NODE_REGISTRY["evaluate_trial"])
     graph.add_node("regression_gate", NODE_REGISTRY["regression_gate"])
-    graph.add_node("human_review", NODE_REGISTRY["human_review"])
+    # graph.add_node("human_review", NODE_REGISTRY["human_review"])
     graph.add_node("registry_publish", NODE_REGISTRY["registry_publish"])
     graph.add_node("onnx_converter", NODE_REGISTRY["onnx_converter"])
     graph.add_node("tensor_converter", NODE_REGISTRY["tensor_converter"])
-    graph.add_node("evaluate_convert_model", NODE_REGISTRY["evaluate_convert_model"])
+    # graph.add_node("evaluate_convert_model", NODE_REGISTRY["evaluate_convert_model"])
 
     graph.add_edge(START, "init_context")
 
@@ -81,24 +81,25 @@ def builder(user_query: str, dataset_path: str):
     graph.add_edge("select_best", "train_trial")
     graph.add_edge("train_trial", "evaluate_trial")
     graph.add_edge("evaluate_trial", "regression_gate")
-    graph.add_conditional_edges(
-        "regression_gate",
-        route_gate,
-        {
-            "publish": "registry_publish",
-            "human_review": "human_review",
-        }
-    )
-    graph.add_conditional_edges(
-        "human_review",
-        route_interrupt_action,
-        {
-            "approve": "registry_publish",
-            "minor_tune": "train_trial",
-            "widen_search": "search_space_builder",
-            "abort": END,
-        }
-    )
+    graph.add_edge("regression_gate", "registry_publish")
+    # graph.add_conditional_edges(
+    #     "regression_gate",
+    #     route_gate,
+    #     {
+    #         "publish": "registry_publish",
+    #         "human_review": "human_review",
+    #     }
+    # )
+    # graph.add_conditional_edges(
+    #     "human_review",
+    #     route_interrupt_action,
+    #     {
+    #         "approve": "registry_publish",
+    #         "minor_tune": "train_trial",
+    #         "widen_search": "search_space_builder",
+    #         "abort": END,
+    #     }
+    # )
 
     graph.add_conditional_edges(
         "registry_publish",
@@ -110,9 +111,9 @@ def builder(user_query: str, dataset_path: str):
         }
     )
 
-    graph.add_edge("onnx_converter", "evaluate_convert_model")
-    graph.add_edge("tensor_converter", "evaluate_convert_model")
-    graph.add_edge("evaluate_convert_model", END)
+    graph.add_edge("onnx_converter", END)
+    graph.add_edge("tensor_converter", END)
+    # graph.add_edge("evaluate_convert_model", END)
 
     train_graph = graph.compile()
 

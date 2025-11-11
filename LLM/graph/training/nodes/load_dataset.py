@@ -1,18 +1,11 @@
 # graph/training/nodes/load_dataset.py
+#import
 from __future__ import annotations
 
 import os
 from typing import Any, Dict
 
 from graph.training.state import TrainState
-
-# BE의 settings를 사용 (가능한 경우)
-try:
-    from app.core.config import settings
-    _HAS_BE_SETTINGS = True
-except ImportError:
-    _HAS_BE_SETTINGS = False
-    settings = None
 
 # boto3는 EC2에서 S3 접근용 (Credentials는 .env / 환경변수로 세팅)
 try:
@@ -25,19 +18,14 @@ except Exception:
 
 
 def _use_s3() -> bool:
-    # BE의 settings를 우선 사용, 없으면 환경변수 확인
-    if _HAS_BE_SETTINGS and hasattr(settings, 'USE_S3_STORAGE'):
-        return settings.USE_S3_STORAGE
     return os.getenv("USE_S3_STORAGE", "false").lower() == "true"
 
 
 def _get_bucket() -> str:
-    # BE의 settings.AWS_BUCKET_NAME을 우선 사용, 없으면 S3_BUCKET 환경변수 확인
-    if _HAS_BE_SETTINGS and hasattr(settings, 'AWS_BUCKET_NAME') and settings.AWS_BUCKET_NAME:
-        return settings.AWS_BUCKET_NAME
+    # .env: S3_BUCKET=visioninapp-bucket
     bucket = os.getenv("S3_BUCKET", "").strip()
     if not bucket:
-        raise RuntimeError("AWS_BUCKET_NAME 또는 S3_BUCKET 환경변수가 설정되어 있지 않습니다.")
+        raise RuntimeError("S3_BUCKET 환경변수가 설정되어 있지 않습니다.")
     return bucket
 
 

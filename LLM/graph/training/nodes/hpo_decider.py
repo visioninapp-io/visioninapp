@@ -76,7 +76,12 @@ def hpo_decider(state: TrainState) -> TrainState:
     cfg  = state.train_cfg or {}
     # 여기서부터는 오버라이드 우선
     epochs    = int(_param("epochs",    100, state, cfg))
-    batch     = int(_param("batch",      16, state, cfg))
+    _raw_batch = _param("batch", 16, state, cfg)
+    try:
+        batch = int(_raw_batch) if _raw_batch not in (None, "null", "") else 16
+    except ValueError:
+        batch = 16
+
     imgsz     = int(_param("imgsz",     640, state, cfg))
     optimizer =     _param("optimizer", "SGD", state, cfg)
 

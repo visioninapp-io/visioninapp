@@ -33,7 +33,7 @@ def _norm_optimizer(v):
         return None
     return str(v)
 
-def train_yolo(data_dir: str, out_dir: str, hyper: dict) -> dict:
+def train_yolo(data_dir: str, out_dir: str, hyper: dict, progress=None) -> dict:
     """
     hyper 예시(모두 선택적):
     {
@@ -115,6 +115,45 @@ def train_yolo(data_dir: str, out_dir: str, hyper: dict) -> dict:
     if mixup is not None:
         train_kwargs["mixup"] = mixup
 
+    if progress is not None:
+        def _on_fit_epoch_end(trainer):
+            """
+            Ultralytics Trainer 객체에서 epoch/metrics를 뽑아서 그대로 전송.
+            """
+            try:
+                epoch = int(getattr(trainer, "epoch", 0))
+            except Exception:
+                epoch = 0
+
+            # "모든 내용" 그대로 보내기
+            metrics = {}
+
+            # trainer.metrics가 dict이면 그대로 사용
+            m = getattr(trainer, "metrics", None)
+            if isinstance(m, dict):
+                metrics = m
+            elif m is not None:
+                # dict가 아니면 문자열로라도 던져줌
+                metrics = {"metrics": str(m)}
+
+            # 추가로 자주 쓰는 값들 있으면 합쳐줌 (중복 키는 metrics 쪽이 우선)
+            extra = {}
+            for attr in ("tloss", "nloss", "loss", "lr", "ema_loss"):
+                if hasattr(trainer, attr):
+                    extra[attr] = getattr(trainer, attr)
+            if extra:
+                extra.update(metrics)
+                metrics = extra
+
+            try:
+                progress.train_log(epoch=epoch, metrics=metrics)
+            except Exception as e:
+                # 로깅만 하고 학습은 계속
+                print(f"[progress] train.log publish failed: {e}")
+
+        # 콜백 등록 (Ultralytics v8/v12 공통 on_fit_epoch_end 훅)
+        model.add_callback("on_fit_epoch_end", _on_fit_epoch_end)
+    
     r = model.train(**train_kwargs)
 
     # 간단 메트릭 반환

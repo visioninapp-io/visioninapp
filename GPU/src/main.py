@@ -87,7 +87,7 @@ def handle_train(mq: MQ, exchanges: dict, msg: dict):
         # --- 학습 ---
         progress.send("train.start", 20, "start training")
         out_dir = os.path.join(models_root, dataset_name)
-        metrics = train_yolo(local_dir, out_dir, msg.get("hyperparams", {}))
+        metrics = train_yolo(local_dir, out_dir, msg.get("hyperparams", {}) or {}, progress=progress)
 
         # --- 결과 업로드 ---
         best_pt = os.path.join(out_dir, "train", "weights", "best.pt")

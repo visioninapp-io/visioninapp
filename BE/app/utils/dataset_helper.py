@@ -263,26 +263,32 @@ def enrich_version_response(db: Session, version: DatasetVersion) -> dict:
 
 def ensure_yolo_index_for_dataset(db: Session, dataset_id: int, label_class: LabelClass) -> int:
     """
-    이 데이터셋에서 label_class가 처음 쓰이는 경우 yolo_index를 0부터 순차로 부여.
+    이 데이터셋(dataset_id)에서 label_class가 처음 쓰이는 경우
+    yolo_index를 0부터 순차로 부여한다.
     이미 값이 있으면 그대로 반환.
     """
-    if label_class.yolo_index is not None:
+    # 이미 부여된 값이 있으면 그대로 반환
+    if label_class.yolo_index not in (None, 0):
         return label_class.yolo_index
 
-    # 이 데이터셋에서 이미 쓰인 클래스들의 최대 yolo_index
+    ontology_version_id = label_class.ontology_version_id
+
+    # label_class → label_ontology_version → dataset_version → dataset 연결
     max_idx = (
         db.query(func.max(LabelClass.yolo_index))
-          .join(Annotation, Annotation.label_class_id == LabelClass.id)
-          .join(Asset, Asset.id == Annotation.asset_id)
-          .join(DatasetSplit, DatasetSplit.id == Asset.dataset_split_id)
-          .join(DatasetVersion, DatasetVersion.id == DatasetSplit.dataset_version_id)
-          .filter(DatasetVersion.dataset_id == dataset_id)
-          .scalar()
+        .join(LabelOntologyVersion, LabelOntologyVersion.id == LabelClass.ontology_version_id)
+        .join(DatasetVersion, DatasetVersion.ontology_version_id == LabelOntologyVersion.id)
+        .filter(DatasetVersion.dataset_id == dataset_id)
+        .scalar()
     )
+
     next_idx = 0 if max_idx is None else int(max_idx) + 1
     label_class.yolo_index = next_idx
+
     db.add(label_class)
-    db.flush()  # 같은 트랜잭션 내에서 바로 보이게
+    db.commit()  # flush만 하면 안 보일 수 있으므로 commit 필수
+
+    print(f"[YOLO_INDEX] dataset_id={dataset_id}, class='{label_class.display_name}', index={next_idx}")
     return next_idx
 
 

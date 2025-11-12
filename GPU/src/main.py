@@ -1,5 +1,6 @@
-import os, tempfile, uuid, time
+import os, tempfile, uuid, time, json
 from pathlib import Path
+from typing import Any, Dict, Optional
 from utils.config import load_config
 from utils.logger import setup_logger
 from mq import MQ, declare_topology, start_consumer_thread
@@ -17,6 +18,20 @@ load_dotenv()
 CFG_PATH = os.path.join(os.path.dirname(__file__), "..", "configs", "app.yaml")
 S3_BUCKET = os.getenv("S3_BUCKET", "visioninapp-bucket")
 logger = setup_logger()
+
+def _ensure_dir(p: str) -> None:
+    Path(p).mkdir(parents=True, exist_ok=True)
+
+def _write_json(path: str, obj: Dict[str, Any]) -> None:
+    with open(path, "w", encoding="utf-8") as f:
+        json.dump(obj, f, ensure_ascii=False, indent=2)
+
+def _as_model_name_from_onnx_filename(onnx_filename: str) -> str:
+    # "my_model.onnx" -> "my_model"
+    base = Path(onnx_filename).name
+    if base.lower().endswith(".onnx"):
+        base = base[:-5]
+    return base or "model"
 
 def _paths():
     data_root  = os.getenv("LOCAL_DATA_ROOT", "/data")
@@ -124,16 +139,25 @@ def handle_train(mq: MQ, exchanges: dict, msg: dict):
 
 def handle_onnx(mq: MQ, exchanges: dict, msg: dict):
     """
+    메시지 예:
     {
-        "job_id": job_id,
+        "job_id": "...",
         "model": {
-            "s3_uri": "s3://visioninapp-bucket/result/test/best.pt"
+            "s3_uri": "s3://.../best.pt"
         },
         "output": {
             "s3_bucket": "visioninapp-bucket",
             "prefix": "result/test_onnx/<job_id>",
-            "model_name": "my_model.onnx"
-        }
+            "model_name": "my_model.onnx"   # ← 이 파일명에서 model_name을 유추
+        },
+        "hyperparams": { "imgsz": 640, "dynamic": true, "half": false, "simplify": true, "precision": "fp16" },
+        # (선택) 평가지표 전달 방식 1: 바로 dict로
+        "metrics": {
+            "map50": 0.83, "map50_95": 0.52, "precision": 0.87, "recall": 0.78, "best_epoch": 93
+        },
+        # (선택) 평가지표 전달 방식 2: S3에 저장된 파일 경로
+        "metrics_s3_uri": "s3://visioninapp-bucket/runs/exp123/metrics.json"
+        # 또는 csv일 수도 있음: "s3://.../results.csv"
     }
     """
     logger.info("[convert_onnx] onnx 변환 시작")
@@ -145,16 +169,81 @@ def handle_onnx(mq: MQ, exchanges: dict, msg: dict):
         tmp_pt = os.path.join(tempfile.gettempdir(), f"{job_id}.pt")
         download_s3(msg["model"]["s3_uri"], tmp_pt)
 
-        progress.send("convert.onnx", 60, "export to onnx")
-        out_onnx = os.path.join(tempfile.gettempdir(), f"{job_id}.onnx")
-        to_onnx(tmp_pt, out_onnx)
+        # --- 하이퍼파라미터 수집 ---
+        hp = (msg.get("hyperparams") or {})
+        def _as_bool(v):
+            if isinstance(v, bool): return v
+            if isinstance(v, str): return v.strip().lower() in ("1","true","yes","y","t")
+            return bool(v)
+        def _as_int(v, default=None):
+            try: return int(v)
+            except Exception: return default
 
+        imgsz     = _as_int(hp.get("imgsz"), 640)
+        dynamic   = _as_bool(hp.get("dynamic")) if "dynamic" in hp else True
+        simplify  = _as_bool(hp.get("simplify")) if "simplify" in hp else False
+        half_flag = _as_bool(hp.get("half")) if "half" in hp else False
+        precision = (hp.get("precision") or "").strip().lower() or None
+        opset     = _as_int(hp.get("opset"), 13)
+
+        if precision == "fp16":
+            half_flag = True
+        elif precision == "fp32":
+            half_flag = False
+
+        # --- ONNX 내보내기 ---
+        progress.send("convert.onnx", 60, f"export to onnx (imgsz={imgsz}, dynamic={dynamic}, half={half_flag}, simplify={simplify})")
+        tmp_onnx = os.path.join(tempfile.gettempdir(), f"{job_id}.onnx")
+        to_onnx(
+            tmp_pt, tmp_onnx,
+            opset=opset, imgsz=imgsz, dynamic=dynamic, half=half_flag, simplify=simplify, precision=precision
+        )
+
+        # --- 로컬 표준 경로로 정리: {LOCAL_MODELS_ROOT}/models/{model_name}/onnx/ ---
+        onnx_filename = msg["output"].get("model_name", "best.onnx")
+        model_name_for_dir = _as_model_name_from_onnx_filename(onnx_filename)
+
+        models_root = os.getenv("LOCAL_MODELS_ROOT", "/models")
+        local_dir = os.path.join(models_root, "models", model_name_for_dir, "onnx")
+        _ensure_dir(local_dir)
+
+        local_onnx_path = os.path.join(local_dir, onnx_filename)
+        # temp -> local copy
+        Path(local_onnx_path).write_bytes(Path(tmp_onnx).read_bytes())
+
+        # --- 평가지표 저장 ---
+        metrics_obj = msg.get("metrics")
+        metrics_s3  = msg.get("metrics_s3_uri")
+
+        if isinstance(metrics_obj, dict) and metrics_obj:
+            _write_json(os.path.join(local_dir, "metrics.json"), metrics_obj)
+        elif isinstance(metrics_s3, str) and metrics_s3.startswith("s3://"):
+            # 확장자에 따라 저장 파일명 결정
+            if metrics_s3.lower().endswith(".csv"):
+                download_s3(metrics_s3, os.path.join(local_dir, "metrics.csv"))
+            else:
+                # json로 가정
+                download_s3(metrics_s3, os.path.join(local_dir, "metrics.json"))
+        else:
+            logger.info("[convert_onnx] 전달된 평가지표가 없어 로컬 저장을 건너뜀")
+
+        # --- S3 업로드(기존 로직 유지) ---
         progress.send("upload", 90, "upload onnx")
-        bucket = S3_BUCKET
-        model_name = msg["output"].get("model_name", "best.onnx")
-        key = f"{msg['output']['prefix'].rstrip('/')}/{model_name}"
-        upload_s3(out_onnx, bucket, key)
-        progress.done({"s3_bucket": bucket, "s3_uri": f"s3://{bucket}/{key}"})
+        bucket = S3_BUCKET  # 기존 상수 사용
+        key = f"{msg['output']['prefix'].rstrip('/')}/{onnx_filename}"
+        upload_s3(local_onnx_path, bucket, key)
+
+        # (선택) 평가지표도 함께 업로드하고 싶다면:
+        # if Path(os.path.join(local_dir, "metrics.json")).exists():
+        #     upload_s3(os.path.join(local_dir, "metrics.json"), bucket, f"{msg['output']['prefix'].rstrip('/')}/metrics.json")
+        # if Path(os.path.join(local_dir, "metrics.csv")).exists():
+        #     upload_s3(os.path.join(local_dir, "metrics.csv"), bucket, f"{msg['output']['prefix'].rstrip('/')}/metrics.csv")
+
+        progress.done({
+            "s3_bucket": bucket,
+            "s3_uri": f"s3://{bucket}/{key}",
+            "local_dir": local_dir
+        })
     except Exception as e:
         logger.exception("onnx failed")
         progress.error("convert.onnx", str(e))

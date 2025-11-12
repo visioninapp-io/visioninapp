@@ -928,6 +928,15 @@ async function saveAllAnnotations() {
                 showToast(`Saved ${successCount} annotation(s) but failed to upload some labels to S3`, 'warning');
             }
 
+            // After all annotations are saved and label files are uploaded, regenerate data.yaml
+            try {
+                const datasetId = selfAnnotationState.datasetId;
+                await apiService.post(`/datasets/${datasetId}/upload-data-yaml`);
+                console.log(`[SelfAnnotation] data.yaml regenerated successfully for dataset ${datasetId}`);
+            } catch (yamlError) {
+                console.error('[SelfAnnotation] Failed to regenerate data.yaml:', yamlError);
+            }
+
             // Update current image display
             redrawCanvas();
             updateAnnotationsList();
@@ -1194,3 +1203,4 @@ async function autoSaveCurrentAnnotations() {
         console.error('[SelfAnnotation] Auto-save error:', error);
     }
 }
+

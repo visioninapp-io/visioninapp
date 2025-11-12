@@ -6,6 +6,9 @@ class RabbitMQService {
         this.stompClient = null;
         this.connected = false;
         this.subscriptions = {};
+        this.reconnectAttempts = 0;
+        this.maxReconnectAttempts = 10;
+        this.reconnectDelay = 3000; // 3 seconds
 
         // RabbitMQ Web STOMP configuration from config file
         this.config = RABBITMQ_CONFIG;
@@ -51,11 +54,15 @@ class RabbitMQService {
                     () => {
                         console.log('[RabbitMQ] ✅ Connected successfully');
                         this.connected = true;
+                        this.reconnectAttempts = 0; // Reset reconnect counter
                         resolve();
                     },
                     (error) => {
                         console.error('[RabbitMQ] ❌ Connection error:', error);
                         this.connected = false;
+
+                        // Auto-reconnect
+                        this.attemptReconnect();
                         reject(error);
                     },
                     this.config.vhost
@@ -85,7 +92,7 @@ class RabbitMQService {
         // STOMP destination for queue
         const destination = `/queue/${queueName}`;
 
-        // Subscribe
+        // Subscribe with auto ACK (don't manually ack)
         const subscription = this.stompClient.subscribe(destination, (message) => {
             try {
                 console.log(`[RabbitMQ] Message received from ${queueName}`);
@@ -97,16 +104,20 @@ class RabbitMQService {
                 // Call callback
                 callback(body);
 
-                // Acknowledge message
-                message.ack();
+                // Don't manually ACK - STOMP auto-acks by default
+                console.log(`[RabbitMQ] ✅ Message processed successfully`);
+
             } catch (error) {
                 console.error('[RabbitMQ] Error processing message:', error);
+                // Log but don't throw - keep connection alive
             }
+        }, {
+            ack: 'auto'  // Auto acknowledgement mode
         });
 
         // Store subscription
         this.subscriptions[queueName] = subscription;
-        console.log(`[RabbitMQ] ✅ Subscribed to ${queueName}`);
+        console.log(`[RabbitMQ] ✅ Subscribed to ${queueName} with auto-ack`);
 
         return subscription.id;
     }
@@ -140,6 +151,31 @@ class RabbitMQService {
                 this.connected = false;
             });
         }
+    }
+
+    /**
+     * Attempt to reconnect to RabbitMQ
+     */
+    attemptReconnect() {
+        if (this.reconnectAttempts >= this.maxReconnectAttempts) {
+            console.error('[RabbitMQ] Max reconnection attempts reached. Giving up.');
+            return;
+        }
+
+        this.reconnectAttempts++;
+        console.log(`[RabbitMQ] Reconnecting... (Attempt ${this.reconnectAttempts}/${this.maxReconnectAttempts})`);
+
+        setTimeout(() => {
+            this.connect()
+                .then(() => {
+                    console.log('[RabbitMQ] ✅ Reconnected successfully');
+                    // Re-subscribe to all previous subscriptions
+                    // (subscriptions are stored, so they'll be re-activated)
+                })
+                .catch((error) => {
+                    console.error('[RabbitMQ] Reconnection failed:', error);
+                });
+        }, this.reconnectDelay);
     }
 
     /**

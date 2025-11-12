@@ -68,44 +68,71 @@ class TrainingPage {
     handleTrainingMetrics(message) {
         /**
          * Handle real-time training metrics from RabbitMQ
-         * Expected message format:
+         * GPU message format:
          * {
-         *   job_id: int,
-         *   epoch: int,
-         *   loss: float,
-         *   accuracy: float,
-         *   ... other metrics
+         *   job_id: "uuid-string",  // external_job_id
+         *   epoch: 0,
+         *   metrics: {
+         *     loss: 38.22,
+         *     "metrics/precision(B)": 0.0,
+         *     "metrics/mAP50(B)": 0.0,
+         *     ...
+         *   }
          * }
          */
         console.log('[Training Page] Received training metrics:', message);
 
-        const { job_id, epoch, loss, accuracy } = message;
+        try {
+            const { job_id: external_job_id, epoch, metrics } = message;
 
-        // Store metrics
-        if (!this.metricsData[job_id]) {
-            this.metricsData[job_id] = [];
-        }
-        this.metricsData[job_id].push({
-            epoch,
-            loss,
-            accuracy,
-            timestamp: new Date()
-        });
+            // Extract loss and accuracy from metrics object
+            const loss = metrics?.loss || metrics?.tloss?.[0] || 0;
+            const accuracy = metrics?.['metrics/mAP50(B)'] || metrics?.['metrics/precision(B)'] || 0;
 
-        // Update selected job metrics if it's the current one
-        if (this.selectedJob && this.selectedJob.id === job_id) {
-            this.updateMetricsDisplay(message);
-        }
+            console.log(`[Training Page] Metrics: epoch=${epoch}, loss=${loss}, accuracy=${accuracy}`);
 
-        // Update job in trainingJobs list
-        const job = this.trainingJobs.find(j => j.id === job_id);
-        if (job) {
-            job.current_epoch = epoch;
-            job.current_loss = loss;
-            job.current_accuracy = accuracy;
+            // Just update the display with received metrics (no job matching)
+            this.updateMetricsDisplay({ epoch, loss, accuracy: accuracy * 100 });
 
-            // Update stats display
-            this.updateStatsDisplay();
+            // // TODO: Enable job matching when external_job_id mapping is ready
+            // // Find job by external_job_id (UUID stored in hyperparameters)
+            // const job = this.trainingJobs.find(j =>
+            //     j.hyperparameters?.external_job_id === external_job_id
+            // );
+            //
+            // if (!job) {
+            //     console.warn('[Training Page] No job found for external_job_id:', external_job_id);
+            //     return;
+            // }
+            //
+            // console.log(`[Training Page] Matched job ${job.id} (${job.name}) with metrics:`, { epoch, loss, accuracy });
+            //
+            // // Store metrics by internal job ID
+            // if (!this.metricsData[job.id]) {
+            //     this.metricsData[job.id] = [];
+            // }
+            // this.metricsData[job.id].push({
+            //     epoch,
+            //     loss,
+            //     accuracy: accuracy * 100, // Convert to percentage
+            //     timestamp: new Date()
+            // });
+            //
+            // // Update job metrics
+            // job.current_epoch = epoch;
+            // job.current_loss = loss;
+            // job.current_accuracy = accuracy * 100;
+            //
+            // // Update UI if this is the selected job
+            // if (this.selectedJob && this.selectedJob.id === job.id) {
+            //     this.updateMetricsDisplay({ epoch, loss, accuracy: accuracy * 100 });
+            // }
+            //
+            // // Update stats display
+            // this.updateStatsDisplay();
+
+        } catch (error) {
+            console.error('[Training Page] Error handling training metrics:', error);
         }
     }
 
@@ -113,43 +140,86 @@ class TrainingPage {
         /**
          * Update UI with new metrics
          */
-        const { epoch, loss, accuracy } = metrics;
+        try {
+            const { epoch, loss, accuracy } = metrics;
 
-        // Update stat cards
-        const accuracyEl = document.getElementById('stat-accuracy');
-        const lossEl = document.getElementById('stat-loss');
-        const epochEl = document.getElementById('stat-epoch');
+            console.log(`[Training Page] Updating UI: epoch=${epoch}, loss=${loss?.toFixed(4)}, accuracy=${accuracy?.toFixed(2)}%`);
 
-        if (accuracyEl) accuracyEl.textContent = (accuracy * 100).toFixed(2) + '%';
-        if (lossEl) lossEl.textContent = loss.toFixed(4);
-        if (epochEl) epochEl.textContent = epoch;
+            // Update stat cards (correct IDs from HTML)
+            const accuracyEl = document.getElementById('live-accuracy');
+            const lossEl = document.getElementById('live-loss');
+            const epochEl = document.getElementById('live-epoch');
 
-        // Update chart
-        this.updateChartWithNewData(metrics);
+            console.log('[Training Page] Elements found:', {
+                accuracyEl: !!accuracyEl,
+                lossEl: !!lossEl,
+                epochEl: !!epochEl
+            });
+
+            // accuracy is already * 100 from handleTrainingMetrics
+            if (accuracyEl) {
+                accuracyEl.textContent = accuracy.toFixed(2) + '%';
+                console.log(`[Training Page] Updated accuracy: ${accuracyEl.textContent}`);
+            } else {
+                console.warn('[Training Page] ⚠️ live-accuracy element not found!');
+            }
+
+            if (lossEl) {
+                lossEl.textContent = loss.toFixed(4);
+                console.log(`[Training Page] Updated loss: ${lossEl.textContent}`);
+            } else {
+                console.warn('[Training Page] ⚠️ live-loss element not found!');
+            }
+
+            if (epochEl) {
+                epochEl.textContent = `Epoch ${epoch}/${this.selectedJob?.total_epochs || '?'}`;
+                console.log(`[Training Page] Updated epoch: ${epochEl.textContent}`);
+            } else {
+                console.warn('[Training Page] ⚠️ live-epoch element not found!');
+            }
+
+            // Update chart
+            this.updateChartWithNewData(metrics);
+
+            console.log('[Training Page] ✅ UI updated successfully');
+
+        } catch (error) {
+            console.error('[Training Page] Error updating metrics display:', error);
+        }
     }
 
     updateChartWithNewData(metrics) {
         /**
          * Add new data point to chart
          */
-        if (!this.chart) return;
+        try {
+            if (!this.chart) {
+                console.warn('[Training Page] Chart not initialized, skipping chart update');
+                return;
+            }
 
-        const { epoch, loss, accuracy } = metrics;
+            const { epoch, loss, accuracy } = metrics;
 
-        // Add new data point
-        this.chart.data.labels.push(epoch);
-        this.chart.data.datasets[0].data.push(loss);
-        this.chart.data.datasets[1].data.push(accuracy * 100);
+            // Add new data point (accuracy already * 100 from handleTrainingMetrics)
+            this.chart.data.labels.push(`Epoch ${epoch}`);
+            this.chart.data.datasets[0].data.push(loss);
+            this.chart.data.datasets[1].data.push(accuracy); // Already percentage
 
-        // Keep only last 50 points for performance
-        if (this.chart.data.labels.length > 50) {
-            this.chart.data.labels.shift();
-            this.chart.data.datasets[0].data.shift();
-            this.chart.data.datasets[1].data.shift();
+            // Keep only last 50 points for performance
+            if (this.chart.data.labels.length > 50) {
+                this.chart.data.labels.shift();
+                this.chart.data.datasets[0].data.shift();
+                this.chart.data.datasets[1].data.shift();
+            }
+
+            // Update chart
+            this.chart.update('none'); // Use 'none' animation for better performance
+
+            console.log(`[Training Page] Chart updated: ${this.chart.data.labels.length} points`);
+
+        } catch (error) {
+            console.error('[Training Page] Error updating chart:', error);
         }
-
-        // Update chart
-        this.chart.update('none'); // Use 'none' animation for better performance
     }
 
     updateStatsDisplay() {

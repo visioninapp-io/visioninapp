@@ -752,6 +752,16 @@ class APIService {
         return this.post(`/models/${modelId}/predict`, data);
     }
 
+    async convertToOnnx(payload) {
+        console.log('[API] Converting model to ONNX...', payload);
+        return this.post('/conversion/onnx', payload);
+    }
+
+    async convertToTensorRT(payload) {
+        console.log('[API] Converting model to TensorRT...', payload);
+        return this.post('/conversion/trt', payload);
+    }
+
     async convertModel(modelId, targetFramework, optimizationLevel, precision) {
         // NOTE: Backend does not have a /models/convert endpoint
         // Model conversion should be handled differently or via training/export

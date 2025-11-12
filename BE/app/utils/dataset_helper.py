@@ -313,9 +313,6 @@ def upload_data_yaml_for_dataset(db: Session, dataset_id: int) -> str:
     - 보장 로직 없음: dataset_version/ontology 없으면 에러 발생
     - 어노테이션 없으면 nc:0, names:[] (의도된 동작)
     """
-    # 같은 세션에서 yolo_index 갱신 직후라면 flush로 동기화
-    db.flush()
-
     dataset = db.query(Dataset).filter(Dataset.id == dataset_id).first()
     if not dataset:
         raise ValueError(f"dataset_id={dataset_id} not found")
@@ -351,7 +348,7 @@ def upload_data_yaml_for_dataset(db: Session, dataset_id: int) -> str:
 
     names = [lc.display_name for lc in rows_used]  # 어노테이션 없으면 빈 리스트(정상)
     names_inline = yaml.safe_dump(
-        names, allow_unicode=True, default_flow_style=True
+        names, allow_unicode=True, default_flow_style=True, default_style="'"
     ).strip()
     body = f"nc: {len(names)}\nnames: {names_inline}\n"
 

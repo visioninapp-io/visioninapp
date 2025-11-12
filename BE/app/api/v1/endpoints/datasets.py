@@ -682,11 +682,14 @@ async def create_annotation(
     )
     db.add(db_annotation)
     db.commit()
-    db.refresh(db_annotation)
-
+    
     # 처음 등장(= yolo_index가 방금 부여)했다면 data.yaml 갱신
+    # 세션 캐싱 문제 때문에 expire 시킨후 새로 조회 
+    db.expire_all()
     if before is None:
         upload_data_yaml_for_dataset(db, dataset_id)
+
+    db.refresh(db_annotation)
 
     return db_annotation
 

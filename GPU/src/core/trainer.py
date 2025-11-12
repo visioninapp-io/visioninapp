@@ -33,6 +33,49 @@ def _norm_optimizer(v):
         return None
     return str(v)
 
+# core/trainer.py (콜백 내부에 추가)
+def _to_jsonable(x):
+    # 로컬 import로 선택 의존성 처리
+    try:
+        import numpy as np
+    except Exception:
+        np = None
+    try:
+        import torch  # type: ignore
+    except Exception:
+        torch = None
+
+    # torch.Tensor 처리
+    if torch is not None and isinstance(x, torch.Tensor):
+        try:
+            return x.item() if x.ndim == 0 else x.detach().cpu().tolist()
+        except Exception:
+            return str(x)
+
+    # numpy 처리
+    if np is not None:
+        if isinstance(x, np.generic):
+            return x.item()
+        if isinstance(x, np.ndarray):
+            return x.tolist()
+
+    # 컬렉션 재귀 처리
+    if isinstance(x, dict):
+        return {k: _to_jsonable(v) for k, v in x.items()}
+    if isinstance(x, (list, tuple)):
+        return [_to_jsonable(v) for v in x]
+
+    # 기본형
+    if isinstance(x, (str, int, float, bool)) or x is None:
+        return x
+
+    # 마지막 수단
+    try:
+        return float(x)
+    except Exception:
+        return str(x)
+
+
 def train_yolo(data_dir: str, out_dir: str, hyper: dict, progress=None) -> dict:
     """
     hyper 예시(모두 선택적):
@@ -117,41 +160,31 @@ def train_yolo(data_dir: str, out_dir: str, hyper: dict, progress=None) -> dict:
 
     if progress is not None:
         def _on_fit_epoch_end(trainer):
-            """
-            Ultralytics Trainer 객체에서 epoch/metrics를 뽑아서 그대로 전송.
-            """
             try:
                 epoch = int(getattr(trainer, "epoch", 0))
             except Exception:
                 epoch = 0
 
-            # "모든 내용" 그대로 보내기
-            metrics = {}
-
-            # trainer.metrics가 dict이면 그대로 사용
+            # 원본 메트릭 수집
+            raw_metrics = {}
             m = getattr(trainer, "metrics", None)
             if isinstance(m, dict):
-                metrics = m
+                raw_metrics.update(m)
             elif m is not None:
-                # dict가 아니면 문자열로라도 던져줌
-                metrics = {"metrics": str(m)}
+                raw_metrics["metrics"] = str(m)
 
-            # 추가로 자주 쓰는 값들 있으면 합쳐줌 (중복 키는 metrics 쪽이 우선)
-            extra = {}
-            for attr in ("tloss", "nloss", "loss", "lr", "ema_loss"):
+            for attr in ("loss", "tloss", "nloss", "lr", "ema_loss"):
                 if hasattr(trainer, attr):
-                    extra[attr] = getattr(trainer, attr)
-            if extra:
-                extra.update(metrics)
-                metrics = extra
+                    raw_metrics[attr] = getattr(trainer, attr)
+
+            # ✅ JSON 직렬화 가능하게 변환
+            safe_metrics = _to_jsonable(raw_metrics)
 
             try:
-                progress.train_log(epoch=epoch, metrics=metrics)
+                progress.train_log(epoch=epoch, metrics=safe_metrics)
             except Exception as e:
-                # 로깅만 하고 학습은 계속
-                print(f"[progress] train.log publish failed: {e}")
+                print(f"[progress] train.log publish failed (after sanitize): {e}")
 
-        # 콜백 등록 (Ultralytics v8/v12 공통 on_fit_epoch_end 훅)
         model.add_callback("on_fit_epoch_end", _on_fit_epoch_end)
     
     r = model.train(**train_kwargs)

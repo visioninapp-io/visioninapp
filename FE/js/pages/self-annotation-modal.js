@@ -959,7 +959,7 @@ async function uploadLabelsForImage(imageData, annotations) {
 
         if (labelClasses && Array.isArray(labelClasses)) {
             labelClasses.forEach(cls => {
-                labelClassesMap.set(cls.display_name, { id: cls.id, name: cls.display_name });
+                labelClassesMap.set(cls.display_name, { id: cls.id, name: cls.display_name, yolo_index: cls.yolo_index });
             });
         }
 
@@ -1111,10 +1111,10 @@ function saveCurrentAnnotationsToFrontend() {
     }
 }
 
-// Auto-save annotations for current image
+// Auto-save annotations for the current image using yolo_index instead of class_id
 async function autoSaveCurrentAnnotations() {
+    // Filter annotations that are not saved yet
     const unsavedAnnotations = selfAnnotationState.annotations.filter(ann => !ann.saved);
-
     if (unsavedAnnotations.length === 0) {
         console.log('[SelfAnnotation] No unsaved annotations to auto-save');
         return;
@@ -1123,6 +1123,18 @@ async function autoSaveCurrentAnnotations() {
     console.log(`[SelfAnnotation] Auto-saving ${unsavedAnnotations.length} annotations...`);
 
     try {
+        // Fetch all label classes to map display_name → { id, yolo_index }
+        const datasetId = selfAnnotationState.datasetId;
+        const labelClasses = await apiService.get(`/datasets/${datasetId}/label-classes`);
+        const labelMap = new Map();
+        labelClasses.forEach(cls => {
+            labelMap.set(cls.display_name, {
+                id: cls.id,
+                yolo_index: cls.yolo_index
+            });
+        });
+
+        // Iterate over unsaved annotations and upload them
         for (const ann of unsavedAnnotations) {
             try {
                 // Use original image dimensions for normalization
@@ -1130,13 +1142,13 @@ async function autoSaveCurrentAnnotations() {
                 const originalHeight = selfAnnotationState.originalHeight || selfAnnotationState.img.height;
                 const scale = selfAnnotationState.scale || 1;
 
-                // Convert display coordinates back to original image coordinates
+                // Convert displayed coordinates to original coordinates
                 const origX = ann.x / scale;
                 const origY = ann.y / scale;
                 const origWidth = ann.width / scale;
                 const origHeight = ann.height / scale;
 
-                // Normalize bbox coordinates
+                // Normalize bbox coordinates (0~1)
                 const normalizedGeometry = {
                     bbox: {
                         x_center: (origX + origWidth / 2) / originalWidth,
@@ -1146,9 +1158,18 @@ async function autoSaveCurrentAnnotations() {
                     }
                 };
 
+                // Retrieve yolo_index and label_class_id for this annotation
+                const classInfo = labelMap.get(ann.className);
+                if (!classInfo || classInfo.yolo_index === undefined || classInfo.yolo_index === null) {
+                    console.warn(`[AutoSave] Missing yolo_index for class ${ann.className}`);
+                    continue;
+                }
+
+                // Prepare annotation payload
                 const annotationData = {
                     asset_id: selfAnnotationState.currentImage.id,
-                    label_class_id: 1, // TODO: Get proper label_class_id
+                    label_class_id: classInfo.id,      // keep id for backend reference
+                    yolo_index: classInfo.yolo_index,  // use yolo_index for YOLO training
                     geometry_type: 'bbox',
                     geometry: normalizedGeometry,
                     is_normalized: true,
@@ -1157,17 +1178,18 @@ async function autoSaveCurrentAnnotations() {
                     annotator_name: 'user'
                 };
 
+                // Send annotation to backend
                 const response = await apiService.createAnnotation(annotationData);
+
+                // Mark annotation as saved
                 ann.id = response.id;
                 ann.saved = true;
-
             } catch (error) {
-                console.error(`[SelfAnnotation] Failed to auto-save annotation:`, error);
+                console.error('[SelfAnnotation] Failed to auto-save annotation:', error);
             }
         }
 
         console.log('[SelfAnnotation] Auto-save complete');
-
     } catch (error) {
         console.error('[SelfAnnotation] Auto-save error:', error);
     }

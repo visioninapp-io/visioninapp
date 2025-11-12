@@ -23,10 +23,10 @@ function convertToYOLO(annotations, labelClassesMap) {
             // Get class ID from class name
             // Support multiple attribute names for compatibility
             const className = ann.className || ann.class_name || ann.label_class_name;
-            const classId = labelClassesMap.get(className)?.id;
+            const yoloIndex = labelClassesMap.get(className)?.yolo_index;
 
-            if (classId === undefined) {
-                console.warn(`[LabelConverter] Unknown class: ${className}`);
+            if (yoloIndex === undefined || yoloIndex === null) {
+                console.warn(`[LabelConverter] Missing yolo_index for class: ${className}`);
                 continue;
             }
 
@@ -66,7 +66,7 @@ function convertToYOLO(annotations, labelClassesMap) {
 
             // Format: class_id center_x center_y width height
             // All values should be between 0 and 1
-            const line = `${classId} ${center_x.toFixed(6)} ${center_y.toFixed(6)} ${width.toFixed(6)} ${height.toFixed(6)}`;
+            const line = `${yoloIndex} ${center_x.toFixed(6)} ${center_y.toFixed(6)} ${width.toFixed(6)} ${height.toFixed(6)}`;
             lines.push(line);
 
         } catch (error) {

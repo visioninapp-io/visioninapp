@@ -4,7 +4,7 @@ from typing import List, Dict, Any
 from datetime import datetime
 import logging, uuid, re
 
-from app.core.database import get_db
+from app.core.database import get_db, SessionLocal
 from app.core.auth import get_current_user
 from app.core.config import settings
 
@@ -117,7 +117,7 @@ async def create_training_job(
     db.commit(); db.refresh(db_job)
 
     # 5) external_job_id
-    job_id_str = uuid.uuid4().hex[:8]
+    job_id_str = str(uuid.uuid4()).replace("-", "")
     db_job.hyperparameters["external_job_id"] = job_id_str
     db.commit(); db.refresh(db_job)
 
@@ -161,7 +161,7 @@ async def create_training_job(
 
     except Exception as e:
         db_job.status = TrainingStatus.FAILED
-        db_job.training_logs = f"Failed to start training: {e}"
+        db_job.training_log = f"Failed to start training: {e}"
         db.commit()
         raise HTTPException(status_code=500, detail=str(e))
 
@@ -247,7 +247,6 @@ def run_llm_training_pipeline(job_id: int, user_query: str, dataset_path: str):
     백그라운드에서 LangGraph 기반 학습 실행
     """
     import asyncio
-    from app.core.database import SessionLocal
     
     db = SessionLocal()
     job = None
@@ -259,13 +258,22 @@ def run_llm_training_pipeline(job_id: int, user_query: str, dataset_path: str):
             
         logger.info(f"[LLM Training] Starting job {job_id}: {user_query}")
         
-        # LLM 기반 학습 파이프라인 실행
-        # builder 함수에 job_id도 전달 (builder 함수 시그니처: builder(user_query, dataset_path, job_id))
-        job_id_str = str(job_id)
-        builder(user_query, dataset_path, job_id_str)
+        # GPU용 UUID 생성 (RabbitMQ job_id로 사용)
+        external_job_id = str(uuid.uuid4()).replace("-", "")
+        
+        # DB에 external_job_id 매핑 저장 (추적용)
+        if not job.hyperparameters:
+            job.hyperparameters = {}
+        job.hyperparameters["external_job_id"] = external_job_id
+        db.commit()
+        
+        logger.info(f"[LLM Training] Generated external_job_id: {external_job_id} for job {job_id}")
+        
+        # LLM 기반 학습 파이프라인 실행 (UUID 전달)
+        builder(user_query, dataset_path, external_job_id)
         
         job.status = TrainingStatus.COMPLETED
-        job.training_logs = "AI training completed successfully"
+        job.training_log = "AI training completed successfully"
         db.commit()
         logger.info(f"[LLM Training] Job {job_id} completed")
         
@@ -274,7 +282,7 @@ def run_llm_training_pipeline(job_id: int, user_query: str, dataset_path: str):
         logger.info(f"[LLM Training] Job {job_id} cancelled (server shutdown)")
         if job:
             job.status = TrainingStatus.FAILED
-            job.training_logs = "Training cancelled due to server shutdown"
+            job.training_log = "Training cancelled due to server shutdown"
             try:
                 db.commit()
             except Exception:
@@ -286,7 +294,7 @@ def run_llm_training_pipeline(job_id: int, user_query: str, dataset_path: str):
         if job:
             try:
                 job.status = TrainingStatus.FAILED
-                job.training_logs = f"AI Training failed: {str(e)}"
+                job.training_log = f"AI Training failed: {str(e)}"
                 db.commit()
             except Exception:
                 pass  # DB 연결이 이미 끊어진 경우 무시

@@ -96,3 +96,19 @@ def route_onnx_or_tensor(state: TrainState) -> Literal["pure", "onnx", "tensor"]
         return "onnx"
     
     return "pure"
+
+def route_after_train(state: TrainState) -> str:
+    """
+    train_trial 이후 분기:
+    - success: 다음 스텝 진행
+    - failed: 에러 처리 플로우
+    - timeout: 타임아웃 처리 플로우
+    """
+    action = (state.action or "").upper()
+
+    if action == "TRAIN_COMPLETED":
+        return "success"
+    if action == "TRAIN_TIMEOUT":
+        return "timeout"
+    # 그 외는 일단 실패로 몰기 (TRAIN_FAILED 포함)
+    return "failed"

@@ -211,42 +211,118 @@ def _wait_for_done(job_id: str, timeout_sec: int = 10800) -> Dict[str, Any]:
 # ------------------- 메인 노드 -------------------
 
 def _wait_for_done(job_id: str, timeout_sec: int = 10800) -> Dict[str, Any]:
-    """GPU 서버가 job.{job_id}.done 메시지를 보낼 때까지 대기"""
+    """
+    GPU 서버가 events exchange (EXCHANGE_EVENTS)에
+    job.{job_id}.done 또는 job.{job_id}.error 메시지를 보낼 때까지 대기.
+    progress 이벤트는 로그만 남기고 계속 대기.
+    """
     import pika
-    params = pika.URLParameters(RABBITMQ_URL)
-    conn = pika.BlockingConnection(params)
-    ch = conn.channel()
-    ch.exchange_declare(exchange=EXCHANGE, exchange_type="topic", durable=True)
 
-    q = ch.queue_declare(queue="", exclusive=True, auto_delete=True)
-    qname = q.method.queue
-    rk_done = RK_DONE_FMT.format(job_id=job_id)
-    ch.queue_bind(exchange=EXCHANGE, queue=qname, routing_key=rk_done)
+    try:
+        print(f"[train_trial] 완료 이벤트 대기 시작: job_id={job_id}, timeout={timeout_sec}초")
+        params = pika.URLParameters(RABBITMQ_URL)
+        conn = pika.BlockingConnection(params)
+        ch = conn.channel()
 
-    deadline = time.monotonic() + timeout_sec
-    result_payload = None
+        print(f"[train_trial] Exchange 선언: {EXCHANGE_EVENTS}")
+        ch.exchange_declare(exchange=EXCHANGE_EVENTS, exchange_type="topic", durable=True)
 
-    for method, properties, body in ch.consume(qname, inactivity_timeout=1.0):
-        if method is None:
-            if time.monotonic() > deadline:
+        q = ch.queue_declare(queue="", exclusive=True, auto_delete=True)
+        qname = q.method.queue
+
+        # ✅ job.{job_id}.# 로 바인딩해서 done/error/progress를 모두 수신
+        rk_pattern = f"job.{job_id}.#"
+        print(f"[train_trial] 큐 바인딩: queue={qname}, routing_key={rk_pattern}")
+        ch.queue_bind(exchange=EXCHANGE_EVENTS, queue=qname, routing_key=rk_pattern)
+
+        deadline = time.monotonic() + timeout_sec
+        result_payload = None
+        last_log_time = time.monotonic()
+
+        for method, properties, body in ch.consume(qname, inactivity_timeout=1.0):
+            current_time = time.monotonic()
+
+            # 주기적 대기 로그
+            if current_time - last_log_time >= 10:
+                remaining = int(deadline - current_time)
+                if remaining < 0:
+                    remaining = 0
+                print(f"[train_trial] 대기 중... (남은 시간: {remaining}초)")
+                last_log_time = current_time
+
+            # inactivity_timeout
+            if method is None:
+                if current_time > deadline:
+                    print(f"[train_trial] ⏰ 타임아웃: {timeout_sec}초 경과")
+                    break
+                continue
+
+            try:
+                data = json.loads(body.decode("utf-8"))
+            except Exception as e:
+                print(f"[train_trial] ⚠️ JSON 파싱 오류: {e}")
+                data = {"status": "error", "error": f"invalid JSON: {e}"}
+
+            event = data.get("event") or data.get("status")
+            msg_job_id = str(data.get("job_id") or "")
+
+            # 내 job이 아니면 버리고 계속
+            if msg_job_id != job_id:
+                ch.basic_ack(method.delivery_tag)
+                continue
+
+            print(f"[train_trial] 이벤트 수신: event={event}, data={data}")
+
+            # ✅ error 이벤트 수신 시 바로 종료
+            if event in ("error", "failed", "train_error"):
+                result_payload = {
+                    **data,
+                    "status": "error",
+                    "event": "error",
+                }
+                ch.basic_ack(method.delivery_tag)
                 break
-            continue
-        try:
-            data = json.loads(body.decode("utf-8"))
-        except Exception:
-            data = {"status": "error", "error": "invalid JSON"}
-        if str(data.get("job_id")) == job_id and data.get("event") == "done":
-            result_payload = data
+
+            # ✅ done 이벤트 수신 시 종료
+            if event == "done":
+                result_payload = {
+                    **data,
+                    "status": data.get("status", "success"),
+                    "event": "done",
+                }
+                ch.basic_ack(method.delivery_tag)
+                break
+
+            # progress 등 기타 이벤트는 ack 후 계속
             ch.basic_ack(method.delivery_tag)
-            break
-        ch.basic_ack(method.delivery_tag)
 
-    ch.queue_unbind(exchange=EXCHANGE, queue=qname, routing_key=rk_done)
-    conn.close()
+            if current_time > deadline:
+                print(f"[train_trial] ⏰ 타임아웃: {timeout_sec}초 경과")
+                break
 
-    if result_payload is None:
-        return {"job_id": job_id, "status": "timeout", "error": "no done event received"}
-    return result_payload
+        # 바인딩 해제 및 연결 종료
+        ch.queue_unbind(exchange=EXCHANGE_EVENTS, queue=qname, routing_key=rk_pattern)
+        conn.close()
+
+        if result_payload is None:
+            print(f"[train_trial] ⚠️ 완료/에러 이벤트 미수신")
+            return {
+                "job_id": job_id,
+                "status": "timeout",
+                "error": "no done/error event received",
+            }
+
+        return result_payload
+
+    except Exception as e:
+        print(f"[train_trial] ❌ 완료 이벤트 대기 중 오류: {e}")
+        return {
+            "job_id": job_id,
+            "status": "error",
+            "event": "error",
+            "error": f"wait_for_done exception: {e}",
+        }
+
 
 
 # ------------------- 메인 노드 -------------------

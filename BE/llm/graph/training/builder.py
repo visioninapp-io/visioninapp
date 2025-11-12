@@ -9,7 +9,7 @@ from langgraph.graph import StateGraph, START, END
 # 1) 정확한 경로로 클래스 임포트
 from llm.graph.training.state import TrainState
 from llm.graph.training.nodes.registry import NODE_REGISTRY
-from llm.utils.router import route_by_selfrag, route_mode, route_hpo_or_single, route_gate, route_interrupt_action, route_onnx_or_tensor
+from llm.utils.router import route_by_selfrag, route_mode, route_hpo_or_single, route_gate, route_interrupt_action, route_onnx_or_tensor, route_after_train
 
 from dotenv import load_dotenv
 load_dotenv()
@@ -79,7 +79,15 @@ def builder(user_query: str, dataset_path: str, job_id: str):
 
     graph.add_edge("hpo_scheduler", "select_best")
     graph.add_edge("select_best", "train_trial")
-    graph.add_edge("train_trial", "evaluate_trial")
+    graph.add_conditional_edges(
+        "train_trial",
+        route_after_train,
+        {
+            "success": "evaluate_trial",
+            "failed": END,
+            "timeout": END,
+        }
+    )
     graph.add_edge("evaluate_trial", "regression_gate")
     graph.add_edge("regression_gate", "registry_publish")
     # graph.add_conditional_edges(

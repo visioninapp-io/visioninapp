@@ -109,6 +109,7 @@ def handle_train(mq: MQ, exchanges: dict, msg: dict):
         progress.done({"s3_bucket": bucket, "s3_uri": f"s3://{bucket}/{key}"}, metrics)
 
     except Exception as e:
+        time.sleep(5)
         logger.exception("train failed")
         progress.error("train", str(e))
     finally:

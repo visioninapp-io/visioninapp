@@ -46,27 +46,7 @@ def train_yolo(data_dir: str, out_dir: str, hyper: dict) -> dict:
     """
     Path(out_dir).mkdir(parents=True, exist_ok=True)
 
-    # 모델 이름 추출: model, model_name, model_variant 순서로 확인
-    model_name = (
-        hyper.get("model") 
-        or hyper.get("model_name") 
-        or hyper.get("model_variant")
-    )
-    
-    # 모델이 명시되지 않았을 때만 기본값 사용 (하지만 경고 로그 출력)
-    if not model_name or (isinstance(model_name, str) and model_name.strip().lower() in ("null", "none", "")):
-        import warnings
-        warnings.warn(
-            f"No model specified in hyperparams, defaulting to 'yolov8n.pt'. "
-            f"Received hyperparams: {hyper}",
-            UserWarning
-        )
-        model_name = "yolo12n.pt"  # 더 일반적인 기본값으로 변경
-    
-    # .pt 확장자가 없으면 추가 (Ultralytics가 자동 처리하지만 명시적으로)
-    if isinstance(model_name, str) and not model_name.endswith(".pt"):
-        model_name = model_name.strip()
-    
+    model_name = hyper.get("model", "yolo12n.pt")
     model = YOLO(model_name)
 
     # 공통 기본값

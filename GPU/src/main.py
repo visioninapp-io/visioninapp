@@ -22,16 +22,55 @@ logger = setup_logger()
 def _ensure_dir(p: str) -> None:
     Path(p).mkdir(parents=True, exist_ok=True)
 
-def _write_json(path: str, obj: Dict[str, Any]) -> None:
+def _write_json(path: str, obj: dict) -> None:
     with open(path, "w", encoding="utf-8") as f:
         json.dump(obj, f, ensure_ascii=False, indent=2)
 
 def _as_model_name_from_onnx_filename(onnx_filename: str) -> str:
-    # "my_model.onnx" -> "my_model"
     base = Path(onnx_filename).name
-    if base.lower().endswith(".onnx"):
-        base = base[:-5]
-    return base or "model"
+    return base[:-5] if base.lower().endswith(".onnx") else (base or "model")
+
+def _coerce_bool(v, default=None):
+    if v is None: return default
+    if isinstance(v, bool): return v
+    if isinstance(v, str): return v.strip().lower() in ("1", "true", "yes", "y", "t")
+    return bool(v)
+
+def _coerce_int(v, default=None):
+    try: return int(v)
+    except Exception: return default
+
+def _maybe_download(uri_or_path: str, local_target: str) -> str:
+    """s3://...면 받아오고, 로컬 경로면 그대로 반환"""
+    if isinstance(uri_or_path, str) and uri_or_path.startswith("s3://"):
+        download_s3(uri_or_path, local_target)
+        return local_target
+    return uri_or_path
+
+# --- 평가 헬퍼: PT로 val() 수행 ---
+def _eval_metrics_with_pt(pt_path: str, data_yaml_path: str, imgsz: int, batch: int, split: str = "val") -> dict:
+    try:
+        from ultralytics import YOLO
+        model = YOLO(pt_path)
+        # Ultralytics는 split을 data.yaml의 분기 기준으로 처리 (val/test)
+        results = model.val(data=data_yaml_path, imgsz=imgsz, batch=batch, split=split, save_json=False, plots=False, verbose=False)
+        # results.metrics에는 주요 지표가 dict 형태로 들어옴
+        # (Ultralytics 버전에 따라 이름 차이 있을 수 있음)
+        m = results.results_dict if hasattr(results, "results_dict") else getattr(results, "metrics", {}) or {}
+        # 표준 키만 추려 안정화
+        picked = {
+            "map50":        float(m.get("metrics/mAP50(B)")) if "metrics/mAP50(B)" in m else float(m.get("metrics/mAP50", m.get("map50", 0.0))),
+            "map50_95":     float(m.get("metrics/mAP50-95(B)")) if "metrics/mAP50-95(B)" in m else float(m.get("metrics/mAP50-95", m.get("map", 0.0))),
+            "precision":    float(m.get("metrics/precision(B)")) if "metrics/precision(B)" in m else float(m.get("precision", 0.0)),
+            "recall":       float(m.get("metrics/recall(B)")) if "metrics/recall(B)" in m else float(m.get("recall", 0.0)),
+            "imgsz":        imgsz,
+            "batch":        batch,
+            "split":        split,
+        }
+        return picked
+    except Exception as e:
+        logger.warning(f"[convert_onnx] 평가 수행 실패: {e}")
+        return {}
 
 def _paths():
     data_root  = os.getenv("LOCAL_DATA_ROOT", "/data")
@@ -138,28 +177,6 @@ def handle_train(mq: MQ, exchanges: dict, msg: dict):
                 pass
 
 def handle_onnx(mq: MQ, exchanges: dict, msg: dict):
-    """
-    메시지 예:
-    {
-        "job_id": "...",
-        "model": {
-            "s3_uri": "s3://.../best.pt"
-        },
-        "output": {
-            "s3_bucket": "visioninapp-bucket",
-            "prefix": "result/test_onnx/<job_id>",
-            "model_name": "my_model.onnx"   # ← 이 파일명에서 model_name을 유추
-        },
-        "hyperparams": { "imgsz": 640, "dynamic": true, "half": false, "simplify": true, "precision": "fp16" },
-        # (선택) 평가지표 전달 방식 1: 바로 dict로
-        "metrics": {
-            "map50": 0.83, "map50_95": 0.52, "precision": 0.87, "recall": 0.78, "best_epoch": 93
-        },
-        # (선택) 평가지표 전달 방식 2: S3에 저장된 파일 경로
-        "metrics_s3_uri": "s3://visioninapp-bucket/runs/exp123/metrics.json"
-        # 또는 csv일 수도 있음: "s3://.../results.csv"
-    }
-    """
     logger.info("[convert_onnx] onnx 변환 시작")
     job_id = msg["job_id"]
     conn, pub_ch = mq.channel()
@@ -171,73 +188,74 @@ def handle_onnx(mq: MQ, exchanges: dict, msg: dict):
 
         # --- 하이퍼파라미터 수집 ---
         hp = (msg.get("hyperparams") or {})
-        def _as_bool(v):
-            if isinstance(v, bool): return v
-            if isinstance(v, str): return v.strip().lower() in ("1","true","yes","y","t")
-            return bool(v)
-        def _as_int(v, default=None):
-            try: return int(v)
-            except Exception: return default
-
-        imgsz     = _as_int(hp.get("imgsz"), 640)
-        dynamic   = _as_bool(hp.get("dynamic")) if "dynamic" in hp else True
-        simplify  = _as_bool(hp.get("simplify")) if "simplify" in hp else False
-        half_flag = _as_bool(hp.get("half")) if "half" in hp else False
+        imgsz     = _coerce_int(hp.get("imgsz"), 640)
+        dynamic   = _coerce_bool(hp.get("dynamic"), True)
+        simplify  = _coerce_bool(hp.get("simplify"), False)
+        half_flag = _coerce_bool(hp.get("half"), False)
         precision = (hp.get("precision") or "").strip().lower() or None
-        opset     = _as_int(hp.get("opset"), 13)
+        opset     = _coerce_int(hp.get("opset"), 13)
 
-        if precision == "fp16":
-            half_flag = True
-        elif precision == "fp32":
-            half_flag = False
+        if precision == "fp16": half_flag = True
+        elif precision == "fp32": half_flag = False
 
-        # --- ONNX 내보내기 ---
+        # --- ONNX export ---
         progress.send("convert.onnx", 60, f"export to onnx (imgsz={imgsz}, dynamic={dynamic}, half={half_flag}, simplify={simplify})")
         tmp_onnx = os.path.join(tempfile.gettempdir(), f"{job_id}.onnx")
-        to_onnx(
-            tmp_pt, tmp_onnx,
-            opset=opset, imgsz=imgsz, dynamic=dynamic, half=half_flag, simplify=simplify, precision=precision
-        )
+        to_onnx(tmp_pt, tmp_onnx, opset=opset, imgsz=imgsz, dynamic=dynamic, half=half_flag, simplify=simplify, precision=precision)
 
-        # --- 로컬 표준 경로로 정리: {LOCAL_MODELS_ROOT}/models/{model_name}/onnx/ ---
+        # --- 로컬 표준 경로 (중복 'models' 제거) ---
         onnx_filename = msg["output"].get("model_name", "best.onnx")
         model_name_for_dir = _as_model_name_from_onnx_filename(onnx_filename)
 
         models_root = os.getenv("LOCAL_MODELS_ROOT", "/models")
-        local_dir = os.path.join(models_root, "models", model_name_for_dir, "onnx")
+        local_dir = os.path.join(models_root, model_name_for_dir, "onnx")   # ✅ 여기! models/ 추가하지 않음
         _ensure_dir(local_dir)
 
         local_onnx_path = os.path.join(local_dir, onnx_filename)
-        # temp -> local copy
         Path(local_onnx_path).write_bytes(Path(tmp_onnx).read_bytes())
 
-        # --- 평가지표 저장 ---
+        # --- 평가지표 저장: 우선 msg → s3 → (없으면) 자동 평가 ---
         metrics_obj = msg.get("metrics")
         metrics_s3  = msg.get("metrics_s3_uri")
+        metrics_out_json = os.path.join(local_dir, "metrics.json")
 
+        saved_metrics = False
         if isinstance(metrics_obj, dict) and metrics_obj:
-            _write_json(os.path.join(local_dir, "metrics.json"), metrics_obj)
+            _write_json(metrics_out_json, metrics_obj)
+            saved_metrics = True
         elif isinstance(metrics_s3, str) and metrics_s3.startswith("s3://"):
-            # 확장자에 따라 저장 파일명 결정
             if metrics_s3.lower().endswith(".csv"):
                 download_s3(metrics_s3, os.path.join(local_dir, "metrics.csv"))
             else:
-                # json로 가정
-                download_s3(metrics_s3, os.path.join(local_dir, "metrics.json"))
+                download_s3(metrics_s3, metrics_out_json)
+            saved_metrics = True
         else:
-            logger.info("[convert_onnx] 전달된 평가지표가 없어 로컬 저장을 건너뜀")
+            # --- 자동 평가 시도 ---
+            ev = (msg.get("eval") or {})
+            data_yaml = ev.get("data_path") or ev.get("data_s3_uri")
+            if data_yaml:
+                # data.yaml 준비
+                data_local = _maybe_download(data_yaml, os.path.join(tempfile.gettempdir(), f"{job_id}_data.yaml"))
+                e_imgsz = _coerce_int(ev.get("imgsz"), imgsz)
+                e_batch = _coerce_int(ev.get("batch"), 16)
+                e_split = (ev.get("split") or "val").strip()
+                progress.send("convert.onnx.eval", 75, f"evaluate model (split={e_split})")
+                eval_metrics = _eval_metrics_with_pt(tmp_pt, data_local, imgsz=e_imgsz, batch=e_batch, split=e_split)
+                if eval_metrics:
+                    _write_json(metrics_out_json, eval_metrics)
+                    saved_metrics = True
+                else:
+                    logger.info("[convert_onnx] 자동 평가를 시도했으나 유효한 결과가 없어 저장 생략")
+            else:
+                logger.info("[convert_onnx] 평가지표 없음 + eval 데이터 미지정 → 평가 생략")
 
-        # --- S3 업로드(기존 로직 유지) ---
-        progress.send("upload", 90, "upload onnx")
-        bucket = S3_BUCKET  # 기존 상수 사용
+        # --- S3 업로드(ONNX 및 지표) ---
+        progress.send("upload", 90, "upload onnx (+metrics)")
+        bucket = S3_BUCKET
         key = f"{msg['output']['prefix'].rstrip('/')}/{onnx_filename}"
         upload_s3(local_onnx_path, bucket, key)
-
-        # (선택) 평가지표도 함께 업로드하고 싶다면:
-        # if Path(os.path.join(local_dir, "metrics.json")).exists():
-        #     upload_s3(os.path.join(local_dir, "metrics.json"), bucket, f"{msg['output']['prefix'].rstrip('/')}/metrics.json")
-        # if Path(os.path.join(local_dir, "metrics.csv")).exists():
-        #     upload_s3(os.path.join(local_dir, "metrics.csv"), bucket, f"{msg['output']['prefix'].rstrip('/')}/metrics.csv")
+        if saved_metrics and Path(metrics_out_json).exists():
+            upload_s3(metrics_out_json, bucket, f"{msg['output']['prefix'].rstrip('/')}/metrics.json")
 
         progress.done({
             "s3_bucket": bucket,

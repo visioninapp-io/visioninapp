@@ -25,8 +25,14 @@ def builder(user_query: str, dataset_path: str, job_id: str):
     elif Path("training.yaml").exists():
         state.config_path = "training.yaml"
 
-    state.run_name   = RUN_NAME
-    job_id = str(uuid.uuid4()).replace("-", "")
+    state.run_name = RUN_NAME
+    
+    # job_id는 필수
+    if not job_id:
+        raise ValueError("job_id is required for training pipeline")
+    
+    # state에 job_id 저장
+    state.job_id = job_id
 
     graph = StateGraph(TrainState)
     graph.add_node("init_context", NODE_REGISTRY["init_context"])

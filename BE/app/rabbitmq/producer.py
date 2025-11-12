@@ -8,6 +8,7 @@ EXCHANGE_CMD = "jobs.cmd"
 RK_TRAIN_START = "train.start"
 RK_ONNX_START  = "onnx.start"
 RK_TRT_START   = "trt.start"
+RK_INFERENCE_START = 'inference.start'
 
 def _publish(exchange: str, routing_key: str, payload: dict) -> None:
     conn, ch = get_channel()
@@ -39,3 +40,7 @@ def send_onnx_request(payload: dict) -> None:
 def send_trt_request(payload: dict) -> None:
     # TensorRT 변환 요청
     _publish(EXCHANGE_CMD, RK_TRT_START, payload)
+
+def send_inference_request(payload: dict) -> None:
+    # auto-annoation inference 요청
+    _publish(EXCHANGE_CMD, RK_INFERENCE_START,payload)

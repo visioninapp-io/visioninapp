@@ -1,257 +1,151 @@
-"""
-자동 어노테이션 서비스
-
-YOLO 모델을 사용하여 이미지에 자동으로 어노테이션을 생성합니다.
-"""
-
-from pathlib import Path
-from typing import List, Dict, Optional, Tuple
 import logging
-from datetime import datetime
+from sqlalchemy.orm import Session
+from app.core.database import SessionLocal
+from app.models.dataset import Annotation, GeometryType, Dataset
+from app.models.asset import Asset
+from app.models.label_class import LabelClass
+from app.utils.file_storage import file_storage
+from app.utils.dataset_helper import ensure_yolo_index_for_dataset, upload_data_yaml_for_dataset
 
-logger = logging.getLogger(__name__)
+log = logging.getLogger(__name__)
 
 
-class AutoAnnotationService:
-    """자동 어노테이션 서비스"""
+def handle_inference_done(payload: dict):
+    """
+    inference.done 이벤트 처리
 
-    def __init__(self, model_path: Optional[str] = None):
-        """
-        Args:
-            model_path: YOLO 모델 파일 경로 (.pt)
-                       None이면 기본 경로 사용
-        """
-        self.model = None
-        self.model_path = model_path or self._get_default_model_path()
-        self.is_loaded = False
-
-    def _get_default_model_path(self) -> Path:
-        """기본 모델 경로 반환"""
-        # AI/models/best.pt 사용
-        # BE/app/services/auto_annotation_service.py -> go up to project root
-        current_file = Path(__file__).resolve()
-        project_root = current_file.parent.parent.parent.parent
-        model_path = project_root / "AI" / "models" / "best.pt"
-        logger.debug(f"Default model path: {model_path}")
-        return model_path
-
-    def load_model(self, model_path: Optional[str] = None) -> bool:
-        """
-        YOLO 모델 로드
-
-        Args:
-            model_path: 모델 파일 경로 (None이면 기본 경로 사용)
-
-        Returns:
-            성공 여부
-        """
-        try:
-            from ultralytics import YOLO
-
-            # 경로가 지정되면 업데이트
-            if model_path:
-                self.model_path = model_path
-
-            # 지정된 경로가 있는지 확인
-            model_path_obj = Path(self.model_path) if self.model_path else None
-            
-            # .pth 파일이면 .pt로 변환 시도 또는 경고
-            if model_path_obj and model_path_obj.exists():
-                if model_path_obj.suffix == '.pth':
-                    logger.warning(f"⚠️  PyTorch 모델 (.pth) 감지: {self.model_path}")
-                    logger.warning(f"   YOLO는 .pt 형식만 지원합니다.")
-                    logger.warning(f"   YOLO 아키텍처로 모델을 다시 훈련하거나 YOLOv8n을 사용합니다.")
-                    # .pth는 로드 실패하므로 기본 모델로 fallback
-                    model_path_obj = None
-                elif model_path_obj.suffix == '.pt':
-                    logger.info(f"모델 로드 중: {self.model_path}")
-                    self.model = YOLO(str(self.model_path))
-                    self.is_loaded = True
-                    logger.info(f"✅ 커스텀 모델 로드 완료")
-                    logger.info(f"   클래스 수: {len(self.model.names)}")
-                    return True
-            
-            # 커스텀 모델이 없거나 .pth 파일이면 yolov8n 사용 (자동 다운로드)
-            if not model_path_obj or not model_path_obj.exists():
-                logger.warning(f"커스텀 모델을 찾을 수 없습니다: {self.model_path}")
-            
-            logger.info("기본 YOLOv8n 모델을 사용합니다 (필요시 자동 다운로드)")
-            
-            self.model = YOLO("yolov8n.pt")  # Ultralytics will auto-download if needed
-            self.model_path = "yolov8n.pt"
-            self.is_loaded = True
-            
-            logger.info(f"✅ YOLOv8n 모델 로드 완료")
-            logger.info(f"   클래스 수: {len(self.model.names)}")
-            logger.info(f"   참고: YOLO 커스텀 모델을 사용하려면 'yolov8' 아키텍처로 훈련하세요")
-
-            return True
-
-        except ImportError:
-            logger.error("ultralytics 패키지가 설치되지 않았습니다.")
-            logger.info("pip install ultralytics 를 실행하세요.")
-            return False
-
-        except Exception as e:
-            logger.error(f"모델 로드 실패: {e}")
-            return False
-
-    def predict_image(
-        self,
-        image_path: str,
-        conf_threshold: float = 0.25
-    ) -> List[Dict]:
-        """
-        단일 이미지에 대한 추론 실행
-
-        Args:
-            image_path: 이미지 파일 경로
-            conf_threshold: 신뢰도 임계값 (0-1)
-
-        Returns:
-            어노테이션 리스트
-            [{
-                'class_id': int,
-                'class_name': str,
-                'confidence': float,
-                'bbox': {
-                    'x_center': float,  # 정규화 (0-1)
-                    'y_center': float,
-                    'width': float,
-                    'height': float
-                },
-                'bbox_xyxy': [x1, y1, x2, y2]  # 절대 좌표
-            }, ...]
-        """
-        if not self.is_loaded:
-            if not self.load_model():
-                return []
-
-        try:
-            # 추론 실행
-            results = self.model.predict(
-                source=str(image_path),
-                conf=conf_threshold,
-                verbose=False
-            )
-
-            if not results or len(results) == 0:
-                return []
-
-            # 결과 파싱
-            annotations = []
-            result = results[0]
-            boxes = result.boxes
-
-            # 이미지 크기 (정규화를 위해)
-            img_height, img_width = result.orig_shape
-
-            for box in boxes:
-                cls_id = int(box.cls[0])
-                conf = float(box.conf[0])
-                cls_name = self.model.names[cls_id]
-
-                # XYXY 좌표 (절대 좌표)
-                x1, y1, x2, y2 = box.xyxy[0].tolist()
-
-                # YOLO 포맷 (정규화된 중심점 + 너비/높이)
-                x_center = ((x1 + x2) / 2) / img_width
-                y_center = ((y1 + y2) / 2) / img_height
-                width = (x2 - x1) / img_width
-                height = (y2 - y1) / img_height
-
-                annotation = {
-                    'class_id': cls_id,
-                    'class_name': cls_name,
-                    'confidence': conf,
-                    'bbox': {
-                        'x_center': x_center,
-                        'y_center': y_center,
-                        'width': width,
-                        'height': height
-                    },
-                    'bbox_xyxy': [x1, y1, x2, y2]
-                }
-
-                annotations.append(annotation)
-
-            logger.info(f"✅ 추론 완료: {image_path}")
-            logger.info(f"   탐지된 객체 수: {len(annotations)}")
-
-            return annotations
-
-        except Exception as e:
-            logger.error(f"추론 실패: {e}")
-            return []
-
-    def predict_batch(
-        self,
-        image_paths: List[str],
-        conf_threshold: float = 0.25,
-        progress_callback: Optional[callable] = None
-    ) -> Dict[str, List[Dict]]:
-        """
-        배치 이미지 추론
-
-        Args:
-            image_paths: 이미지 파일 경로 리스트
-            conf_threshold: 신뢰도 임계값
-            progress_callback: 진행률 콜백 함수(current, total)
-
-        Returns:
-            {image_path: annotations} 딕셔너리
-        """
-        results = {}
-        total = len(image_paths)
-
-        for i, image_path in enumerate(image_paths):
-            annotations = self.predict_image(image_path, conf_threshold)
-            results[image_path] = annotations
-
-            if progress_callback:
-                progress_callback(i + 1, total)
-
-        return results
-
-    def get_model_info(self) -> Dict:
-        """
-        모델 정보 반환
-
-        Returns:
+    Expected payload:
+    {
+        "job_id": "uuid",
+        "dataset_id": 1,
+        "status": "completed" | "failed",
+        "s3_labels_path": "pothole/labels",
+        "processed_images": [
             {
-                'model_path': str,
-                'is_loaded': bool,
-                'num_classes': int,
-                'class_names': list,
-                'model_type': str
+                "asset_id": 123,
+                "filename": "pothole_1.jpg",
+                "label_file": "pothole_1.txt",
+                "annotation_count": 5
             }
-        """
-        info = {
-            'model_path': str(self.model_path),
-            'is_loaded': self.is_loaded,
-            'num_classes': 0,
-            'class_names': [],
-            'model_type': 'YOLOv8'
-        }
-
-        if self.is_loaded and self.model:
-            info['num_classes'] = len(self.model.names)
-            info['class_names'] = list(self.model.names.values())
-
-        return info
-
-
-# 싱글톤 인스턴스
-_auto_annotation_service = None
-
-
-def get_auto_annotation_service() -> AutoAnnotationService:
+        ],
+        "error_message": null
+    }
     """
-    AutoAnnotationService 싱글톤 인스턴스 반환
-    """
-    global _auto_annotation_service
+    job_id = payload.get("job_id")
+    dataset_id = payload.get("dataset_id")
+    status = payload.get("status")
+    s3_labels_path = payload.get("s3_labels_path")
+    processed_images = payload.get("processed_images", [])
+    error_message = payload.get("error_message")
+    overwrite_existing = payload.get("overwrite_existing", False)
 
-    if _auto_annotation_service is None:
-        _auto_annotation_service = AutoAnnotationService()
+    log.info(f"[INFERENCE-DONE] Processing job_id={job_id}, dataset_id={dataset_id}, status={status}")
 
-    return _auto_annotation_service
+    if status == "failed":
+        log.error(f"[INFERENCE-DONE] Job failed: {error_message}")
+        return
+
+    # DB 세션 생성
+    db = SessionLocal()
+
+    try:
+        # 데이터셋 확인
+        dataset = db.query(Dataset).filter(Dataset.id == dataset_id).first()
+        if not dataset:
+            log.error(f"[INFERENCE-DONE] Dataset not found: {dataset_id}")
+            return
+
+        total_annotations = 0
+
+        # S3에서 label 파일 읽기 및 DB 저장
+        for img_data in processed_images:
+            asset_id = img_data.get("asset_id")
+            label_filename = img_data.get("label_file")  # 예: "pothole_1.txt"
+
+            if not label_filename:
+                continue
+
+            # S3에서 label 파일 다운로드
+            s3_label_key = f"{s3_labels_path}/{label_filename}"
+            log.info(f"[INFERENCE-DONE] Downloading label from S3: {s3_label_key}")
+
+            try:
+                label_content = file_storage.download_from_s3(s3_label_key)
+                if not label_content:
+                    log.warning(f"[INFERENCE-DONE] Label file not found: {s3_label_key}")
+                    continue
+
+                # YOLO format 파싱 (class_id x_center y_center width height)
+                lines = label_content.decode("utf-8").strip().split("\n")
+
+                # overwrite_existing 처리
+                if overwrite_existing:
+                    existing_annotations = db.query(Annotation).filter(Annotation.asset_id == asset_id).all()
+                    if existing_annotations:
+                        log.info(f"[INFERENCE-DONE] Deleting {len(existing_annotations)} existing annotations for asset {asset_id}")
+                        for ann in existing_annotations:
+                            db.delete(ann)
+                        db.flush()
+
+                # Annotation 생성
+                for line in lines:
+                    parts = line.strip().split()
+                    if len(parts) != 5:
+                        continue
+
+                    yolo_class_id = int(parts[0])
+                    x_center = float(parts[1])
+                    y_center = float(parts[2])
+                    width = float(parts[3])
+                    height = float(parts[4])
+
+                    # yolo_index로 LabelClass 찾기
+                    label_class = db.query(LabelClass).filter(
+                        LabelClass.yolo_index == yolo_class_id
+                    ).first()
+
+                    if not label_class:
+                        log.warning(f"[INFERENCE-DONE] LabelClass not found for yolo_index={yolo_class_id}")
+                        continue
+
+                    # Geometry 데이터
+                    geometry_data = {
+                        "bbox": {
+                            "x_center": x_center,
+                            "y_center": y_center,
+                            "width": width,
+                            "height": height
+                        }
+                    }
+
+                    # Annotation 저장
+                    db_annotation = Annotation(
+                        asset_id=asset_id,
+                        label_class_id=label_class.id,
+                        geometry_type=GeometryType.BBOX,
+                        geometry=geometry_data,
+                        is_normalized=True,
+                        source="model",
+                        confidence=0.95,  # GPU에서 전달하지 않으면 기본값
+                        annotator_name="auto-annotation"
+                    )
+                    db.add(db_annotation)
+                    total_annotations += 1
+
+            except Exception as e:
+                log.error(f"[INFERENCE-DONE] Error processing label {s3_label_key}: {e}", exc_info=True)
+                continue
+
+        # Commit
+        db.commit()
+        log.info(f"[INFERENCE-DONE] Saved {total_annotations} annotations to DB")
+
+        # data.yaml 업데이트
+        upload_data_yaml_for_dataset(db, dataset_id)
+        log.info(f"[INFERENCE-DONE] Updated data.yaml for dataset {dataset_id}")
+
+    except Exception as e:
+        log.error(f"[INFERENCE-DONE] Error handling inference done: {e}", exc_info=True)
+        db.rollback()
+    finally:
+        db.close()

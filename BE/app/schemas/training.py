@@ -5,12 +5,10 @@ from app.models.training import TrainingStatus
 
 class TrainingJobCreate(BaseModel):
     name: str
-    # 실제 학습 모델은 hyperparameters["model"]이 우선, architecture는 조회용/백업용
-    architecture: Optional[str] = Field(None, description="Optional; hyperparams.model is the source of truth")
-    dataset_name: str = Field(..., description="e.g., 'myset'")
-    dataset_s3_prefix: str = Field(..., description="e.g., 'datasets/myset/' (trailing slash recommended)")
+    dataset_id: int = Field(..., description="Dataset ID to train on")
+    architecture: str = Field(..., description="Model architecture (e.g., 'yolov8n')")
     hyperparameters: Dict[str, Any] = Field(
-        default={"model": "yolov8n", "epochs": 20, "batch": 8, "imgsz": 640}
+        default_factory=lambda: {"epochs": 20, "batch": 8, "imgsz": 640}
     )
 
 class TrainingJobUpdate(BaseModel):
@@ -23,11 +21,12 @@ class TrainingJobResponse(BaseModel):
     name: str
     architecture: Optional[str] = None
     model_id: Optional[int] = None
+    dataset_id: Optional[int] = None
 
-    dataset_name: str
-    dataset_s3_prefix: str
     hyperparameters: Dict[str, Any]
     status: TrainingStatus
+    total_epochs: Optional[int] = None
+    current_epoch: Optional[int] = None
 
     s3_log_uri: Optional[str] = None
     external_job_id: Optional[str] = None

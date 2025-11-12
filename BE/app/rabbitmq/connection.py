@@ -22,19 +22,27 @@ def _params():
 def get_channel():
     conn = pika.BlockingConnection(_params())
     ch = conn.channel()
+
+    # Exchanges
     ch.exchange_declare(exchange="jobs.cmd", exchange_type="topic", durable=True)
     ch.exchange_declare(exchange="jobs.events", exchange_type="topic", durable=True)
-    
-    # Queue 선언
-    ch.queue_declare(queue=settings.TRAIN_REQUEST_QUEUE, durable=True)
+
+    # GPU queues (GPU에서 consume)
+    ch.queue_declare(queue="gpu.train.q", durable=True)
     ch.queue_declare(queue="gpu.onnx.q", durable=True)
     ch.queue_declare(queue="gpu.trt.q", durable=True)
-    
-    # Queue 바인딩
-    ch.queue_bind(queue=settings.TRAIN_REQUEST_QUEUE, exchange="jobs.cmd", routing_key="train.start")
-    ch.queue_bind(queue="gpu.onnx.q", exchange="jobs.cmd", routing_key="onnx.start")
-    ch.queue_bind(queue="gpu.trt.q", exchange="jobs.cmd", routing_key="trt.start")
-    
+    ch.queue_declare(queue="gpu.inference.q", durable=True)
+
+    # Training log queue (Frontend Web STOMP에서 consume - 실시간 metrics)
+    ch.queue_declare(queue="gpu.train.log", durable=True)
+
+    # BE queues (BE에서 consume - inference 결과 처리)
+    ch.queue_declare(queue="be.inference.done", durable=True)
+
+    # Bindings for events exchange
+    ch.queue_bind(exchange="jobs.events", queue="be.inference.done", routing_key="inference.done")
+    ch.queue_bind(exchange="jobs.events", queue="gpu.train.log", routing_key="train.log")
+
     ch.confirm_delivery()
     ch.basic_qos(prefetch_count=10)
     return conn, ch

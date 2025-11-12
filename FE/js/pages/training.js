@@ -4,9 +4,9 @@ class TrainingPage {
     constructor() {
         this.trainingJobs = [];
         this.selectedJob = null;
-        this.metricsInterval = null;
         this.chart = null;
-        this.isPolling = false;
+        this.rabbitmqConnected = false;
+        this.metricsData = {}; // Store real-time metrics by job_id
     }
 
     async init() {
@@ -23,10 +23,12 @@ class TrainingPage {
             }
 
             this.attachEventListeners();
-            this.startConditionalPolling();
+
+            // Connect to RabbitMQ and subscribe to training logs
+            await this.connectToRabbitMQ();
 
             console.log('[Training Page] Initialized successfully');
-            
+
             // FAB 버튼 생성 (init 완료 후)
             console.log('[Training Page] About to create FAB button...');
             try {
@@ -38,6 +40,215 @@ class TrainingPage {
         } catch (error) {
             console.error('[Training Page] Initialization error:', error);
             showToast('Failed to load training page: ' + error.message, 'error');
+        }
+    }
+
+    async connectToRabbitMQ() {
+        try {
+            console.log('[Training Page] Connecting to RabbitMQ...');
+
+            // Connect to RabbitMQ
+            await rabbitmqService.connect();
+            this.rabbitmqConnected = true;
+
+            // Subscribe to training logs queue
+            rabbitmqService.subscribeToTrainingLogs((message) => {
+                this.handleTrainingMetrics(message);
+            });
+
+            console.log('[Training Page] ✅ Connected to RabbitMQ and subscribed to gpu.train.log');
+            showToast('Connected to real-time training updates', 'success');
+
+        } catch (error) {
+            console.error('[Training Page] Failed to connect to RabbitMQ:', error);
+            showToast('Failed to connect to real-time updates. Using manual refresh.', 'warning');
+        }
+    }
+
+    handleTrainingMetrics(message) {
+        /**
+         * Handle real-time training metrics from RabbitMQ
+         * GPU message format:
+         * {
+         *   job_id: "uuid-string",  // external_job_id
+         *   epoch: 0,
+         *   metrics: {
+         *     loss: 38.22,
+         *     "metrics/precision(B)": 0.0,
+         *     "metrics/mAP50(B)": 0.0,
+         *     ...
+         *   }
+         * }
+         */
+        console.log('[Training Page] Received training metrics:', message);
+
+        try {
+            const { job_id: external_job_id, epoch, metrics } = message;
+
+            // Extract loss and accuracy from metrics object
+            const loss = metrics?.loss || metrics?.tloss?.[0] || 0;
+            const accuracy = metrics?.['metrics/mAP50(B)'] || metrics?.['metrics/precision(B)'] || 0;
+
+            console.log(`[Training Page] Metrics: epoch=${epoch}, loss=${loss}, accuracy=${accuracy}`);
+
+            // Just update the display with received metrics (no job matching)
+            this.updateMetricsDisplay({ epoch, loss, accuracy: accuracy * 100 });
+
+            // // TODO: Enable job matching when external_job_id mapping is ready
+            // // Find job by external_job_id (UUID stored in hyperparameters)
+            // const job = this.trainingJobs.find(j =>
+            //     j.hyperparameters?.external_job_id === external_job_id
+            // );
+            //
+            // if (!job) {
+            //     console.warn('[Training Page] No job found for external_job_id:', external_job_id);
+            //     return;
+            // }
+            //
+            // console.log(`[Training Page] Matched job ${job.id} (${job.name}) with metrics:`, { epoch, loss, accuracy });
+            //
+            // // Store metrics by internal job ID
+            // if (!this.metricsData[job.id]) {
+            //     this.metricsData[job.id] = [];
+            // }
+            // this.metricsData[job.id].push({
+            //     epoch,
+            //     loss,
+            //     accuracy: accuracy * 100, // Convert to percentage
+            //     timestamp: new Date()
+            // });
+            //
+            // // Update job metrics
+            // job.current_epoch = epoch;
+            // job.current_loss = loss;
+            // job.current_accuracy = accuracy * 100;
+            //
+            // // Update UI if this is the selected job
+            // if (this.selectedJob && this.selectedJob.id === job.id) {
+            //     this.updateMetricsDisplay({ epoch, loss, accuracy: accuracy * 100 });
+            // }
+            //
+            // // Update stats display
+            // this.updateStatsDisplay();
+
+        } catch (error) {
+            console.error('[Training Page] Error handling training metrics:', error);
+        }
+    }
+
+    updateMetricsDisplay(metrics) {
+        /**
+         * Update UI with new metrics
+         */
+        try {
+            const { epoch, loss, accuracy } = metrics;
+
+            console.log(`[Training Page] Updating UI: epoch=${epoch}, loss=${loss?.toFixed(4)}, accuracy=${accuracy?.toFixed(2)}%`);
+
+            // Update stat cards (correct IDs from HTML)
+            const accuracyEl = document.getElementById('live-accuracy');
+            const lossEl = document.getElementById('live-loss');
+            const epochEl = document.getElementById('live-epoch');
+
+            console.log('[Training Page] Elements found:', {
+                accuracyEl: !!accuracyEl,
+                lossEl: !!lossEl,
+                epochEl: !!epochEl
+            });
+
+            // accuracy is already * 100 from handleTrainingMetrics
+            if (accuracyEl) {
+                accuracyEl.textContent = accuracy.toFixed(2) + '%';
+                console.log(`[Training Page] Updated accuracy: ${accuracyEl.textContent}`);
+            } else {
+                console.warn('[Training Page] ⚠️ live-accuracy element not found!');
+            }
+
+            if (lossEl) {
+                lossEl.textContent = loss.toFixed(4);
+                console.log(`[Training Page] Updated loss: ${lossEl.textContent}`);
+            } else {
+                console.warn('[Training Page] ⚠️ live-loss element not found!');
+            }
+
+            if (epochEl) {
+                epochEl.textContent = `Epoch ${epoch}/${this.selectedJob?.total_epochs || '?'}`;
+                console.log(`[Training Page] Updated epoch: ${epochEl.textContent}`);
+            } else {
+                console.warn('[Training Page] ⚠️ live-epoch element not found!');
+            }
+
+            // Update chart
+            this.updateChartWithNewData(metrics);
+
+            console.log('[Training Page] ✅ UI updated successfully');
+
+        } catch (error) {
+            console.error('[Training Page] Error updating metrics display:', error);
+        }
+    }
+
+    updateChartWithNewData(metrics) {
+        /**
+         * Add new data point to chart
+         */
+        try {
+            if (!this.chart) {
+                console.warn('[Training Page] Chart not initialized, skipping chart update');
+                return;
+            }
+
+            const { epoch, loss, accuracy } = metrics;
+
+            // Add new data point (accuracy already * 100 from handleTrainingMetrics)
+            this.chart.data.labels.push(`Epoch ${epoch}`);
+            this.chart.data.datasets[0].data.push(loss);
+            this.chart.data.datasets[1].data.push(accuracy); // Already percentage
+
+            // Keep only last 50 points for performance
+            if (this.chart.data.labels.length > 50) {
+                this.chart.data.labels.shift();
+                this.chart.data.datasets[0].data.shift();
+                this.chart.data.datasets[1].data.shift();
+            }
+
+            // Update chart
+            this.chart.update('none'); // Use 'none' animation for better performance
+
+            console.log(`[Training Page] Chart updated: ${this.chart.data.labels.length} points`);
+
+        } catch (error) {
+            console.error('[Training Page] Error updating chart:', error);
+        }
+    }
+
+    updateStatsDisplay() {
+        /**
+         * Update statistics display (active jobs, etc.)
+         */
+        const activeJobsEl = document.getElementById('stat-active-jobs');
+        if (activeJobsEl) {
+            const activeCount = this.trainingJobs.filter(j => j.status === 'running').length;
+            activeJobsEl.textContent = activeCount;
+        }
+    }
+
+    destroy() {
+        /**
+         * Cleanup when page is destroyed
+         */
+        console.log('[Training Page] Destroying...');
+
+        // Disconnect from RabbitMQ
+        if (this.rabbitmqConnected) {
+            rabbitmqService.unsubscribe('gpu.train.log');
+            console.log('[Training Page] Unsubscribed from RabbitMQ');
+        }
+
+        // Clear chart
+        if (this.chart) {
+            this.chart.destroy();
+            this.chart = null;
         }
     }
 
@@ -306,122 +517,7 @@ class TrainingPage {
                 this.afterRender();
             }
 
-            // Restart polling if needed
-            this.startConditionalPolling();
         }
-    }
-
-    startConditionalPolling() {
-        console.log('[Training Page] Starting conditional polling...');
-
-        // Clear any existing interval
-        if (this.metricsInterval) {
-            clearInterval(this.metricsInterval);
-            this.metricsInterval = null;
-        }
-
-        // Check if any job is running
-        const hasRunningJobs = this.trainingJobs.some(j => j.status === 'running');
-
-        if (hasRunningJobs) {
-            console.log('[Training Page] Running jobs detected - starting 1-second polling');
-            this.isPolling = true;
-
-            this.metricsInterval = setInterval(async () => {
-                try {
-                    await this.updateRealTimeData();
-                } catch (error) {
-                    console.error('[Training Page] Real-time update error:', error);
-                }
-            }, 1000); // 1 second polling only when training
-        } else {
-            console.log('[Training Page] No running jobs - polling stopped');
-            this.isPolling = false;
-        }
-    }
-
-    async updateRealTimeData() {
-        try {
-            // Reload jobs data
-            const jobs = await apiService.getTrainingJobs();
-            this.trainingJobs = jobs || [];
-
-            // Check if any job is still running
-            const hasRunningJobs = this.trainingJobs.some(j => j.status === 'running');
-
-            // If no running jobs, stop polling
-            if (!hasRunningJobs && this.isPolling) {
-                console.log('[Training Page] All jobs completed - stopping polling');
-                this.stopPolling();
-
-                // Reload page to show final state
-                const app = document.getElementById('app');
-                if (app) {
-                    app.innerHTML = this.render();
-                    await this.afterRender();
-                }
-                return;
-            }
-
-            // Update selected job if it's running
-            if (this.selectedJob) {
-                const updatedSelectedJob = this.trainingJobs.find(j => j.id === this.selectedJob.id);
-                if (updatedSelectedJob) {
-                    this.selectedJob = updatedSelectedJob;
-
-                    // Update live stats
-                    const accuracyEl = document.getElementById('live-accuracy');
-                    const lossEl = document.getElementById('live-loss');
-                    const epochEl = document.getElementById('live-epoch');
-                    const accuracyBar = document.getElementById('accuracy-bar');
-                    const activeCount = document.getElementById('active-jobs-count');
-
-                    if (accuracyEl) accuracyEl.textContent = `${(this.selectedJob.current_accuracy || 0).toFixed(1)}%`;
-                    if (lossEl) lossEl.textContent = (this.selectedJob.current_loss || 0).toFixed(4);
-                    if (epochEl) epochEl.textContent = `Epoch ${this.selectedJob.current_epoch || 0}/${this.selectedJob.total_epochs || 0}`;
-                    if (accuracyBar) accuracyBar.style.width = `${this.selectedJob.current_accuracy || 0}%`;
-                    if (activeCount) activeCount.textContent = this.trainingJobs.filter(j => j.status === 'running').length;
-
-                    // Update chart if selected job is running
-                    if (this.selectedJob.status === 'running') {
-                        await this.updateChart();
-                    }
-                }
-            }
-
-            // Update jobs list every 5 seconds (less frequent to avoid flicker)
-            const now = Date.now();
-            if (!this.lastFullUpdate || now - this.lastFullUpdate > 5000) {
-                this.lastFullUpdate = now;
-                const jobsContainer = document.getElementById('jobs-container');
-                if (jobsContainer) {
-                    jobsContainer.innerHTML = this.renderTrainingJobs();
-                }
-
-                // Update job selector
-                const selector = document.getElementById('job-selector');
-                if (selector) {
-                    const currentValue = selector.value;
-                    selector.innerHTML = this.trainingJobs.map(job => `
-                        <option value="${job.id}" ${job.id === parseInt(currentValue) ? 'selected' : ''}>
-                            ${job.name} - ${job.status.toUpperCase()} (${job.current_epoch || 0}/${job.total_epochs || 0} epochs)
-                        </option>
-                    `).join('');
-                }
-            }
-
-        } catch (error) {
-            console.error('[Training Page] Error updating real-time data:', error);
-        }
-    }
-
-    stopPolling() {
-        if (this.metricsInterval) {
-            clearInterval(this.metricsInterval);
-            this.metricsInterval = null;
-        }
-        this.isPolling = false;
-        console.log('[Training Page] Polling stopped');
     }
 
     async afterRender() {
@@ -565,7 +661,6 @@ class TrainingPage {
 
     cleanup() {
         console.log('[Training Page] Cleaning up...');
-        this.stopPolling();
         this.removeFAB();  // FAB 버튼 제거
         if (this.chart) {
             this.chart.destroy();
@@ -805,10 +900,8 @@ class TrainingPage {
 
         const hyperparameters = {
             epochs: parseInt(document.getElementById('epochs').value),
-            batch_size: parseInt(document.getElementById('batch-size').value),
-            img_size: parseInt(document.getElementById('img-size').value),
-            learning_rate: parseFloat(document.getElementById('learning-rate').value),
-            num_classes: 10
+            batch: parseInt(document.getElementById('batch-size').value),
+            imgsz: parseInt(document.getElementById('img-size').value)
         };
 
         try {
@@ -843,9 +936,6 @@ class TrainingPage {
                 app.innerHTML = this.render();
                 await this.afterRender();
             }
-
-            // Start polling since we have a running job now
-            this.startConditionalPolling();
 
         } catch (error) {
             console.error('Error starting training:', error);

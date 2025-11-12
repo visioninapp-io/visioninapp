@@ -77,23 +77,33 @@ async def create_training_job(
     db: Session = Depends(get_db),
     current_user: dict = Depends(get_current_user)
 ):
+    from app.models.dataset import Dataset
+
     # 0) 이름 중복 방지
     if db.query(TrainingJob).filter(TrainingJob.name == job.name).first():
         raise HTTPException(status_code=400, detail="Training job with this name already exists")
 
-    # 1) HP 병합
+    # 1) Dataset 조회
+    dataset = db.query(Dataset).filter(Dataset.id == job.dataset_id).first()
+    if not dataset:
+        raise HTTPException(status_code=404, detail=f"Dataset with id {job.dataset_id} not found")
+
+    dataset_name = dataset.name
+    dataset_s3_prefix = f"datasets/{dataset_name}/"
+
+    # 2) HP 병합
     hp = {
         **(job.hyperparameters or {}),
-        "dataset_name": job.dataset_name,
-        "dataset_s3_prefix": job.dataset_s3_prefix
+        "dataset_name": dataset_name,
+        "dataset_s3_prefix": dataset_s3_prefix
     }
     total_epochs = hp.get("epochs", 20)
 
-    # 2) job 생성
+    # 3) job 생성
     db_job = TrainingJob(
         name=job.name,
-        dataset_id=None,
-        architecture=job.architecture or hp.get("model", "yolov8n"),
+        dataset_id=job.dataset_id,
+        architecture=job.architecture,
         hyperparameters=hp,
         total_epochs=total_epochs,
         status=TrainingStatus.PENDING,
@@ -101,31 +111,30 @@ async def create_training_job(
     )
     db.add(db_job); db.commit(); db.refresh(db_job)
 
-    # 3) model / v0
+    # 4) model / v0
     default_project = get_or_create_default_project(db, current_user["uid"])
     model = _get_or_create_model(
-        db, name=f"{job.name}_model", project_id=default_project.id, task=None, description=None
+        db, name=f"{job.name}_model", project_id=default_project.id, task=None, description=f"Model for {job.name}"
     )
-    framework_str = (job.architecture or hp.get("model", "pytorch"))
+    framework_str = job.architecture
     framework_version_str = getattr(settings, "FRAMEWORK_VERSION", None) or "unknown"
     mv = _get_or_create_model_v0(
         db, model_id=model.id, framework=framework_str, framework_version=framework_version_str, training_config=hp
     )
 
-    # 4) job ↔ model 연결
+    # 5) job ↔ model 연결
     db_job.model_id = model.id
     db.commit(); db.refresh(db_job)
 
-    # 5) external_job_id
+    # 6) external_job_id
     job_id_str = str(uuid.uuid4()).replace("-", "")
     db_job.hyperparameters["external_job_id"] = job_id_str
     db.commit(); db.refresh(db_job)
 
-    # 6) 아티팩트(PT) 선점 INSERT (storage_uri만 확정)
+    # 7) 아티팩트(PT) 선점 INSERT (storage_uri만 확정)
     try:
-        s3_prefix = _norm_prefix(job.dataset_s3_prefix)
-        dataset_name = job.dataset_name
-        model_key = _slugify_model_name(hp.get("model") or db_job.architecture)
+        model_name = f"{job.name}_model"
+        model_key = _slugify_model_name(model_name)
 
         object_key = f"models/{model_key}/{dataset_name}.pt"  # 버킷 제외 S3 key
         # 중복 방지: 같은 v0에서 같은 key가 있으면 재사용
@@ -141,17 +150,27 @@ async def create_training_job(
             )
             db.add(artifact); db.commit(); db.refresh(artifact)
 
-        # 7) MQ payload 구성 & 발행
+        # 8) MQ payload 구성 & 발행 (GPU가 기대하는 형식)
         payload = {
             "job_id": job_id_str,
-            "dataset": {"s3_prefix": s3_prefix, "name": dataset_name},
-            "output":  {"prefix": f"models/{model_key}", "model_name": f"{dataset_name}.pt"},
+            "dataset": {
+                "s3_prefix": dataset_s3_prefix,
+                "name": dataset_name
+            },
+            "output": {
+                "prefix": f"models/{model_key}",
+                "model_name": "best.pt",
+                "metrics_name": "results.csv"
+            },
             "hyperparams": {
-                "model": model_key,
-                "epochs": hp.get("epochs"),
-                "batch":  hp.get("batch"),
-                "imgsz":  hp.get("imgsz", hp.get("img_size"))
-            }
+                "model": job.architecture,
+                "epochs": hp.get("epochs", 20),
+                "batch": hp.get("batch_size", hp.get("batch", 8)),
+                "imgsz": hp.get("img_size", hp.get("imgsz", 640))
+            },
+            "split": [0.8, 0.1, 0.1],
+            "split_seed": 42,
+            "move_files": False
         }
         send_train_request(payload)
 
@@ -220,26 +239,7 @@ async def create_llm_training(
     db.commit()
     db.refresh(db_job)
     
-    # TrainingJobResponse 생성 (hyperparameters에서 dataset 정보 추출)
-    hp = db_job.hyperparameters or {}
-    response_data = TrainingJobResponse(
-        id=db_job.id,
-        name=db_job.name,
-        architecture=db_job.architecture,
-        model_id=db_job.model_id,
-        dataset_name=hp.get("dataset_name", dataset_name),
-        dataset_s3_prefix=hp.get("dataset_s3_prefix", dataset_s3_prefix),
-        hyperparameters=hp,
-        status=db_job.status,
-        s3_log_uri=getattr(db_job, "s3_log_uri", None),
-        external_job_id=hp.get("external_job_id"),
-        created_at=db_job.created_at,
-        created_by=db_job.created_by,
-        completed_at=db_job.completed_at,
-        error_message=db_job.error_message,
-    )
-    
-    return response_data
+    return db_job
 
 
 def run_llm_training_pipeline(job_id: int, user_query: str, dataset_path: str):

@@ -9,6 +9,9 @@ from typing import Any, Dict
 from llm.tools.s3_client import download_s3
 
 from llm.graph.training.state import TrainState
+import logging
+
+logger = logging.getLogger("uvicorn.error")
 
 # --- RabbitMQ settings ---
 RABBITMQ_URL    = os.getenv("RABBITMQ_URL", "amqp://admin:ssafy1234@k13s303.p.ssafy.io:5672/%2F")
@@ -132,17 +135,17 @@ def _publish_to_rabbitmq(message: Dict[str, Any]) -> None:
     import pika
 
     try:
-        print(f"[train_trial] RabbitMQ 연결 시도: {RABBITMQ_URL}")
+        logger.info(f"[train_trial] RabbitMQ 연결 시도: {RABBITMQ_URL}")
         params = pika.URLParameters(RABBITMQ_URL)
         conn = pika.BlockingConnection(params)
         ch = conn.channel()
 
         # 요청은 cmd exchange로
-        print(f"[train_trial] Exchange 선언: {EXCHANGE_CMD}")
+        logger.info(f"[train_trial] Exchange 선언: {EXCHANGE_CMD}")
         ch.exchange_declare(exchange=EXCHANGE_CMD, exchange_type="topic", durable=True)
 
         body = json.dumps(message, ensure_ascii=False).encode("utf-8")
-        print(f"[train_trial] 메시지 발행: exchange={EXCHANGE_CMD}, routing_key={RK_START}")
+        logger.info(f"[train_trial] 메시지 발행: exchange={EXCHANGE_CMD}, routing_key={RK_START}")
         ch.basic_publish(
             exchange=EXCHANGE_CMD,
             routing_key=RK_START,
@@ -153,9 +156,9 @@ def _publish_to_rabbitmq(message: Dict[str, Any]) -> None:
             ),
         )
         conn.close()
-        print(f"[train_trial] ✅ 메시지 발행 완료")
+        logger.info(f"[train_trial] ✅ 메시지 발행 완료")
     except Exception as e:
-        print(f"[train_trial] ❌ RabbitMQ 메시지 발행 실패: {e}")
+        logger.info(f"[train_trial] ❌ RabbitMQ 메시지 발행 실패: {e}")
         raise
 
 
@@ -170,12 +173,12 @@ def _wait_for_done(job_id: str, timeout_sec: int = 21600) -> Dict[str, Any]:
     import pika
 
     try:
-        print(f"[train_trial] 완료 이벤트 대기 시작: job_id={job_id}, timeout={timeout_sec}초")
+        logger.info(f"[train_trial] 완료 이벤트 대기 시작: job_id={job_id}, timeout={timeout_sec}초")
         params = pika.URLParameters(RABBITMQ_URL)
         conn = pika.BlockingConnection(params)
         ch = conn.channel()
 
-        print(f"[train_trial] Exchange 선언: {EXCHANGE_EVENTS}")
+        logger.info(f"[train_trial] Exchange 선언: {EXCHANGE_EVENTS}")
         ch.exchange_declare(exchange=EXCHANGE_EVENTS, exchange_type="topic", durable=True)
 
         q = ch.queue_declare(queue="", exclusive=True, auto_delete=True)
@@ -186,11 +189,11 @@ def _wait_for_done(job_id: str, timeout_sec: int = 21600) -> Dict[str, Any]:
         rk_status = RK_STATUS_FMT.format(job_id=job_id)
 
         # ✅ 성공 / 실패 / 진행률 모두 구독
-        print(f"[train_trial] 큐 바인딩: {qname} <- {rk_done}")
+        logger.info(f"[train_trial] 큐 바인딩: {qname} <- {rk_done}")
         ch.queue_bind(exchange=EXCHANGE_EVENTS, queue=qname, routing_key=rk_done)
-        print(f"[train_trial] 큐 바인딩: {qname} <- {rk_error}")
+        logger.info(f"[train_trial] 큐 바인딩: {qname} <- {rk_error}")
         ch.queue_bind(exchange=EXCHANGE_EVENTS, queue=qname, routing_key=rk_error)
-        print(f"[train_trial] 큐 바인딩: {qname} <- {rk_status}")
+        logger.info(f"[train_trial] 큐 바인딩: {qname} <- {rk_status}")
         ch.queue_bind(exchange=EXCHANGE_EVENTS, queue=qname, routing_key=rk_status)
 
         deadline = time.monotonic() + timeout_sec
@@ -203,13 +206,13 @@ def _wait_for_done(job_id: str, timeout_sec: int = 21600) -> Dict[str, Any]:
             # 주기 로그
             if now - last_log >= 10:
                 remain = max(0, int(deadline - now))
-                print(f"[train_trial] 대기 중... (남은 시간: {remain}초)")
+                logger.info(f"[train_trial] 대기 중... (남은 시간: {remain}초)")
                 last_log = now
 
             # inactivity_timeout: 메시지 없음
             if method is None:
                 if now > deadline:
-                    print(f"[train_trial] ⏰ 타임아웃: {timeout_sec}초 경과")
+                    logger.info(f"[train_trial] ⏰ 타임아웃: {timeout_sec}초 경과")
                     break
                 continue
 
@@ -218,7 +221,7 @@ def _wait_for_done(job_id: str, timeout_sec: int = 21600) -> Dict[str, Any]:
             try:
                 data = json.loads(raw)
             except Exception as e:
-                print(f"[train_trial] ⚠️ JSON 파싱 오류: {e}, body={raw!r}")
+                logger.info(f"[train_trial] ⚠️ JSON 파싱 오류: {e}, body={raw!r}")
                 # JSON 깨졌으면 이 job은 실패 처리
                 result_payload = {
                     "job_id": job_id,
@@ -233,7 +236,7 @@ def _wait_for_done(job_id: str, timeout_sec: int = 21600) -> Dict[str, Any]:
             event = (data.get("event") or data.get("status") or "").lower()
             rk = method.routing_key
 
-            print(f"[train_trial] 이벤트 수신: rk={rk}, event={event}, data={data}")
+            logger.info(f"[train_trial] 이벤트 수신: rk={rk}, event={event}, data={data}")
 
             # 🔹 다른 job_id면 무시
             if msg_job_id and msg_job_id != job_id:
@@ -245,9 +248,9 @@ def _wait_for_done(job_id: str, timeout_sec: int = 21600) -> Dict[str, Any]:
                 epoch = data.get("epoch")
                 total = data.get("total_epochs")
                 if epoch is not None and total is not None:
-                    print(f"[train_trial] 진행률: {epoch}/{total} epoch 완료")
+                    logger.info(f"[train_trial] 진행률: {epoch}/{total} epoch 완료")
                 else:
-                    print(f"[train_trial] 진행률 이벤트 수신: {data}")
+                    logger.info(f"[train_trial] 진행률 이벤트 수신: {data}")
                 ch.basic_ack(method.delivery_tag)
                 continue  # 계속 다음 메시지 대기
 
@@ -278,7 +281,7 @@ def _wait_for_done(job_id: str, timeout_sec: int = 21600) -> Dict[str, Any]:
             ch.basic_ack(method.delivery_tag)
 
             if now > deadline:
-                print(f"[train_trial] ⏰ 타임아웃: {timeout_sec}초 경과")
+                logger.info(f"[train_trial] ⏰ 타임아웃: {timeout_sec}초 경과")
                 break
 
         # 언바인딩 및 연결 종료
@@ -289,7 +292,7 @@ def _wait_for_done(job_id: str, timeout_sec: int = 21600) -> Dict[str, Any]:
 
         # 아무 결과도 못 받음 → 타임아웃 처리
         if result_payload is None:
-            print(f"[train_trial] ⚠️ 완료/에러 이벤트 미수신")
+            logger.info(f"[train_trial] ⚠️ 완료/에러 이벤트 미수신")
             return {
                 "job_id": job_id,
                 "event": "timeout",
@@ -300,7 +303,7 @@ def _wait_for_done(job_id: str, timeout_sec: int = 21600) -> Dict[str, Any]:
         return result_payload
 
     except Exception as e:
-        print(f"[train_trial] ❌ 완료 이벤트 대기 중 예외 발생: {e}")
+        logger.info(f"[train_trial] ❌ 완료 이벤트 대기 중 예외 발생: {e}")
         return {
             "job_id": job_id,
             "event": "error",
@@ -350,15 +353,15 @@ def train_trial(state: TrainState) -> TrainState:
         payload["split_seed"] = split_seed
     if move_files is not None:
         payload["move_files"] = move_files
-    print(payload)
+    logger.info(payload)
     # 1️⃣ 학습 요청 발행
-    print(f"[train_trial] 학습 요청 발행 시작: job_id={job_id}")
+    logger.info(f"[train_trial] 학습 요청 발행 시작: job_id={job_id}")
     _publish_to_rabbitmq(payload)
 
     # 2️⃣ 완료 이벤트 대기 (job.{job_id}.done)
     wait_sec = int(os.getenv("TRAIN_WAIT_TIMEOUT_SEC", "10800"))
     result = _wait_for_done(job_id, wait_sec)
-    print(f"[train_trial] 완료 이벤트 대기 종료: result={result.get('status', 'unknown')}")
+    logger.info(f"[train_trial] 완료 이벤트 대기 종료: result={result.get('status', 'unknown')}")
 
     # 3️⃣ 결과 반영
     ctx = state.context or {}

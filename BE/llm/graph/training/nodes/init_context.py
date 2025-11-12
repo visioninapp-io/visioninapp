@@ -27,7 +27,9 @@ try:
     import yaml
 except Exception:
     yaml = None
+import logging
 
+logger = logging.getLogger("uvicorn.error")
 
 # -----------------------------
 # 헬퍼 함수
@@ -180,7 +182,7 @@ def init_context(state: TrainState) -> TrainState:
         "resume": state.resume,
     }
 
-    print(json.dumps({
+    logger.info(json.dumps({
         "init_context": {
             "project": project_name,
             "run_id": run_id,

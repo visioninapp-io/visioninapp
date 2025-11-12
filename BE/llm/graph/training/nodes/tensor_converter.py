@@ -162,7 +162,7 @@ def tensor_converter(state: TrainState) -> TrainState:
     """
     print("[tensor_converter] request TensorRT convert via GPU server")
 
-    base_job = (state.job_id or str(uuid.uuid4())).replace(" ", "")
+    base_job = (state.job_id or str(uuid.uuid4()).replace("-", ""))
     job_id = f"{base_job}.trt"
 
     model_s3_uri = _infer_model_s3_uri(state)

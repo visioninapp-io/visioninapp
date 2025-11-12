@@ -308,29 +308,51 @@ def ensure_yolo_index_for_dataset(db: Session, dataset_id: int, label_class: Lab
 
 def upload_data_yaml_for_dataset(db: Session, dataset_id: int) -> str:
     """
-    해당 데이터셋에서 '실제로 사용된' 라벨클래스들을 yolo_index 순으로 names에 넣어
+    이 데이터셋에서 '실제로 사용된' 클래스만 yolo_index 순으로 names에 넣어
     YOLO 학습용 data.yaml을 S3에 업로드한다.
-    (train/val 경로 제외, nc + names만, names는 한 줄 배열)
+    - 보장 로직 없음: dataset_version/ontology 없으면 에러 발생
+    - 어노테이션 없으면 nc:0, names:[] (의도된 동작)
     """
-    # 데이터셋명 폴더
+    # 같은 세션에서 yolo_index 갱신 직후라면 flush로 동기화
+    db.flush()
+
     dataset = db.query(Dataset).filter(Dataset.id == dataset_id).first()
+    if not dataset:
+        raise ValueError(f"dataset_id={dataset_id} not found")
     dataset_name = dataset.name or f"dataset_{dataset_id}"
 
-    # 사용된 클래스(어노테이션 존재 기준)만, yolo_index 오름차순
-    rows = (
+    dv = (
+        db.query(DatasetVersion)
+          .filter(DatasetVersion.dataset_id == dataset_id)
+          .order_by(DatasetVersion.created_at.asc())
+          .first()
+    )
+    if not dv:
+        raise ValueError(f"dataset_id={dataset_id} has no dataset_version")
+    if dv.ontology_version_id is None:
+        raise ValueError(f"dataset_id={dataset_id} has no ontology_version attached")
+
+    # 실제로 사용된(어노테이션 존재) + 현재 온톨로지에 속하는 클래스만, yolo_index 순
+    rows_used = (
         db.query(LabelClass)
           .join(Annotation, Annotation.label_class_id == LabelClass.id)
           .join(Asset, Asset.id == Annotation.asset_id)
           .join(DatasetSplit, DatasetSplit.id == Asset.dataset_split_id)
           .join(DatasetVersion, DatasetVersion.id == DatasetSplit.dataset_version_id)
-          .filter(DatasetVersion.dataset_id == dataset_id, LabelClass.yolo_index.isnot(None))
+          .filter(
+              DatasetVersion.dataset_id == dataset_id,
+              LabelClass.ontology_version_id == dv.ontology_version_id,
+              LabelClass.yolo_index.isnot(None),
+          )
           .distinct()
-          .order_by(LabelClass.yolo_index.asc())
+          .order_by(LabelClass.yolo_index.asc(), LabelClass.id.asc())
           .all()
     )
-    names = [lc.display_name for lc in rows]
 
-    names_inline = yaml.dump(names, allow_unicode=True, default_flow_style=True).strip()
+    names = [lc.display_name for lc in rows_used]  # 어노테이션 없으면 빈 리스트(정상)
+    names_inline = yaml.safe_dump(
+        names, allow_unicode=True, default_flow_style=True
+    ).strip()
     body = f"nc: {len(names)}\nnames: {names_inline}\n"
 
     s3 = boto3.client(
@@ -344,6 +366,6 @@ def upload_data_yaml_for_dataset(db: Session, dataset_id: int) -> str:
         Bucket=settings.AWS_BUCKET_NAME,
         Key=key,
         Body=body.encode("utf-8"),
-        ContentType="text/yaml"
+        ContentType="text/yaml",
     )
     return key

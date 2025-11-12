@@ -117,7 +117,7 @@ async def create_training_job(
     db.commit(); db.refresh(db_job)
 
     # 5) external_job_id
-    job_id_str = uuid.uuid4().hex[:8]
+    job_id_str = uuid.uuid4()
     db_job.hyperparameters["external_job_id"] = job_id_str
     db.commit(); db.refresh(db_job)
 

@@ -81,3 +81,27 @@ app.mount("/uploads", StaticFiles(directory=str(upload_dir)), name="uploads")
 datasets_dir = upload_dir / "datasets"
 datasets_dir.mkdir(exist_ok=True)
 app.mount("/datasets", StaticFiles(directory=str(datasets_dir)), name="datasets")
+
+
+# ========== RabbitMQ Consumer 시작 ==========
+@app.on_event("startup")
+def start_rabbitmq_consumers():
+    """Start RabbitMQ consumers in background threads"""
+    from app.rabbitmq.consumer import start_inference_consumer
+    from app.services.auto_annotation_service import handle_inference_done
+    import logging
+    import threading
+
+    log = logging.getLogger(__name__)
+
+    def run_consumer():
+        try:
+            log.info("[RMQ] Starting inference.done consumer...")
+            start_inference_consumer(handle_inference_done)
+        except Exception as e:
+            log.error(f"[RMQ] Consumer error: {e}", exc_info=True)
+
+    # Background thread로 Consumer 시작
+    consumer_thread = threading.Thread(target=run_consumer, daemon=True)
+    consumer_thread.start()
+    log.info("[RMQ] Consumer thread started")

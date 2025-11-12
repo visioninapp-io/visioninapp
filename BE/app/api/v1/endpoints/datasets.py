@@ -13,6 +13,7 @@ from app.core.database import get_db
 from app.core.auth import get_current_user
 from app.models.dataset import Dataset, Annotation, DatasetVersion
 from app.models.label_class import LabelClass
+from app.models.model import Model
 from app.utils.project_helper import get_or_create_default_project
 from app.utils.dataset_helper import (
     get_or_create_dataset_version,
@@ -695,11 +696,17 @@ async def auto_annotate_dataset(
     db: Session = Depends(get_db),
     current_user: dict = Depends(get_current_user)
 ):
-    """Trigger auto-annotation for a dataset using YOLO model (via AI service)"""
-    print(f"[AUTO-ANNOTATE] Received request: dataset_id={request.dataset_id}, model_id={request.model_id}, conf={getattr(request, 'confidence_threshold', 0.25)}")
+    """
+    Trigger auto-annotation for a dataset using YOLO model (via RabbitMQ)
 
-    from app.services.ai_client import get_ai_client
-    from pathlib import Path
+    - GPU 서버로 inference 요청 전송
+    - GPU가 S3의 /{dataset_name}/labels/ 에 .txt 파일 저장
+    - inference.done 이벤트를 통해 DB 업데이트
+    """
+    import uuid
+    from app.rabbitmq.producer import send_inference_request
+
+    print(f"[AUTO-ANNOTATE] Received request: dataset_id={request.dataset_id}, model_id={request.model_id}, conf={request.confidence_threshold}")
 
     # 데이터셋 확인
     dataset = db.query(Dataset).filter(Dataset.id == request.dataset_id).first()
@@ -716,15 +723,140 @@ async def auto_annotate_dataset(
         asset_type=AssetType.IMAGE,
         limit=100000
     )
-    
+
     if not assets:
         print(f"[AUTO-ANNOTATE] No images in dataset {request.dataset_id}")
         raise HTTPException(status_code=400, detail="No images in dataset")
 
     print(f"[AUTO-ANNOTATE] Found {len(assets)} assets")
 
+    # 모델 S3 경로 결정
+    model_s3_path = None  # S3 경로 (상대 경로)
+
+    if request.model_id:
+        print(f"[AUTO-ANNOTATE] Custom model requested: model_id={request.model_id}")
+
+        # DB에서 모델 정보 조회
+        model = db.query(Model).filter(Model.id == request.model_id).first()
+        if model and model.versions:
+            # 최신 버전의 artifact 가져오기
+            latest_version = sorted(model.versions, key=lambda v: v.created_at, reverse=True)[0]
+            if latest_version.artifacts:
+                artifact = latest_version.artifacts[0]
+                model_s3_path = artifact.storage_uri  # 예: "models/yolov8n/pothole.pt"
+                print(f"[AUTO-ANNOTATE] ✅ Using model from S3: {model_s3_path}")
+            else:
+                print(f"[AUTO-ANNOTATE] ⚠️ Model {request.model_id} has no artifacts")
+        else:
+            print(f"[AUTO-ANNOTATE] ⚠️ Model {request.model_id} not found in DB")
+
+    if not model_s3_path:
+        # 기본 모델 사용 (사전 학습된 YOLO 모델)
+        model_s3_path = "models/default/yolov8n.pt"
+        print(f"[AUTO-ANNOTATE] Using default model: {model_s3_path}")
+
+    # DatasetVersion에서 LabelClass 정보 가져오기
+    dataset_version = get_or_create_dataset_version(db, request.dataset_id, 'v0')
+    if not dataset_version:
+        raise HTTPException(status_code=400, detail="Dataset version not found")
+
+    ontology = dataset_version.ontology_version
+    label_classes = db.query(LabelClass).filter(
+        LabelClass.ontology_version_id == ontology.id
+    ).all()
+
+    # Label class 정보 (GPU 서버에서 클래스 매핑용)
+    class_info = [
+        {
+            "id": lc.id,
+            "display_name": lc.display_name,
+            "yolo_index": lc.yolo_index,
+            "color": lc.color
+        }
+        for lc in label_classes
+    ]
+
+    # External Job ID 생성 (추적용)
+    job_id = str(uuid.uuid4())
+
+    # S3 경로 구성
+    s3_dataset_prefix = f"{dataset.name}"  # 예: "pothole"
+    s3_images_path = f"{s3_dataset_prefix}/images"  # "pothole/images"
+    s3_labels_path = f"{s3_dataset_prefix}/labels"  # "pothole/labels" (GPU가 저장할 경로)
+    s3_data_yaml_path = f"{s3_dataset_prefix}/data.yaml"  # "pothole/data.yaml"
+
+    # Asset 정보 리스트 (파일명만 전달, GPU가 S3에서 다운로드)
+    image_files = [
+        {
+            "asset_id": asset.id,
+            "filename": asset.name,  # 예: "pothole_1.jpg"
+            "width": asset.width,
+            "height": asset.height
+        }
+        for asset in assets
+    ]
+
+    # RabbitMQ payload 구성
+    payload = {
+        "job_id": job_id,
+        "dataset_id": request.dataset_id,
+        "dataset_name": dataset.name,
+        "model_id": request.model_id,
+        "s3": {
+            "bucket": settings.AWS_BUCKET_NAME,
+            "model_path": model_s3_path,  # "models/yolov8n/pothole.pt"
+            "images_prefix": s3_images_path,  # "pothole/images"
+            "labels_prefix": s3_labels_path,  # "pothole/labels" (GPU가 저장)
+            "data_yaml_path": s3_data_yaml_path  # "pothole/data.yaml"
+        },
+        "images": image_files,  # 파일명 리스트
+        "label_classes": class_info,
+        "confidence_threshold": request.confidence_threshold,
+        "overwrite_existing": request.overwrite_existing
+    }
+
     try:
-        print("[AUTO-ANNOTATE] Connecting to AI service...")
+        # RabbitMQ를 통해 inference 요청 발행
+        send_inference_request(payload)
+        print(f"[AUTO-ANNOTATE] Published to RabbitMQ: job_id={job_id}, queue='inference', routing_key='inference.start'")
+
+        return {
+            "message": "Auto-annotation job submitted to GPU server",
+            "job_id": job_id,
+            "dataset_id": request.dataset_id,
+            "dataset_name": dataset.name,
+            "model_id": request.model_id,
+            "model_s3_path": model_s3_path,
+            "status": "queued",
+            "total_images": len(assets),
+            "confidence_threshold": request.confidence_threshold,
+            "s3_labels_path": s3_labels_path
+        }
+
+    except Exception as e:
+        print(f"[AUTO-ANNOTATE] Failed to publish to RabbitMQ: {e}")
+        import traceback
+        print(f"[AUTO-ANNOTATE] Traceback:\n{traceback.format_exc()}")
+        raise HTTPException(
+            status_code=500,
+            detail=f"Failed to submit auto-annotation job: {str(e)}"
+        )
+
+
+@router.post("/auto-annotate-old")
+async def auto_annotate_dataset_old(
+    request: AutoAnnotationRequest,
+    db: Session = Depends(get_db),
+    current_user: dict = Depends(get_current_user)
+):
+    """Old auto-annotation implementation (direct AI service call) - kept for reference"""
+    print(f"[AUTO-ANNOTATE-OLD] Using old sync method")
+
+    from app.services.ai_client import get_ai_client
+    from pathlib import Path
+
+    try:
+        print("[AUTO-ANNOTATE-OLD] Connecting to AI service...")
         ai_client = get_ai_client()
         
         # Check AI service health

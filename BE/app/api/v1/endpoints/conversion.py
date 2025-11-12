@@ -13,7 +13,7 @@ from app.rabbitmq.producer import send_onnx_request, send_trt_request
 router = APIRouter()
 
 def _job_id(s: Optional[str] = None) -> str:
-    return s if s else uuid.uuid4().hex[:8]
+    return s if s else str(uuid.uuid4()).replace("-", "")
 
 def _key_from_s3_uri(s3_uri: str) -> str:
     # "s3://bucket/key/with/path.ext" -> "key/with/path.ext"

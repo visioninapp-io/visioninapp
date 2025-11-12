@@ -20,6 +20,8 @@ EXCHANGE_EVENTS = os.getenv("RMQ_EXCHANGE_EVENTS", "jobs.events")
 
 RK_START = "train.start"             # 학습 요청
 RK_DONE_FMT = "job.{job_id}.done"    # 완료 이벤트 routing key
+RK_ERROR_FMT = "job.{job_id}.error"
+RK_STATUS_FMT = "job.{job_id}.status"
 S3_BUCKET = os.getenv("S3_BUCKET", "visioninapp-bucket")
 
 # ------------------------ 유틸 ------------------------
@@ -158,10 +160,12 @@ def _publish_to_rabbitmq(message: Dict[str, Any]) -> None:
 
 
 
-def _wait_for_done(job_id: str, timeout_sec: int = 10800) -> Dict[str, Any]:
+def _wait_for_done(job_id: str, timeout_sec: int = 21600) -> Dict[str, Any]:
     """
-    GPU 서버가 events exchange (EXCHANGE_EVENTS)에
-    job.{job_id}.done 메시지를 보낼 때까지 대기
+    GPU 서버에서 전송하는 job.{job_id}.done / job.{job_id}.error / job.{job_id}.status 이벤트를 처리.
+    - done: 성공으로 종료
+    - error: 즉시 실패로 종료
+    - status/progress: 진행률 로그만 남기고 계속 대기
     """
     import pika
 
@@ -171,7 +175,6 @@ def _wait_for_done(job_id: str, timeout_sec: int = 10800) -> Dict[str, Any]:
         conn = pika.BlockingConnection(params)
         ch = conn.channel()
 
-        # ✅ done/progress 는 events exchange 에서 온다
         print(f"[train_trial] Exchange 선언: {EXCHANGE_EVENTS}")
         ch.exchange_declare(exchange=EXCHANGE_EVENTS, exchange_type="topic", durable=True)
 
@@ -179,60 +182,131 @@ def _wait_for_done(job_id: str, timeout_sec: int = 10800) -> Dict[str, Any]:
         qname = q.method.queue
 
         rk_done = RK_DONE_FMT.format(job_id=job_id)
-        print(f"[train_trial] 큐 바인딩: queue={qname}, routing_key={rk_done}")
+        rk_error = RK_ERROR_FMT.format(job_id=job_id)
+        rk_status = RK_STATUS_FMT.format(job_id=job_id)
+
+        # ✅ 성공 / 실패 / 진행률 모두 구독
+        print(f"[train_trial] 큐 바인딩: {qname} <- {rk_done}")
         ch.queue_bind(exchange=EXCHANGE_EVENTS, queue=qname, routing_key=rk_done)
+        print(f"[train_trial] 큐 바인딩: {qname} <- {rk_error}")
+        ch.queue_bind(exchange=EXCHANGE_EVENTS, queue=qname, routing_key=rk_error)
+        print(f"[train_trial] 큐 바인딩: {qname} <- {rk_status}")
+        ch.queue_bind(exchange=EXCHANGE_EVENTS, queue=qname, routing_key=rk_status)
 
         deadline = time.monotonic() + timeout_sec
-        result_payload = None
-        last_log_time = time.monotonic()
+        result_payload: Dict[str, Any] | None = None
+        last_log = time.monotonic()
 
         for method, properties, body in ch.consume(qname, inactivity_timeout=1.0):
-            current_time = time.monotonic()
-            # 10초마다 진행 상황 로그
-            if current_time - last_log_time >= 10:
-                remaining = int(deadline - current_time)
-                print(f"[train_trial] 대기 중... (남은 시간: {remaining}초)")
-                last_log_time = current_time
+            now = time.monotonic()
 
+            # 주기 로그
+            if now - last_log >= 10:
+                remain = max(0, int(deadline - now))
+                print(f"[train_trial] 대기 중... (남은 시간: {remain}초)")
+                last_log = now
+
+            # inactivity_timeout: 메시지 없음
             if method is None:
-                if current_time > deadline:
+                if now > deadline:
                     print(f"[train_trial] ⏰ 타임아웃: {timeout_sec}초 경과")
                     break
                 continue
 
-            try:
-                data = json.loads(body.decode("utf-8"))
-                print(f"[train_trial] 메시지 수신: {data.get('event', 'unknown')}")
-            except Exception as e:
-                print(f"[train_trial] ⚠️ JSON 파싱 오류: {e}")
-                data = {"status": "error", "error": "invalid JSON"}
+            raw = body.decode("utf-8", errors="replace")
 
-            # Progress.done 구조와 일치하는지 확인
-            if (
-                str(data.get("job_id")) == job_id
-                and data.get("event") == "done"
-            ):
-                print(f"[train_trial] ✅ 완료 이벤트 수신: job_id={job_id}")
-                result_payload = data
+            try:
+                data = json.loads(raw)
+            except Exception as e:
+                print(f"[train_trial] ⚠️ JSON 파싱 오류: {e}, body={raw!r}")
+                # JSON 깨졌으면 이 job은 실패 처리
+                result_payload = {
+                    "job_id": job_id,
+                    "event": "error",
+                    "status": "error",
+                    "error": f"invalid JSON from GPU server: {e}",
+                }
                 ch.basic_ack(method.delivery_tag)
                 break
 
+            msg_job_id = str(data.get("job_id") or "")
+            event = (data.get("event") or data.get("status") or "").lower()
+            rk = method.routing_key
+
+            print(f"[train_trial] 이벤트 수신: rk={rk}, event={event}, data={data}")
+
+            # 🔹 다른 job_id면 무시
+            if msg_job_id and msg_job_id != job_id:
+                ch.basic_ack(method.delivery_tag)
+                continue
+
+            # 🔹 진행률 이벤트: status/progress
+            if rk == rk_status or event in ("progress", "status"):
+                epoch = data.get("epoch")
+                total = data.get("total_epochs")
+                if epoch is not None and total is not None:
+                    print(f"[train_trial] 진행률: {epoch}/{total} epoch 완료")
+                else:
+                    print(f"[train_trial] 진행률 이벤트 수신: {data}")
+                ch.basic_ack(method.delivery_tag)
+                continue  # 계속 다음 메시지 대기
+
+            # 🔹 실패 이벤트: error routing key 또는 event == error/failed
+            if rk == rk_error or event in ("error", "failed", "train_error"):
+                result_payload = {
+                    **data,
+                    "job_id": msg_job_id or job_id,
+                    "event": "error",
+                    "status": "error",
+                }
+                ch.basic_ack(method.delivery_tag)
+                break
+
+            # 🔹 성공 이벤트: done + event == done
+            if rk == rk_done and event == "done":
+                status = (data.get("status") or "success").lower()
+                result_payload = {
+                    **data,
+                    "job_id": msg_job_id or job_id,
+                    "event": "done",
+                    "status": status,
+                }
+                ch.basic_ack(method.delivery_tag)
+                break
+
+            # 🔹 그 외는 소비만 하고 무시
             ch.basic_ack(method.delivery_tag)
 
+            if now > deadline:
+                print(f"[train_trial] ⏰ 타임아웃: {timeout_sec}초 경과")
+                break
+
+        # 언바인딩 및 연결 종료
         ch.queue_unbind(exchange=EXCHANGE_EVENTS, queue=qname, routing_key=rk_done)
+        ch.queue_unbind(exchange=EXCHANGE_EVENTS, queue=qname, routing_key=rk_error)
+        ch.queue_unbind(exchange=EXCHANGE_EVENTS, queue=qname, routing_key=rk_status)
         conn.close()
 
+        # 아무 결과도 못 받음 → 타임아웃 처리
         if result_payload is None:
-            print(f"[train_trial] ⚠️ 완료 이벤트 미수신")
+            print(f"[train_trial] ⚠️ 완료/에러 이벤트 미수신")
             return {
                 "job_id": job_id,
+                "event": "timeout",
                 "status": "timeout",
-                "error": "no done event received",
+                "error": "no done/error event received",
             }
+
         return result_payload
+
     except Exception as e:
-        print(f"[train_trial] ❌ 완료 이벤트 대기 중 오류: {e}")
-        raise
+        print(f"[train_trial] ❌ 완료 이벤트 대기 중 예외 발생: {e}")
+        return {
+            "job_id": job_id,
+            "event": "error",
+            "status": "error",
+            "error": f"_wait_for_done exception: {e}",
+        }
 
 
 # ------------------- 메인 노드 -------------------
@@ -242,7 +316,7 @@ def train_trial(state: TrainState) -> TrainState:
     EC2 → GPU 학습 요청 발행 전용
     절대 학습 수행 금지. 메시지 구조는 GPU 서버 요구사항에 맞춤.
     """
-    job_id = (state.job_id or str(uuid.uuid4())).replace(" ", "")
+    job_id = state.job_id or str(uuid.uuid4()).replace("-", "")
     merged = _merge_train_params(state)
     ds = _infer_dataset(state)
     out = _infer_output(state, ds["name"])
@@ -299,7 +373,10 @@ def train_trial(state: TrainState) -> TrainState:
     state.job_id = job_id
 
     # 4️⃣ 결과 상태 정리
-    if result.get("event") == "done":
+    event = result.get("event")
+    status = result.get("status")
+
+    if event == "done" and status not in ("error", "failed"):
         artifact = result.get("artifact") or {}
         metrics = result.get("metrics") or {}
         state.model_path = artifact.get("model_path") or artifact.get("s3_path")
@@ -307,12 +384,12 @@ def train_trial(state: TrainState) -> TrainState:
         state.action = "TRAIN_COMPLETED"
         return state
 
-    elif result.get("status") == "timeout":
+    if status == "timeout":
         state.action = "TRAIN_TIMEOUT"
-        state.error = result.get("error")
+        state.error = result.get("error") or "no done/error event received"
         return state
 
-    else:
-        state.action = "TRAIN_FAILED"
-        state.error = result.get("error") or "unknown error"
-        return state
+    # 그 외는 전부 실패로 처리 (event == "error" 포함)
+    state.action = "TRAIN_FAILED"
+    state.error = result.get("error") or f"train failed: {status or event}"
+    return state

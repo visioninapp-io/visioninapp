@@ -23,7 +23,7 @@ def start_inference_consumer(handler: Callable[[dict], None]):
     conn, ch = get_channel()
 
     # Queue 선언
-    queue_name = "inference_done"
+    queue_name = "be.inference.done"
     ch.queue_declare(queue=queue_name, durable=True)
 
     # Binding: jobs.events exchange -> inference_done queue (routing_key: inference.done)
@@ -59,5 +59,13 @@ def start_inference_consumer(handler: Callable[[dict], None]):
     except KeyboardInterrupt:
         log.info("[RMQ Consumer] Stopping consumer...")
         ch.stop_consuming()
+    except Exception as e:
+        log.error(f"[RMQ] Consumer error: {e}")
     finally:
-        conn.close()
+        # Close connection safely (only if not already closed)
+        try:
+            if conn and conn.is_open:
+                conn.close()
+                log.info("[RMQ Consumer] Connection closed")
+        except Exception as e:
+            log.warning(f"[RMQ Consumer] Error closing connection: {e}")

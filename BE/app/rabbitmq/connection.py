@@ -31,12 +31,13 @@ def get_channel():
     ch.queue_declare(queue="gpu.train.q", durable=True)
     ch.queue_declare(queue="gpu.onnx.q", durable=True)
     ch.queue_declare(queue="gpu.trt.q", durable=True)
+    ch.queue_declare(queue="gpu.inference.q",durable=True)
 
     # BE queues (BE에서 consume - inference만 BE에서 처리)
-    ch.queue_declare(queue="inference_done", durable=True)
+    ch.queue_declare(queue="be.inference.done", durable=True)
 
     # Bindings for BE consumers (events exchange)
-    ch.queue_bind(exchange="jobs.events", queue="inference_done", routing_key="inference.done")
+    ch.queue_bind(exchange="jobs.events", queue="be.inference.done", routing_key="inference.done")
 
     ch.confirm_delivery()
     ch.basic_qos(prefetch_count=10)

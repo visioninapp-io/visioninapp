@@ -17,5 +17,3 @@ class Project(Base):
     # Relationships
     datasets = relationship("Dataset", back_populates="project", cascade="all, delete-orphan")
     models = relationship("Model", back_populates="project", cascade="all, delete-orphan")
-    label_ontology_versions = relationship("LabelOntologyVersion", back_populates="project", cascade="all, delete-orphan")
-

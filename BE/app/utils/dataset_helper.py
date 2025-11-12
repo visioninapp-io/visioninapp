@@ -9,40 +9,45 @@ from app.models.label_class import LabelClass
 from app.models.asset import Asset, AssetType
 from app.models.project import Project
 
-import boto3, yaml
+import boto3, yaml, re
 from app.core.config import settings
 
-def get_or_create_label_ontology_version(
-    db: Session, 
-    project_id: int, 
-    version_tag: str = "v1.0"
+def get_or_create_label_ontology_for_dataset_version(
+    db: Session,
+    dataset_version_id: int,
+    version_tag: str = "v1.0",
 ) -> LabelOntologyVersion:
-    """프로젝트의 레이블 온톨로지 버전을 가져오거나 생성"""
-    ontology = db.query(LabelOntologyVersion).filter(
-        LabelOntologyVersion.project_id == project_id,
-        LabelOntologyVersion.version_tag == version_tag
-    ).first()
-    
+    """데이터셋 버전 단위의 레이블 온톨로지 버전을 가져오거나 생성"""
+    ontology = (
+        db.query(LabelOntologyVersion)
+        .filter(
+            LabelOntologyVersion.dataset_version_id == dataset_version_id,
+            LabelOntologyVersion.version_tag == version_tag,
+        )
+        .first()
+    )
     if not ontology:
         ontology = LabelOntologyVersion(
-            project_id=project_id,
+            dataset_version_id=dataset_version_id,
             version_tag=version_tag,
-            is_frozen=False
+            is_frozen=False,
         )
         db.add(ontology)
         db.flush()
-    
     return ontology
 
 
 def get_latest_label_ontology_version(
-    db: Session, 
-    project_id: int
+    db: Session,
+    dataset_version_id: int
 ) -> Optional[LabelOntologyVersion]:
-    """프로젝트의 최신 레이블 온톨로지 버전 조회"""
-    return db.query(LabelOntologyVersion).filter(
-        LabelOntologyVersion.project_id == project_id
-    ).order_by(LabelOntologyVersion.created_at.desc()).first()
+    """데이터셋 버전의 최신 레이블 온톨로지 버전 조회"""
+    return (
+        db.query(LabelOntologyVersion)
+        .filter(LabelOntologyVersion.dataset_version_id == dataset_version_id)
+        .order_by(LabelOntologyVersion.created_at.desc())
+        .first()
+    )
 
 
 def get_or_create_dataset_version(
@@ -63,22 +68,24 @@ def get_or_create_dataset_version(
     ).first()
     
     if not version:
-        # 온톨로지 v1.0 고정 (단일 온톨로지 정책)
-        ontology = get_or_create_label_ontology_version(
-            db, 
-            dataset.project_id, 
-            "v1.0"
-        )
-        
+        # 1) 우선 ontology 없이 버전부터 만든다 (nullable=True가 전제)
         version = DatasetVersion(
             dataset_id=dataset_id,
-            ontology_version_id=ontology.id,
+            ontology_version_id=None,
             version_tag=version_tag,
             is_frozen=False
         )
         db.add(version)
+        db.flush()  # version.id 확보
+
+        # 2) dataset_version 단위 ontology 생성/획득
+        ontology = get_or_create_label_ontology_for_dataset_version(
+            db, dataset_version_id=version.id, version_tag="v1.0"
+        )
+        # 3) version에 ontology FK 세팅
+        version.ontology_version_id = ontology.id
         db.flush()
-    
+
     return version
 
 
@@ -118,48 +125,44 @@ def create_new_dataset_version(
     dataset_id: int,
     version_tag: Optional[str] = None
 ) -> DatasetVersion:
-    """에셋 추가 시 새 버전 생성"""
-    # Dataset 조회
+    """에셋 추가 시 새 버전 생성 (dataset_version 단위 온톨로지 귀속)"""
+    # 1) Dataset 확인
     dataset = db.query(Dataset).filter(Dataset.id == dataset_id).first()
     if not dataset:
         raise ValueError(f"Dataset {dataset_id} not found")
-    
-    # 버전 태그가 지정되지 않으면 자동 생성
+
+    # 2) version_tag 자동 생성 로직 유지
     if version_tag is None:
-        # 최신 버전 찾기
         latest_version = get_latest_dataset_version(db, dataset_id)
-        
-        if latest_version:
-            # 버전 태그에서 숫자 추출 (v1.0 -> 1, v2.0 -> 2)
-            import re
-            match = re.search(r'v?(\d+)', latest_version.version_tag)
-            if match:
-                version_num = int(match.group(1))
+        if latest_version and latest_version.version_tag:
+            m = re.search(r'v?(\d+)', latest_version.version_tag)
+            if m:
+                version_num = int(m.group(1))
                 version_tag = f"v{version_num + 1}.0"
             else:
-                # 숫자를 찾을 수 없으면 기본값
                 version_tag = "v2.0"
         else:
-            # 첫 번째 버전
             version_tag = "v1.0"
-    
-    # 온톨로지 v1.0 고정 (단일 온톨로지 정책)
-    ontology = get_or_create_label_ontology_version(
-        db, 
-        dataset.project_id, 
-        "v1.0"
-    )
-    
-    # 새 DatasetVersion 생성
+
+    # 3) 우선 온톨로지 없이 DatasetVersion 생성 (nullable FK 전제)
     version = DatasetVersion(
         dataset_id=dataset_id,
-        ontology_version_id=ontology.id,
+        ontology_version_id=None,  # ← 먼저 None으로 생성
         version_tag=version_tag,
         is_frozen=False
     )
     db.add(version)
+    db.flush()  # version.id 확보
+
+    # 4) dataset_version 단위 온톨로지 생성/획득 후 FK 연결
+    ontology = get_or_create_label_ontology_for_dataset_version(
+        db,
+        dataset_version_id=version.id,
+        version_tag="v1.0"  # 정책상 v1.0 고정
+    )
+    version.ontology_version_id = ontology.id
     db.flush()
-    
+
     return version
 
 
@@ -263,30 +266,41 @@ def enrich_version_response(db: Session, version: DatasetVersion) -> dict:
 
 def ensure_yolo_index_for_dataset(db: Session, dataset_id: int, label_class: LabelClass) -> int:
     """
-    이 데이터셋(dataset_id)에서 label_class가 처음 쓰이는 경우
-    yolo_index를 0부터 순차로 부여한다.
-    이미 값이 있으면 그대로 반환.
+    주어진 dataset_id(=v0 기준)에서 label_class가 처음 쓰이면
+    해당 데이터셋의 온톨로지 범위에서 yolo_index를 0부터 순차 부여한다.
+    이미 값이 있으면 그대로 반환한다.
     """
-    # 이미 부여된 값이 있으면 그대로 반환
-    if label_class.yolo_index not in (None, 0):
+    # 0도 유효한 값이므로 None만 새로 부여 대상
+    if label_class.yolo_index is not None:
         return label_class.yolo_index
 
-    ontology_version_id = label_class.ontology_version_id
+    # 1) v0 DatasetVersion 확보(없으면 생성)
+    dataset_version = get_or_create_dataset_version(db, dataset_id, 'v0')
+    if not dataset_version:
+        raise ValueError(f"dataset_id={dataset_id} has no dataset_version (v0)")
 
-    # label_class → label_ontology_version → dataset_version → dataset 연결
+    # 2) v0가 참조하는 Ontology 확보(없으면 생성 후 연결)
+    ontology = dataset_version.ontology_version
+    if ontology is None:
+        ontology = get_or_create_label_ontology_for_dataset_version(
+            db, dataset_version_id=dataset_version.id, version_tag="v1.0"
+        )
+        # 양방향 FK 유지 시: DV.fk 채워주고 flush
+        dataset_version.ontology_version_id = ontology.id
+        db.flush()
+
+    # 3) 해당 Ontology 내에서만 최대 yolo_index 조회 → 0-base 부여
     max_idx = (
         db.query(func.max(LabelClass.yolo_index))
-        .join(LabelOntologyVersion, LabelOntologyVersion.id == LabelClass.ontology_version_id)
-        .join(DatasetVersion, DatasetVersion.ontology_version_id == LabelOntologyVersion.id)
-        .filter(DatasetVersion.dataset_id == dataset_id)
-        .scalar()
+          .filter(LabelClass.ontology_version_id == ontology.id)
+          .scalar()
     )
-
     next_idx = 0 if max_idx is None else int(max_idx) + 1
-    label_class.yolo_index = next_idx
 
+    # 4) 인덱스 부여 (label_class의 ontology는 생성 시점에 이미 매핑되어 있다고 가정)
+    label_class.yolo_index = next_idx
     db.add(label_class)
-    db.commit()  # flush만 하면 안 보일 수 있으므로 commit 필수
+    db.flush()  # 커밋은 호출부에서
 
     print(f"[YOLO_INDEX] dataset_id={dataset_id}, class='{label_class.display_name}', index={next_idx}")
     return next_idx

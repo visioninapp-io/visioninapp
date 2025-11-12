@@ -13,9 +13,11 @@ from app.core.database import get_db
 from app.core.auth import get_current_user
 from app.models.dataset import Dataset, Annotation, DatasetVersion
 from app.models.label_class import LabelClass
+from app.models.label_ontology_version import LabelOntologyVersion
 from app.utils.project_helper import get_or_create_default_project
 from app.utils.dataset_helper import (
     get_or_create_dataset_version,
+    get_or_create_label_ontology_for_dataset_version,
     get_or_create_dataset_split,
     get_assets_from_dataset,
     format_assets_as_images,
@@ -1533,24 +1535,20 @@ async def create_label_class(
     db: Session = Depends(get_db),
     current_user: dict = Depends(get_current_user)
 ):
-    from app.models.label_ontology_version import LabelOntologyVersion
-
+    
     dataset = db.query(Dataset).filter(Dataset.id == dataset_id).first()
     if not dataset:
         raise HTTPException(status_code=404, detail="Dataset not found")
 
-    ontology_version = db.query(LabelOntologyVersion).filter(
-        LabelOntologyVersion.project_id == dataset.project_id
-    ).first()
+    dataset_version = get_or_create_dataset_version(db, dataset_id, "v0")
+    ontology_version = dataset_version.ontology_version
     if not ontology_version:
-        ontology_version = LabelOntologyVersion(
-            project_id=dataset.project_id,
-            version_tag="v1.0",
-            description="Default ontology version for self-annotation"
+        ontology_version = get_or_create_label_ontology_for_dataset_version(
+            db, dataset_version.id, version_tag="v1.0"
         )
-        db.add(ontology_version)
+        dataset_version.ontology_version_id = ontology_version.id
         db.commit()
-        db.refresh(ontology_version)
+        db.refresh(dataset_version)
 
     display_name = (label_class_data.get("display_name") or "").strip()
     if not display_name:

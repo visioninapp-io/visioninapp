@@ -316,7 +316,7 @@ def train_trial(state: TrainState) -> TrainState:
     EC2 → GPU 학습 요청 발행 전용
     절대 학습 수행 금지. 메시지 구조는 GPU 서버 요구사항에 맞춤.
     """
-    job_id = (state.job_id or str(uuid.uuid4())).replace(" ", "")
+    job_id = state.job_id or str(uuid.uuid4()).replace("-", "")
     merged = _merge_train_params(state)
     ds = _infer_dataset(state)
     out = _infer_output(state, ds["name"])

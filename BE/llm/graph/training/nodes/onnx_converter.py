@@ -252,7 +252,7 @@ def onnx_converter(state: TrainState) -> TrainState:
     """
     print("[onnx_converter] request ONNX convert via GPU server")
 
-    base_job = (state.job_id or str(uuid.uuid4())).replace(" ", "")
+    base_job = (state.job_id or str(uuid.uuid4()).replace("-", ""))
     job_id = f"{base_job}.onnx"
 
     model_s3_uri = _infer_model_s3_uri(state)

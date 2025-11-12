@@ -900,10 +900,8 @@ class TrainingPage {
 
         const hyperparameters = {
             epochs: parseInt(document.getElementById('epochs').value),
-            batch_size: parseInt(document.getElementById('batch-size').value),
-            img_size: parseInt(document.getElementById('img-size').value),
-            learning_rate: parseFloat(document.getElementById('learning-rate').value),
-            num_classes: 10
+            batch: parseInt(document.getElementById('batch-size').value),
+            imgsz: parseInt(document.getElementById('img-size').value)
         };
 
         try {

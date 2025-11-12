@@ -1,7 +1,7 @@
 // API Service Layer - Handles all backend communications
 // Enhanced with robust error handling and debugging
 
-const API_BASE_URL = 'http://localhost:8000/api/v1';
+const API_BASE_URL = '/api/v1';
 
 class APIService {
     constructor() {
@@ -79,8 +79,14 @@ class APIService {
 
                 try {
                     errorBody = await response.json();
-                    errorDetail = errorBody.detail || `HTTP Error: ${response.status}`;
+                    // Handle detail as array or string
+                    if (Array.isArray(errorBody.detail)) {
+                        errorDetail = errorBody.detail.map(e => e.msg || JSON.stringify(e)).join(', ');
+                    } else {
+                        errorDetail = errorBody.detail || `HTTP Error: ${response.status}`;
+                    }
                     console.error('[API Error Response]', errorBody);
+                    console.error('[API Error Detail]', errorDetail);
                 } catch {
                     errorDetail = `HTTP Error: ${response.status} - ${response.statusText}`;
                 }

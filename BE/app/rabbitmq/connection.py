@@ -24,7 +24,17 @@ def get_channel():
     ch = conn.channel()
     ch.exchange_declare(exchange="jobs.cmd", exchange_type="topic", durable=True)
     ch.exchange_declare(exchange="jobs.events", exchange_type="topic", durable=True)
+    
+    # Queue 선언
     ch.queue_declare(queue=settings.TRAIN_REQUEST_QUEUE, durable=True)
+    ch.queue_declare(queue="gpu.onnx.q", durable=True)
+    ch.queue_declare(queue="gpu.trt.q", durable=True)
+    
+    # Queue 바인딩
+    ch.queue_bind(queue=settings.TRAIN_REQUEST_QUEUE, exchange="jobs.cmd", routing_key="train.start")
+    ch.queue_bind(queue="gpu.onnx.q", exchange="jobs.cmd", routing_key="onnx.start")
+    ch.queue_bind(queue="gpu.trt.q", exchange="jobs.cmd", routing_key="trt.start")
+    
     ch.confirm_delivery()
     ch.basic_qos(prefetch_count=10)
     return conn, ch

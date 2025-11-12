@@ -1859,3 +1859,25 @@ async def delete_label_file(
             status_code=500,
             detail=f"Label 파일 삭제 실패: {str(e)}"
         )
+    
+@router.post("/{dataset_id}/upload-data-yaml")
+async def regenerate_data_yaml_for_dataset(
+    dataset_id: int,
+    db: Session = Depends(get_db),
+    current_user: dict = Depends(get_current_user)
+):
+    """
+    Manually trigger data.yaml regeneration for a dataset.
+    This ensures the latest label classes and YOLO indices are reflected in S3.
+    """
+    dataset = db.query(Dataset).filter(Dataset.id == dataset_id).first()
+    if not dataset:
+        raise HTTPException(status_code=404, detail="Dataset not found")
+
+    try:
+        key = upload_data_yaml_for_dataset(db, dataset_id)
+        print(f"[REGENERATE DATA.YAML] dataset_id={dataset_id}, uploaded to {key}")
+        return {"message": "data.yaml regenerated successfully", "s3_key": key}
+    except Exception as e:
+        print(f"[ERROR] Failed to regenerate data.yaml for dataset {dataset_id}: {str(e)}")
+        raise HTTPException(status_code=500, detail=f"Failed to regenerate data.yaml: {str(e)}")

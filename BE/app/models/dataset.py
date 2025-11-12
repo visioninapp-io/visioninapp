@@ -62,14 +62,14 @@ class DatasetVersion(Base):
 
     id = Column(Integer, primary_key=True, index=True)
     dataset_id = Column(Integer, ForeignKey("dataset.id"), nullable=False, index=True, comment="소속 데이터셋")
-    ontology_version_id = Column(Integer, ForeignKey("label_ontology_version.id"), nullable=False, index=True, comment="온톨로지 버전ID")
+    ontology_version_id = Column(Integer, ForeignKey("label_ontology_version.id"), nullable=True, index=True, comment="온톨로지 버전ID")
     version_tag = Column(String(50), nullable=False, comment="버전 태그")
     is_frozen = Column(Boolean, nullable=False, default=False, comment="수정 불가 여부")
     created_at = Column(DateTime, nullable=False, default=get_kst_now_naive, comment="생성일")
 
     # Relationships
     dataset = relationship("Dataset", back_populates="versions")
-    ontology_version = relationship("LabelOntologyVersion", back_populates="dataset_versions")
+    ontology_version = relationship("LabelOntologyVersion", foreign_keys=[ontology_version_id], uselist=False)
     splits = relationship("DatasetSplit", back_populates="dataset_version", cascade="all, delete-orphan")
     model_versions = relationship("ModelVersion", back_populates="dataset_version")
 

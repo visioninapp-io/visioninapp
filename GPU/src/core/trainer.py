@@ -33,7 +33,50 @@ def _norm_optimizer(v):
         return None
     return str(v)
 
-def train_yolo(data_dir: str, out_dir: str, hyper: dict) -> dict:
+# core/trainer.py (콜백 내부에 추가)
+def _to_jsonable(x):
+    # 로컬 import로 선택 의존성 처리
+    try:
+        import numpy as np
+    except Exception:
+        np = None
+    try:
+        import torch  # type: ignore
+    except Exception:
+        torch = None
+
+    # torch.Tensor 처리
+    if torch is not None and isinstance(x, torch.Tensor):
+        try:
+            return x.item() if x.ndim == 0 else x.detach().cpu().tolist()
+        except Exception:
+            return str(x)
+
+    # numpy 처리
+    if np is not None:
+        if isinstance(x, np.generic):
+            return x.item()
+        if isinstance(x, np.ndarray):
+            return x.tolist()
+
+    # 컬렉션 재귀 처리
+    if isinstance(x, dict):
+        return {k: _to_jsonable(v) for k, v in x.items()}
+    if isinstance(x, (list, tuple)):
+        return [_to_jsonable(v) for v in x]
+
+    # 기본형
+    if isinstance(x, (str, int, float, bool)) or x is None:
+        return x
+
+    # 마지막 수단
+    try:
+        return float(x)
+    except Exception:
+        return str(x)
+
+
+def train_yolo(data_dir: str, out_dir: str, hyper: dict, progress=None) -> dict:
     """
     hyper 예시(모두 선택적):
     {
@@ -115,6 +158,35 @@ def train_yolo(data_dir: str, out_dir: str, hyper: dict) -> dict:
     if mixup is not None:
         train_kwargs["mixup"] = mixup
 
+    if progress is not None:
+        def _on_fit_epoch_end(trainer):
+            try:
+                epoch = int(getattr(trainer, "epoch", 0))
+            except Exception:
+                epoch = 0
+
+            # 원본 메트릭 수집
+            raw_metrics = {}
+            m = getattr(trainer, "metrics", None)
+            if isinstance(m, dict):
+                raw_metrics.update(m)
+            elif m is not None:
+                raw_metrics["metrics"] = str(m)
+
+            for attr in ("loss", "tloss", "nloss", "lr", "ema_loss"):
+                if hasattr(trainer, attr):
+                    raw_metrics[attr] = getattr(trainer, attr)
+
+            # ✅ JSON 직렬화 가능하게 변환
+            safe_metrics = _to_jsonable(raw_metrics)
+
+            try:
+                progress.train_log(epoch=epoch, metrics=safe_metrics)
+            except Exception as e:
+                print(f"[progress] train.log publish failed (after sanitize): {e}")
+
+        model.add_callback("on_fit_epoch_end", _on_fit_epoch_end)
+    
     r = model.train(**train_kwargs)
 
     # 간단 메트릭 반환

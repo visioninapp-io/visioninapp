@@ -72,3 +72,21 @@ class Progress:
         except Exception:
             # 에러 전송도 실패하면 더 이상 물고 늘어지지 않고 로그만 남기고 넘겨도 됨
             print(f"[progress error] failed to publish error event for {self.job_id}: {message}")
+
+    def train_log(self, epoch: int, metrics: dict | None = None):
+        """
+        1 epoch마다 학습 로그 전송.
+        routing_key: train.log
+        body:
+        {
+          "job_id": ...,
+          "epoch": <int>,
+          "metrics": { ... }   # 모든 메트릭 그대로
+        }
+        """
+        body = {
+            "job_id": self.job_id,
+            "epoch": int(epoch),
+            "metrics": metrics or {},
+        }
+        _safe_publish(self.ch, self.ex, "train.log", body)

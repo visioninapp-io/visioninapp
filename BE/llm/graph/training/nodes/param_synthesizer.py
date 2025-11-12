@@ -17,6 +17,9 @@ try:
 except Exception:
     _LLM_AVAILABLE = False
 
+import logging
+
+logger = logging.getLogger("uvicorn.error")
 
 _LLM_TEMPLATE = """
 너는 YOLO 계열 모델 학습 파라미터를 구조화하는 어시스턴트다.
@@ -147,8 +150,8 @@ def param_synthesizer(state: TrainState) -> TrainState:
 
     payload = _clean_dict(payload)
 
-    print("[param_synthesizer] 입력 payload:")
-    print(json.dumps(payload, ensure_ascii=False, indent=2))
+    logger.info("[param_synthesizer] 입력 payload:")
+    logger.info(json.dumps(payload, ensure_ascii=False, indent=2))
 
     # --- LLM 호출 (옵션) ---
     generated: Dict[str, Any] = {}
@@ -168,7 +171,7 @@ def param_synthesizer(state: TrainState) -> TrainState:
             content = getattr(out, "content", "") or ""
             generated = json.loads(content)
         except Exception as e:
-            print(f"[param_synthesizer] ⚠️ LLM 호출 실패 또는 JSON 파싱 오류: {e}")
+            logger.info(f"[param_synthesizer] ⚠️ LLM 호출 실패 또는 JSON 파싱 오류: {e}")
             generated = {}
     else:
         # LLM 미사용 시, parsed/user_overrides 기반으로만 진행
@@ -213,7 +216,7 @@ def param_synthesizer(state: TrainState) -> TrainState:
     state.context = ctx
     state.train_overrides = final
 
-    print("[param_synthesizer] 최종 병합 결과:")
-    print(json.dumps(final, ensure_ascii=False, indent=2))
+    logger.info("[param_synthesizer] 최종 병합 결과:")
+    logger.info(json.dumps(final, ensure_ascii=False, indent=2))
 
     return state

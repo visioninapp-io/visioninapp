@@ -16,6 +16,9 @@ try:
 except Exception:
     _LLM = False
 
+import logging
+
+logger = logging.getLogger("uvicorn.error")
 
 def _clean(s: Optional[str]) -> str:
     return (s or "").strip()
@@ -179,7 +182,7 @@ def query_analyzer(state: TrainState) -> TrainState:
         parsed = _parse_with_llm(user_query)
         if not parsed:
             parsed = _parse_with_rules(user_query)
-            print("[query_analyzer] llm 미사용")
+            logger.info("[query_analyzer] llm 미사용")
 
     # ---- 결과를 state에 비파괴적으로 반영 ----
     # intent / model_variant / precision / notes
@@ -224,5 +227,5 @@ def query_analyzer(state: TrainState) -> TrainState:
         "hpo_enabled": state.hpo.get("enabled") if state.hpo else False,
     }
     state.context = c
-    print("[query_analyzer] 질의 분석 완료")
+    logger.info("[query_analyzer] 질의 분석 완료")
     return state

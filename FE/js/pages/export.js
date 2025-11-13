@@ -9,6 +9,7 @@ class ExportPage {
         this.selectedDataset = null;
         this.selectedVersion = null;
         this.isLoading = true;
+        this.datasetNameMap = {};
     }
 
     async init() {
@@ -37,6 +38,14 @@ class ExportPage {
     async loadDatasets() {
         try {
             this.datasets = await apiService.getDatasets();
+
+            this.datasetNameMap = {};
+            if (Array.isArray(this.datasets)) {
+                this.datasets.forEach(d => {
+                    const name = d.name || d.display_name || `Dataset #${d.id}`;
+                    this.datasetNameMap[d.id] = name;
+                });
+            }
         } catch (error) {
             console.error('Error loading datasets:', error);
             this.datasets = [];
@@ -166,7 +175,6 @@ class ExportPage {
                 <table class="table table-hover">
                     <thead>
                         <tr>
-                            <th>ID</th>
                             <th>Dataset</th>
                             <th>Format</th>
                             <th>Status</th>
@@ -202,10 +210,18 @@ class ExportPage {
             return new Date(dateString).toLocaleString();
         };
 
+        // 🔥 dataset_id -> 실제 dataset 이름으로 표시
+        const datasetId = job.dataset_id || job.version_id;
+        let datasetName = '-';
+        if (datasetId) {
+            datasetName =
+                (this.datasetNameMap && this.datasetNameMap[datasetId]) ||
+                `Dataset #${datasetId}`;
+        }
+
         return `
             <tr>
-                <td>${job.id}</td>
-                <td>Dataset #${job.dataset_id || job.version_id}</td>
+                <td>${datasetName}</td>
                 <td><span class="badge bg-primary">YOLO</span></td>
                 <td><span class="badge ${statusBadge}">${job.status}</span></td>
                 <td>${formatFileSize(job.file_size)}</td>

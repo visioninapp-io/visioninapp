@@ -1162,10 +1162,18 @@ class APIService {
     // ========== EXPORT ==========
     async getExportJobs() {
         console.log('[API] Fetching export jobs...');
-        return this.get('/export/');
+        try {
+            const jobs = await this.get('/export/');
+            console.log(`[API] Fetched ${Array.isArray(jobs) ? jobs.length : 0} export jobs`);
+            return jobs;
+        } catch (error) {
+            console.error('[API] Failed to fetch export jobs:', error);
+            return [];
+        }
     }
 
     async getExportJob(exportId) {
+        console.log(`[API] Fetching export job ${exportId}...`);
         return this.get(`/export/${exportId}`);
     }
 
@@ -1175,11 +1183,67 @@ class APIService {
     }
 
     async downloadExport(exportId) {
+        console.log(`[API] Downloading export ${exportId}...`);
+
         const url = `${this.baseURL}/export/${exportId}/download`;
-        window.open(url, '_blank');
+
+        const headers = {};
+        const token = this.getAuthToken();
+        if (token) {
+            headers['Authorization'] = `Bearer ${token}`;
+            console.log('[API] Download with auth token');
+        } else {
+            console.warn('[API] Download without auth token – backend may return 401');
+        }
+
+        try {
+            const response = await fetch(url, {
+                method: 'GET',
+                headers,
+            });
+
+            console.log('[API] Download response status:', response.status);
+
+            if (!response.ok) {
+                let errorMsg = `Download failed: ${response.status}`;
+                try {
+                    const errBody = await response.json();
+                    errorMsg = errBody.detail || errorMsg;
+                } catch (_) {
+                }
+                console.error('[API] Download error:', errorMsg);
+                throw new Error(errorMsg);
+            }
+
+            const blob = await response.blob();
+
+            let filename = `export_${exportId}.zip`;
+            const disposition = response.headers.get('Content-Disposition');
+            if (disposition && disposition.includes('filename=')) {
+                let tmp = disposition.split('filename=')[1].trim();
+                tmp = tmp.replace(/^["']|["']$/g, '');
+                if (tmp) filename = tmp;
+            }
+
+            const downloadUrl = window.URL.createObjectURL(blob);
+            const a = document.createElement('a');
+            a.href = downloadUrl;
+            a.download = filename;
+            document.body.appendChild(a);
+            a.click();
+            a.remove();
+            window.URL.revokeObjectURL(downloadUrl);
+
+            console.log('[API] Download completed:', filename);
+            return true;
+        } catch (error) {
+            console.error('[API] Download export error:', error);
+            throw error;
+        }
     }
 
     async deleteExport(exportId) {
+        console.log(`[API] Deleting export job ${exportId}...`);
         return this.delete(`/export/${exportId}`);
     }
 }

@@ -1,4 +1,5 @@
 from fastapi import APIRouter, Depends, HTTPException, status, BackgroundTasks
+from fastapi.responses import Response
 from sqlalchemy.orm import Session
 from typing import List, Dict, Any
 from datetime import datetime
@@ -13,6 +14,7 @@ from app.models.model import Model
 from app.models.model_version import ModelVersion
 from app.models.model_artifact import ModelArtifact
 from app.utils.project_helper import get_or_create_default_project
+from app.utils.dataset_helper import get_or_create_dataset_version
 
 from app.schemas.training import (
     TrainingJobCreate, TrainingJobUpdate, TrainingJobResponse
@@ -46,7 +48,7 @@ def _get_or_create_model(db: Session, *, name: str, project_id: int, task: str |
     return m
 
 
-def _get_or_create_model_v0(db: Session, *, model_id: int, framework: str | None, framework_version: str | None, training_config: dict) -> ModelVersion:
+def _get_or_create_model_v0(db: Session, *, model_id: int, dataset_version_id: int, framework: str | None, framework_version: str | None, training_config: dict) -> ModelVersion:
     mv = db.query(ModelVersion).filter(ModelVersion.model_id == model_id).first()
     if mv:
         mv.framework = (framework or mv.framework)
@@ -57,7 +59,7 @@ def _get_or_create_model_v0(db: Session, *, model_id: int, framework: str | None
 
     mv = ModelVersion(
         model_id=model_id,
-        dataset_version_id=None,
+        dataset_version_id=dataset_version_id,
         parent_model_version_id=None,
         init_from_artifact_id=None,
         framework=(framework or "pytorch"),
@@ -69,6 +71,18 @@ def _get_or_create_model_v0(db: Session, *, model_id: int, framework: str | None
     )
     db.add(mv); db.commit(); db.refresh(mv)
     return mv
+
+
+@router.get("/", response_model=List[TrainingJobResponse])
+async def get_training_jobs(
+    db: Session = Depends(get_db),
+    current_user: dict = Depends(get_current_user)
+):
+    """Get all training jobs for current user"""
+    jobs = db.query(TrainingJob).filter(
+        TrainingJob.created_by == current_user["uid"]
+    ).order_by(TrainingJob.created_at.desc()).all()
+    return jobs
 
 
 @router.post("/", response_model=TrainingJobResponse, status_code=status.HTTP_201_CREATED)
@@ -111,7 +125,10 @@ async def create_training_job(
     )
     db.add(db_job); db.commit(); db.refresh(db_job)
 
-    # 4) model / v0
+    # 4) dataset_version 생성/조회 (v0로 고정)
+    dataset_version = get_or_create_dataset_version(db, job.dataset_id, version_tag="v0")
+
+    # 5) model / v0
     default_project = get_or_create_default_project(db, current_user["uid"])
     model = _get_or_create_model(
         db, name=f"{job.name}_model", project_id=default_project.id, task=None, description=f"Model for {job.name}"
@@ -119,7 +136,7 @@ async def create_training_job(
     framework_str = job.architecture
     framework_version_str = getattr(settings, "FRAMEWORK_VERSION", None) or "unknown"
     mv = _get_or_create_model_v0(
-        db, model_id=model.id, framework=framework_str, framework_version=framework_version_str, training_config=hp
+        db, model_id=model.id, dataset_version_id=dataset_version.id, framework=framework_str, framework_version=framework_version_str, training_config=hp
     )
 
     # 5) job ↔ model 연결
@@ -136,7 +153,8 @@ async def create_training_job(
         model_name = f"{job.name}_model"
         model_key = _slugify_model_name(model_name)
 
-        object_key = f"models/{model_key}/{dataset_name}.pt"  # 버킷 제외 S3 key
+        # Use best.pt as standard name (not dataset-specific)
+        object_key = f"models/{model_key}/best.pt"  # 버킷 제외 S3 key
         # 중복 방지: 같은 v0에서 같은 key가 있으면 재사용
         artifact = db.query(ModelArtifact).filter(
             ModelArtifact.model_version_id == mv.id,
@@ -151,6 +169,24 @@ async def create_training_job(
             db.add(artifact); db.commit(); db.refresh(artifact)
 
         # 8) MQ payload 구성 & 발행 (GPU가 기대하는 형식)
+        # Check if using a pretrained model
+        pretrained_model_path = None
+        pretrained_model_id = hp.get("pretrained_model_id")
+        if pretrained_model_id:
+            # Load pretrained model artifact path from model ID
+            pretrained_model = db.query(Model).filter(Model.id == pretrained_model_id).first()
+            if pretrained_model:
+                # Find the latest artifact for this model
+                # Explicitly specify join condition: ModelArtifact.model_version_id == ModelVersion.id
+                pretrained_artifact = db.query(ModelArtifact).join(
+                    ModelVersion, ModelArtifact.model_version_id == ModelVersion.id
+                ).filter(
+                    ModelVersion.model_id == pretrained_model.id
+                ).order_by(ModelArtifact.created_at.desc()).first()
+                if pretrained_artifact:
+                    pretrained_model_path = pretrained_artifact.storage_uri
+                    logger.info(f"[Training] Using pretrained model: {pretrained_model_path}")
+
         payload = {
             "job_id": job_id_str,
             "dataset": {
@@ -158,7 +194,7 @@ async def create_training_job(
                 "name": dataset_name
             },
             "output": {
-                "prefix": f"models/{model_key}",
+                "prefix": f"models/{model_key}",  # Each job gets unique output path
                 "model_name": "best.pt",
                 "metrics_name": "results.csv"
             },
@@ -166,7 +202,8 @@ async def create_training_job(
                 "model": job.architecture,
                 "epochs": hp.get("epochs", 20),
                 "batch": hp.get("batch_size", hp.get("batch", 8)),
-                "imgsz": hp.get("img_size", hp.get("imgsz", 640))
+                "imgsz": hp.get("img_size", hp.get("imgsz", 640)),
+                "pretrained": pretrained_model_path  # Pass pretrained model S3 path if specified
             },
             "split": [0.8, 0.1, 0.1],
             "split_seed": 42,
@@ -303,3 +340,67 @@ def run_llm_training_pipeline(job_id: int, user_query: str, dataset_path: str):
             db.close()
         except Exception:
             pass  # DB 연결이 이미 끊어진 경우 무시
+
+
+@router.get("/results/{model_name}/results.csv")
+async def get_training_results_csv(
+    model_name: str,
+    current_user: dict = Depends(get_current_user)
+):
+    """
+    Get training results CSV from S3
+    Path: s3://bucket/models/{model_name}/results.csv
+    """
+    import boto3
+    from botocore.exceptions import ClientError
+
+    try:
+        logger.info(f"[Training Results] Fetching results.csv for model: {model_name}")
+
+        # Initialize S3 client
+        s3_client = boto3.client(
+            's3',
+            aws_access_key_id=settings.AWS_ACCESS_KEY_ID,
+            aws_secret_access_key=settings.AWS_SECRET_ACCESS_KEY,
+            region_name=settings.AWS_REGION
+        )
+
+        # S3 key for results.csv
+        s3_key = f"models/{model_name}/results.csv"
+
+        logger.info(f"[Training Results] Downloading from s3://{settings.AWS_BUCKET_NAME}/{s3_key}")
+
+        # Download file from S3
+        response = s3_client.get_object(
+            Bucket=settings.AWS_BUCKET_NAME,
+            Key=s3_key
+        )
+
+        # Read CSV content
+        csv_content = response['Body'].read().decode('utf-8')
+
+        logger.info(f"[Training Results] Successfully fetched results.csv ({len(csv_content)} bytes)")
+
+        # Return as CSV response
+        return Response(
+            content=csv_content,
+            media_type='text/csv',
+            headers={
+                'Content-Disposition': f'attachment; filename="{model_name}_results.csv"'
+            }
+        )
+
+    except ClientError as e:
+        error_code = e.response.get('Error', {}).get('Code', 'Unknown')
+        if error_code == 'NoSuchKey':
+            logger.warning(f"[Training Results] File not found: s3://{settings.AWS_BUCKET_NAME}/{s3_key}")
+            raise HTTPException(
+                status_code=404,
+                detail=f"Results file not found for model '{model_name}'"
+            )
+        else:
+            logger.error(f"[Training Results] S3 error: {e}")
+            raise HTTPException(status_code=500, detail=f"Failed to fetch results: {str(e)}")
+    except Exception as e:
+        logger.error(f"[Training Results] Error fetching results: {e}", exc_info=True)
+        raise HTTPException(status_code=500, detail=str(e))

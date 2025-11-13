@@ -157,14 +157,66 @@ async def delete_model(
     db: Session = Depends(get_db),
     current_user: dict = Depends(get_current_user)
 ):
-    """Delete a model"""
+    """Delete a model, its training job, and all artifacts from DB and S3"""
+    import boto3
+    from app.core.config import settings
+    from app.models.model_version import ModelVersion
+    from app.models.training import TrainingJob
+    import logging
+
+    logger = logging.getLogger(__name__)
+
+    # Check if model exists
     model = db.query(Model).filter(Model.id == model_id).first()
     if not model:
         raise HTTPException(status_code=404, detail="Model not found")
 
-    db.delete(model)
-    db.commit()
-    return None
+    try:
+        # Initialize S3 client
+        s3_client = boto3.client(
+            's3',
+            aws_access_key_id=settings.AWS_ACCESS_KEY_ID,
+            aws_secret_access_key=settings.AWS_SECRET_ACCESS_KEY,
+            region_name=settings.AWS_REGION
+        )
+
+        # Get all model versions and their artifacts
+        model_versions = db.query(ModelVersion).filter(
+            ModelVersion.model_id == model_id
+        ).all()
+
+        # Delete all artifacts from S3
+        for version in model_versions:
+            for artifact in version.artifacts:
+                if artifact.storage_uri:
+                    try:
+                        logger.info(f"[Model Delete] Deleting S3 object: {artifact.storage_uri}")
+                        s3_client.delete_object(
+                            Bucket=settings.AWS_BUCKET_NAME,
+                            Key=artifact.storage_uri
+                        )
+                        logger.info(f"[Model Delete] Successfully deleted: {artifact.storage_uri}")
+                    except Exception as e:
+                        logger.error(f"[Model Delete] Failed to delete S3 object {artifact.storage_uri}: {e}")
+                        # Continue even if S3 deletion fails
+
+        # Delete associated training job if exists
+        training_job = db.query(TrainingJob).filter(TrainingJob.model_id == model_id).first()
+        if training_job:
+            logger.info(f"[Model Delete] Deleting associated training job {training_job.id}")
+            db.delete(training_job)
+
+        # Delete from database (cascade will handle versions and artifacts)
+        db.delete(model)
+        db.commit()
+
+        logger.info(f"[Model Delete] Successfully deleted model {model_id} and training job from DB and S3")
+        return None
+
+    except Exception as e:
+        db.rollback()
+        logger.error(f"[Model Delete] Error deleting model {model_id}: {e}")
+        raise HTTPException(status_code=500, detail=f"Failed to delete model: {str(e)}")
 
 
 @router.post("/{model_id}/presigned-upload")

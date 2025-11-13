@@ -39,6 +39,12 @@ def get_channel():
     # BE queues (BE에서 consume - inference 결과 처리)
     ch.queue_declare(queue="be.inference.done", durable=True)
 
+    # Bindings for cmd exchange (commands to GPU workers)
+    ch.queue_bind(exchange="jobs.cmd", queue="gpu.train.q", routing_key="train.start")
+    ch.queue_bind(exchange="jobs.cmd", queue="gpu.onnx.q", routing_key="onnx.start")
+    ch.queue_bind(exchange="jobs.cmd", queue="gpu.trt.q", routing_key="trt.start")
+    ch.queue_bind(exchange="jobs.cmd", queue="gpu.inference.q", routing_key="inference.start")
+
     # Bindings for events exchange
     ch.queue_bind(exchange="jobs.events", queue="be.inference.done", routing_key="inference.done")
     ch.queue_bind(exchange="jobs.events", queue="gpu.train.log", routing_key="train.log")

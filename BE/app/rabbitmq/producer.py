@@ -15,15 +15,13 @@ def _publish(exchange: str, routing_key: str, payload: dict) -> None:
     try:
         body = json.dumps(payload, ensure_ascii=False).encode("utf-8")
         props = BasicProperties(content_type="application/json", delivery_mode=2)
-        ok = ch.basic_publish(
+        ch.basic_publish(
             exchange=exchange,
             routing_key=routing_key,
             body=body,
             properties=props,
             mandatory=True,
         )
-        if not ok:
-            raise RuntimeError("Publish not confirmed")
         log.info(f"[RMQ] published rk={routing_key} job_id={payload.get('job_id')}")
     finally:
         try: ch.close()

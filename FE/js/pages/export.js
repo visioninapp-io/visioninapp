@@ -93,22 +93,6 @@ class ExportPage {
                                                 </select>
                                             </div>
 
-                                            <!-- Export Format -->
-                                            <div class="col-md-6">
-                                                <label class="form-label fw-bold">Export Format</label>
-                                                <select class="form-select" id="export-format" required>
-                                                    <option value="">-- Select Format --</option>
-                                                    <option value="yolov8">YOLOv8</option>
-                                                    <option value="yolov5">YOLOv5</option>
-                                                    <option value="coco">COCO JSON</option>
-                                                    <option value="pascal_voc">Pascal VOC</option>
-                                                    <option value="csv">CSV</option>
-                                                    <option value="tfrecord">TFRecord</option>
-                                                    <option value="createml">CreateML</option>
-                                                </select>
-                                                <small class="text-muted">Choose the annotation format for export</small>
-                                            </div>
-
                                             <!-- Include Images -->
                                             <div class="col-12">
                                                 <div class="form-check">
@@ -140,12 +124,7 @@ class ExportPage {
                                 <div class="card-body">
                                     <h6 class="fw-bold mb-3">Supported Formats</h6>
                                     <ul class="small">
-                                        <li><strong>YOLOv8/v5</strong>: Standard YOLO format with data.yaml</li>
-                                        <li><strong>COCO JSON</strong>: Microsoft COCO format</li>
-                                        <li><strong>Pascal VOC</strong>: XML format for object detection</li>
-                                        <li><strong>CSV</strong>: Simple comma-separated values</li>
-                                        <li><strong>TFRecord</strong>: TensorFlow record format</li>
-                                        <li><strong>CreateML</strong>: Apple CreateML format</li>
+                                        <li><strong>YOLOv12/v11/v8</strong>: Standard YOLO format with data.yaml</li>
                                     </ul>
 
                                     <div class="alert alert-info small mb-0 mt-3">
@@ -227,7 +206,7 @@ class ExportPage {
             <tr>
                 <td>${job.id}</td>
                 <td>Dataset #${job.dataset_id || job.version_id}</td>
-                <td><span class="badge bg-primary">${job.export_format.toUpperCase()}</span></td>
+                <td><span class="badge bg-primary">YOLO</span></td>
                 <td><span class="badge ${statusBadge}">${job.status}</span></td>
                 <td>${formatFileSize(job.file_size)}</td>
                 <td>${formatDate(job.created_at)}</td>
@@ -265,18 +244,16 @@ class ExportPage {
 
     async handleExportSubmit() {
         const datasetId = parseInt(document.getElementById('export-dataset').value);
-        const format = document.getElementById('export-format').value;
         const includeImages = document.getElementById('include-images').checked;
 
-        if (!datasetId || !format) {
-            showToast('Please select dataset and format', 'error');
+        if (!datasetId) {
+            showToast('Please select dataset', 'error');
             return;
         }
 
         try {
             const exportData = {
                 dataset_id: datasetId,
-                export_format: format,
                 include_images: includeImages
             };
 

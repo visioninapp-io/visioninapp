@@ -100,7 +100,6 @@ class ExportJobCreate(BaseModel):
     """Create export job"""
     dataset_id: Optional[int] = None
     version_id: Optional[int] = None
-    export_format: str  # yolov8, yolov5, coco, pascal_voc, tfrecord, csv
     include_images: bool = True
 
 
@@ -109,7 +108,6 @@ class ExportJobResponse(BaseModel):
     id: int
     dataset_id: Optional[int]
     version_id: Optional[int]
-    export_format: str
     include_images: bool
 
     file_path: Optional[str]

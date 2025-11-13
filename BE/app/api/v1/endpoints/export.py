@@ -44,19 +44,11 @@ async def create_export_job(
     else:
         raise HTTPException(status_code=400, detail="Either dataset_id or version_id must be provided")
 
-    # Validate export format
-    valid_formats = ["yolov8", "yolov5", "coco", "pascal_voc", "tfrecord", "csv", "createml"]
-    if export_request.export_format not in valid_formats:
-        raise HTTPException(
-            status_code=400,
-            detail=f"Invalid export format. Must be one of: {', '.join(valid_formats)}"
-        )
-
     # Create export job
     export_job = ExportJob(
         dataset_id=export_request.dataset_id,
         version_id=export_request.version_id,
-        export_format=export_request.export_format,
+        export_format="zip",
         include_images=int(export_request.include_images),
         status="pending",
         created_by=current_user["uid"]
@@ -153,7 +145,6 @@ def process_export_job(export_id: int):
             export_id=job.id,
             dataset_id=job.dataset_id,
             version_id=job.version_id,
-            export_format=job.export_format,
             include_images=bool(job.include_images),
             db=db
         )
@@ -170,9 +161,10 @@ def process_export_job(export_id: int):
         db.commit()
 
     except Exception as e:
-        job.status = "failed"
-        job.error_message = str(e)
-        db.commit()
+        if 'job' in locals() and job is not None:
+            job.status = "failed"
+            job.error_message = str(e)
+            db.commit()
         print(f"Error processing export: {e}")
 
     finally:

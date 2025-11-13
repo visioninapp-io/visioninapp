@@ -6,6 +6,7 @@ class FirebaseAuthService {
         this.auth = null;
         this.currentUser = null;
         this.initialized = false;
+        this.tokenRefreshTimer = null;
     }
 
     // Initialize Firebase
@@ -72,6 +73,40 @@ class FirebaseAuthService {
         }
     }
 
+    startTokenRefreshTimer(user) {
+        // clearInterval
+        if (this.tokenRefreshTimer) {
+            clearInterval(this.tokenRefreshTimer);
+            this.tokenRefreshTimer = null;
+        }
+
+        if (!user) return;
+
+        // 40 minutes
+        const intervalMs = 40 * 60 * 1000;
+
+        this.tokenRefreshTimer = setInterval(async () => {
+            try {
+                console.log('[FirebaseAuth] Forcing ID token refresh...');
+                const newToken = await user.getIdToken(true);  // 강제 새 토큰
+                if (window.apiService) {
+                    window.apiService.setAuthToken(newToken);
+                }
+                console.log('[FirebaseAuth] ID token refreshed by timer');
+            } catch (err) {
+                console.error('[FirebaseAuth] Token refresh timer error:', err);
+            }
+        }, intervalMs);
+    }
+
+    // timer clear
+    clearTokenRefreshTimer() {
+        if (this.tokenRefreshTimer) {
+            clearInterval(this.tokenRefreshTimer);
+            this.tokenRefreshTimer = null;
+        }
+    }
+
     // Hide auth buttons when Firebase is not configured
     hideAuthButtons() {
         const authButtons = document.getElementById('auth-buttons');
@@ -123,6 +158,9 @@ class FirebaseAuthService {
             // User is signed in
             console.log('User signed in:', user.email);
 
+            // After signed in
+            this.startTokenRefreshTimer(user);
+
             // Get Firebase ID token and set it in API service
             user.getIdToken().then((token) => {
                 if (window.apiService) {
@@ -147,6 +185,9 @@ class FirebaseAuthService {
             if (window.apiService) {
                 window.apiService.clearAuth();
             }
+
+            // after signed out
+            this.clearTokenRefreshTimer();
 
             localStorage.removeItem('user');
             this.updateAuthUI(null);
@@ -231,6 +272,7 @@ class FirebaseAuthService {
     async signOut() {
         try {
             await this.auth.signOut();
+            this.clearTokenRefreshTimer();
             // Redirect to home page
             window.location.hash = '#/';
         } catch (error) {

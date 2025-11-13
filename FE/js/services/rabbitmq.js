@@ -32,8 +32,12 @@ class RabbitMQService {
             }
 
             try {
-                // WebSocket URL for RabbitMQ Web STOMP
-                const wsUrl = `ws://${this.config.host}:${this.config.port}/ws`;
+                // WebSocket URL for RabbitMQ Web STOMP (two method for Nginx Serving with https)
+                const isHttps  = window.location.protocol === 'https:';
+                const protocol = isHttps ? 'wss' : 'ws';
+                const portPart = isHttps ? '' : `:${this.config.port}`;
+                const wsUrl    = `${protocol}://${this.config.host}${portPart}/ws`;
+
                 console.log('[RabbitMQ] Connecting to:', wsUrl);
 
                 // Create WebSocket

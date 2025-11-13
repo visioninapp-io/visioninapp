@@ -7,6 +7,8 @@ class DatasetsPage {
         this.datasets = [];
         this.selectedDataset = null;
         this.datasetImages = [];
+        this.currentPage = 1;
+        this.imagesPerPage = 50; // 페이지당 50개 이미지
         this.stats = {
             totalImages: 0,
             totalDatasets: 0,
@@ -16,6 +18,7 @@ class DatasetsPage {
         this.searchQuery = '';
         this.isLoading = true;
         this.loadError = null;
+        this.loadingDatasetId = null; // 현재 로딩 중인 데이터셋 ID 추적 (race condition 방지)
     }
 
     async init() {
@@ -49,10 +52,10 @@ class DatasetsPage {
             app.innerHTML = this.render();
             this.attachEventListeners();
 
-            // Load presigned URLs for images after rendering
+            // 초기 렌더링 후 페이지네이션 및 이미지 로드
             if (this.datasetImages.length > 0) {
-                console.log('[DatasetsPage] Loading presigned URLs after initial render...');
-                this.loadImageUrls();
+                console.log('[DatasetsPage] Initializing pagination and loading first page images...');
+                this.updateImageGrid();
             }
         }
     }
@@ -114,26 +117,96 @@ class DatasetsPage {
     }
 
     async loadDatasetImages(datasetId) {
+        // 현재 로딩 중인 데이터셋 ID 저장
+        this.loadingDatasetId = datasetId;
+        
         try {
             console.log(`[DatasetsPage] Loading images for dataset ${datasetId}...`);
+            
+            // 로딩 프로그레스 표시
+            this.showImageLoadingProgress(0);
+            
             const images = await apiService.getDatasetImages(datasetId);
 
-            if (!images || !Array.isArray(images)) {
-                console.warn('[DatasetsPage] Invalid images response:', images);
-                this.datasetImages = [];
+            // 데이터셋이 변경되었는지 확인
+            if (this.loadingDatasetId !== datasetId) {
+                console.log(`[DatasetsPage] Dataset changed during load, ignoring response for ${datasetId}`);
                 return;
             }
 
-            this.datasetImages = images;
-            console.log(`[DatasetsPage] Loaded ${this.datasetImages.length} images`);
+            if (!images || !Array.isArray(images)) {
+                console.warn('[DatasetsPage] Invalid images response:', images);
+                // 데이터셋이 변경되지 않았을 때만 업데이트
+                if (this.loadingDatasetId === datasetId) {
+                    this.datasetImages = [];
+                    this.currentPage = 1;
+                }
+                return;
+            }
 
-            // Update the image grid if we're already rendered
-            this.updateImageGrid();
+            // 데이터셋이 변경되지 않았을 때만 업데이트
+            if (this.loadingDatasetId === datasetId) {
+                this.datasetImages = images;
+                this.currentPage = 1; // 새 데이터셋 선택 시 페이지 초기화
+                console.log(`[DatasetsPage] Loaded ${this.datasetImages.length} images`);
+
+                // Update the image grid if we're already rendered
+                // DOM이 준비되었을 때만 업데이트
+                const container = document.getElementById('images-grid-container');
+                if (container) {
+                    this.updateImageGrid();
+                }
+            }
 
         } catch (error) {
             console.error(`[DatasetsPage] Error loading images for dataset ${datasetId}:`, error);
-            this.datasetImages = [];
-            this.updateImageGrid();
+            
+            // 데이터셋이 변경되지 않았을 때만 에러 처리
+            if (this.loadingDatasetId === datasetId) {
+                this.datasetImages = [];
+                this.currentPage = 1;
+                const container = document.getElementById('images-grid-container');
+                if (container) {
+                    this.updateImageGrid();
+                }
+            } else {
+                console.log(`[DatasetsPage] Dataset changed during error, ignoring error for ${datasetId}`);
+            }
+        } finally {
+            // 로딩 완료 시 ID 초기화 (현재 선택된 데이터셋과 일치할 때만)
+            if (this.loadingDatasetId === datasetId) {
+                this.loadingDatasetId = null;
+            }
+        }
+    }
+
+    showImageLoadingProgress(percent) {
+        const container = document.getElementById('images-grid-container');
+        if (container && percent < 100) {
+            container.innerHTML = `
+                <div class="text-center py-5">
+                    <div class="spinner-border text-primary mb-3" style="width: 3rem; height: 3rem;" role="status">
+                        <span class="visually-hidden">Loading...</span>
+                    </div>
+                    <h5 class="text-muted mb-3">Loading Images...</h5>
+                    <div class="progress mx-auto mb-2" style="max-width: 400px; height: 8px;">
+                        <div class="progress-bar progress-bar-striped progress-bar-animated" 
+                             role="progressbar" 
+                             style="width: 100%" 
+                             aria-valuenow="100" 
+                             aria-valuemin="0" 
+                             aria-valuemax="100">
+                        </div>
+                    </div>
+                    <p class="text-muted small mb-0">이미지 목록을 가져오는 중입니다...</p>
+                </div>
+            `;
+        }
+        
+        // 이미지 개수 badge 숨기기
+        const badge = document.getElementById('dataset-images-badge');
+        if (badge) {
+            badge.style.display = 'none';
         }
     }
 
@@ -193,6 +266,23 @@ class DatasetsPage {
         }
 
         return `
+            <style>
+                #images-grid-container::-webkit-scrollbar {
+                    width: 6px;
+                    height: 6px;
+                }
+                #images-grid-container::-webkit-scrollbar-track {
+                    background: #f1f1f1;
+                    border-radius: 3px;
+                }
+                #images-grid-container::-webkit-scrollbar-thumb {
+                    background: #888;
+                    border-radius: 3px;
+                }
+                #images-grid-container::-webkit-scrollbar-thumb:hover {
+                    background: #555;
+                }
+            </style>
             <div class="min-vh-100 bg-light">
                 <div class="container-fluid py-4">
                     <!-- Page Header -->
@@ -346,7 +436,7 @@ class DatasetsPage {
                                 <i class="bi bi-info-circle me-2"></i>Dataset Information
                             </h5>
                         </div>
-                        <div class="card-body">
+                        <div class="card-body" id="dataset-info-body">
                             <h4 class="fw-bold mb-3">${dataset.name}</h4>
                             ${dataset.description ? `<p class="text-muted mb-3">${dataset.description}</p>` : ''}
 
@@ -405,7 +495,7 @@ class DatasetsPage {
                                 <div class="col">
                                     <h5 class="mb-0 fw-bold">
                                         <i class="bi bi-images me-2"></i>Dataset Images
-                                        <span class="badge bg-primary ms-2">${this.datasetImages.length}</span>
+                                        <span class="badge bg-primary ms-2" id="dataset-images-badge" title="전체 ${this.datasetImages.length}개 이미지">${this.datasetImages.length}</span>
                                     </h5>
                                 </div>
                                 <div class="col-auto">
@@ -415,8 +505,17 @@ class DatasetsPage {
                                 </div>
                             </div>
                         </div>
-                        <div class="card-body" id="images-grid-container" style="max-height: 600px; overflow-y: auto;">
+                        <div class="card-body">
+                            <!-- 페이지네이션 컨테이너 (상단) -->
+                            <div id="pagination-container-top"></div>
+                            
+                            <!-- 이미지 그리드 -->
+                            <div id="images-grid-container" style="max-height: 600px; overflow-y: auto;">
                             ${this.renderImageGrid()}
+                            </div>
+                            
+                            <!-- 페이지네이션 컨테이너 (하단) -->
+                            <div id="pagination-container" class="mt-3"></div>
                         </div>
                     </div>
                 </div>
@@ -438,9 +537,16 @@ class DatasetsPage {
             `;
         }
 
+        // 현재 페이지의 이미지만 계산
+        const startIdx = (this.currentPage - 1) * this.imagesPerPage;
+        const endIdx = startIdx + this.imagesPerPage;
+        const pageImages = this.datasetImages.slice(startIdx, endIdx);
+
+        console.log(`[DatasetsPage] Displaying page ${this.currentPage}: images ${startIdx + 1}-${Math.min(endIdx, this.datasetImages.length)} of ${this.datasetImages.length}`);
+
         return `
             <div class="row g-3">
-                ${this.datasetImages.map(image => this.renderImageCard(image)).join('')}
+                ${pageImages.map(image => this.renderImageCard(image)).join('')}
             </div>
         `;
     }
@@ -452,11 +558,17 @@ class DatasetsPage {
         return `
             <div class="col-md-4 col-lg-3">
                 <div class="card border ${isAnnotated ? 'border-success' : ''} hover-shadow">
-                    <div class="position-relative">
+                    <div class="position-relative" style="background-color: #f8f9fa;">
                         <img id="${imageId}" class="card-img-top" alt="${image.filename}"
-                             style="height: 200px; object-fit: cover;"
+                             style="height: 200px; object-fit: cover; opacity: 0; transition: opacity 0.3s;"
                              src="https://via.placeholder.com/300x200?text=Loading..."
-                             data-asset-id="${image.id}">
+                             data-asset-id="${image.id}"
+                             onload="this.style.opacity='1'">
+                        <div class="position-absolute top-50 start-50 translate-middle" id="loading-${image.id}">
+                            <div class="spinner-border text-primary" role="status">
+                                <span class="visually-hidden">Loading...</span>
+                            </div>
+                        </div>
                         ${isAnnotated ? `
                             <span class="position-absolute top-0 end-0 m-2">
                                 <span class="badge bg-success">
@@ -528,6 +640,10 @@ class DatasetsPage {
 
                 if (dataset) {
                     console.log(`[DatasetsPage] Dataset changed to: ${dataset.name}`);
+                    
+                    // 로딩 상태 표시
+                    this.showDatasetLoadingState(dataset.name);
+                    
                     this.selectedDataset = dataset;
                     await this.loadDatasetImages(datasetId);
 
@@ -536,50 +652,334 @@ class DatasetsPage {
                     if (app) {
                         app.innerHTML = this.render();
                         this.attachEventListeners();
+                        
+                        // 데이터셋 변경 후 페이지네이션 및 이미지 로드
+                        if (this.datasetImages.length > 0) {
+                            this.updateImageGrid();
+                        }
                     }
                 }
             });
         }
     }
 
-    updateImageGrid() {
+    showDatasetLoadingState(datasetName) {
+        // Dataset Information 카드에 로딩 상태 표시
+        const datasetInfoContainer = document.getElementById('dataset-info-body');
+        if (datasetInfoContainer) {
+            datasetInfoContainer.innerHTML = `
+                <div class="text-center py-5">
+                    <div class="spinner-border text-primary mb-3" style="width: 2.5rem; height: 2.5rem;" role="status">
+                        <span class="visually-hidden">Loading...</span>
+                    </div>
+                    <h5 class="text-muted mb-3">Loading Dataset...</h5>
+                    <div class="progress mx-auto mb-2" style="max-width: 300px; height: 8px;">
+                        <div class="progress-bar progress-bar-striped progress-bar-animated" 
+                             role="progressbar" 
+                             style="width: 100%" 
+                             aria-valuenow="100" 
+                             aria-valuemin="0" 
+                             aria-valuemax="100">
+                        </div>
+                    </div>
+                    <p class="text-muted small mb-0">데이터셋 정보를 불러오는 중입니다...</p>
+                </div>
+            `;
+        }
+        
+        // 이미지 그리드 컨테이너에 로딩 상태 표시
         const container = document.getElementById('images-grid-container');
         if (container) {
-            console.log('[DatasetsPage] Updating image grid...');
-            container.innerHTML = this.renderImageGrid();
+            container.innerHTML = `
+                <div class="text-center py-5">
+                    <div class="spinner-border text-primary mb-3" style="width: 3rem; height: 3rem;" role="status">
+                        <span class="visually-hidden">Loading...</span>
+                    </div>
+                    <h5 class="text-muted">Loading Dataset Images...</h5>
+                    <p class="text-muted small">데이터셋 "${datasetName}"의 이미지를 불러오는 중입니다.</p>
+                </div>
+            `;
+        }
+        
+        // 이미지 개수 badge 숨기기
+        const badge = document.getElementById('dataset-images-badge');
+        if (badge) {
+            badge.style.display = 'none';
+        }
+        
+        // 페이지네이션 숨기기
+        const paginationContainer = document.getElementById('pagination-container');
+        const paginationContainerTop = document.getElementById('pagination-container-top');
+        if (paginationContainer) paginationContainer.innerHTML = '';
+        if (paginationContainerTop) paginationContainerTop.innerHTML = '';
+    }
 
-            // Load presigned URLs for all images
-            this.loadImageUrls();
+    updateImageGrid() {
+        const container = document.getElementById('images-grid-container');
+        if (!container) {
+            console.warn('[DatasetsPage] Image grid container not found');
+            return;
+        }
+
+        console.log('[DatasetsPage] Updating image grid...');
+        
+        // 현재 페이지의 이미지 계산
+        const startIdx = (this.currentPage - 1) * this.imagesPerPage;
+        const endIdx = startIdx + this.imagesPerPage;
+        const pageImages = this.datasetImages.slice(startIdx, endIdx);
+
+        // 이미지 그리드 렌더링
+        container.innerHTML = this.renderImageGrid();
+
+        // 이미지 개수 badge 다시 표시
+        const badge = document.getElementById('dataset-images-badge');
+        if (badge) {
+            badge.style.display = 'inline';
+        }
+
+        // 페이지네이션 업데이트
+        this.updatePagination();
+
+        // 현재 페이지의 이미지 로드 (비동기)
+        if (pageImages.length > 0) {
+            console.log(`[DatasetsPage] Loading images for page ${this.currentPage}...`);
+            this.loadImageUrlsForCurrentPage(pageImages);
         }
     }
 
-    async loadImageUrls() {
-        if (this.datasetImages.length === 0) return;
+    /**
+     * 현재 페이지의 이미지들에 대한 Presigned URL을 배치로 가져오고
+     * 동시성 제어하며 로드
+     */
+    async loadImageUrlsForCurrentPage(pageImages) {
+        if (pageImages.length === 0) return;
+        if (!this.selectedDataset) return; // 데이터셋이 선택되지 않았으면 중단
 
-        console.log(`[DatasetsPage] Loading presigned URLs for ${this.datasetImages.length} images...`);
+        const CONCURRENT_LOADS = 10; // 동시에 10개씩만 이미지 로드
+        const currentDatasetId = this.selectedDataset.id; // 현재 데이터셋 ID 저장
 
-        // Load URLs in parallel
-        const urlPromises = this.datasetImages.map(async (image) => {
-            try {
-                const response = await apiService.get(`/datasets/assets/${image.id}/presigned-download`);
+        console.log(`[DatasetsPage] Loading presigned URLs for ${pageImages.length} images on current page...`);
 
-                if (response && response.download_url) {
+        try {
+            // Step 1: 배치 API로 모든 Presigned URL 한 번에 가져오기
+            const assetIds = pageImages.map(img => img.id);
+            const urlsResponse = await apiService.getPresignedDownloadUrlsBatch(
+                currentDatasetId,
+                assetIds
+            );
+
+            // 데이터셋이 변경되었는지 확인
+            if (!this.selectedDataset || this.selectedDataset.id !== currentDatasetId) {
+                console.log(`[DatasetsPage] Dataset changed during URL load, ignoring response`);
+                return;
+            }
+
+            console.log(`[DatasetsPage] Received ${urlsResponse.urls.length} presigned URLs`);
+
+            // URL Map 생성 (빠른 조회를 위해)
+            const urlMap = new Map(
+                urlsResponse.urls.map(item => [item.asset_id, item.download_url])
+            );
+
+            // Step 2: 동시성 제어하며 이미지 로드 (10개씩)
+            for (let i = 0; i < pageImages.length; i += CONCURRENT_LOADS) {
+                const chunk = pageImages.slice(i, i + CONCURRENT_LOADS);
+                
+                await Promise.all(chunk.map(async (image) => {
                     const imgElement = document.getElementById(`image-${image.id}`);
-                    if (imgElement) {
-                        imgElement.src = response.download_url;
+                    if (!imgElement) return;
+
+                    const url = urlMap.get(image.id);
+                    const loadingSpinner = document.getElementById(`loading-${image.id}`);
+                    
+                    if (url) {
+                        // 이미지 로딩 시작
+                        imgElement.src = url;
+                        
+                        // 로딩 완료 핸들링
+                        imgElement.onload = () => {
+                            imgElement.style.opacity = '1';
+                            if (loadingSpinner) {
+                                loadingSpinner.remove();
+                            }
+                        };
+                        
+                        // 로딩 에러 핸들링
+                        imgElement.onerror = () => {
+                            console.warn(`[DatasetsPage] Failed to load image ${image.id}`);
+                            imgElement.src = 'https://via.placeholder.com/300x200?text=Load+Failed';
+                            imgElement.style.opacity = '1';
+                            if (loadingSpinner) {
+                                loadingSpinner.remove();
+                            }
+                        };
+                    } else {
+                        console.warn(`[DatasetsPage] No URL found for image ${image.id}`);
+                        imgElement.src = 'https://via.placeholder.com/300x200?text=No+URL';
+                        imgElement.style.opacity = '1';
+                        if (loadingSpinner) {
+                            loadingSpinner.remove();
+                        }
                     }
-                }
-            } catch (error) {
-                console.error(`[DatasetsPage] Failed to load URL for image ${image.id}:`, error);
-                const imgElement = document.getElementById(`image-${image.id}`);
-                if (imgElement) {
-                    imgElement.src = 'https://via.placeholder.com/300x200?text=Load+Failed';
+                }));
+
+                // 각 청크 사이에 짧은 대기 (브라우저 부하 완화)
+                if (i + CONCURRENT_LOADS < pageImages.length) {
+                    await new Promise(resolve => setTimeout(resolve, 50));
                 }
             }
-        });
 
-        await Promise.all(urlPromises);
-        console.log('[DatasetsPage] All image URLs loaded');
+            console.log('[DatasetsPage] All image URLs loaded for current page');
+
+        } catch (error) {
+            console.error('[DatasetsPage] Failed to load image URLs:', error);
+            
+            // 데이터셋이 변경되지 않았을 때만 에러 표시
+            if (this.selectedDataset && this.selectedDataset.id === currentDatasetId) {
+                showToast('이미지 로드 중 오류 발생', 'error');
+                
+                // 에러 발생 시 모든 이미지를 실패 placeholder로 변경
+                pageImages.forEach(image => {
+                    const imgElement = document.getElementById(`image-${image.id}`);
+                    const loadingSpinner = document.getElementById(`loading-${image.id}`);
+                    if (imgElement) {
+                        imgElement.src = 'https://via.placeholder.com/300x200?text=Load+Failed';
+                        imgElement.style.opacity = '1';
+                    }
+                    if (loadingSpinner) {
+                        loadingSpinner.remove();
+                    }
+                });
+            } else {
+                console.log(`[DatasetsPage] Dataset changed during error, ignoring error`);
+            }
+        }
+    }
+
+
+    updatePagination() {
+        const paginationContainer = document.getElementById('pagination-container');
+        const paginationContainerTop = document.getElementById('pagination-container-top');
+        
+        if (!paginationContainer || !paginationContainerTop) return;
+
+        const totalPages = Math.ceil(this.datasetImages.length / this.imagesPerPage);
+
+        // 페이지 정보 표시
+        const startIdx = (this.currentPage - 1) * this.imagesPerPage + 1;
+        const endIdx = Math.min(this.currentPage * this.imagesPerPage, this.datasetImages.length);
+
+        // 50장 미만이면 정보만 표시, 버튼은 숨김
+        if (totalPages <= 1) {
+            const infoHTML = `
+                <div class="d-flex justify-content-between align-items-center mb-3">
+                    <div class="text-muted">
+                        <small>Showing ${startIdx}-${endIdx} of ${this.datasetImages.length} images</small>
+                    </div>
+                </div>
+            `;
+            paginationContainer.innerHTML = infoHTML;
+            paginationContainerTop.innerHTML = infoHTML;
+            return;
+        }
+
+        // 50장 이상이면 페이지네이션 버튼 포함
+        const paginationHTML = `
+            <div class="d-flex justify-content-between align-items-center mb-3">
+                <div class="text-muted">
+                    <small>Showing ${startIdx}-${endIdx} of ${this.datasetImages.length} images</small>
+                </div>
+                <nav aria-label="Image pagination">
+                    <ul class="pagination pagination-sm mb-0">
+                        <li class="page-item ${this.currentPage === 1 ? 'disabled' : ''}">
+                            <a class="page-link" href="#" data-page="1" aria-label="First">
+                                <span aria-hidden="true">&laquo;&laquo;</span>
+                            </a>
+                        </li>
+                        <li class="page-item ${this.currentPage === 1 ? 'disabled' : ''}">
+                            <a class="page-link" href="#" data-page="${this.currentPage - 1}" aria-label="Previous">
+                                <span aria-hidden="true">&laquo;</span>
+                            </a>
+                        </li>
+                        ${this.generatePaginationNumbers(totalPages)}
+                        <li class="page-item ${this.currentPage === totalPages ? 'disabled' : ''}">
+                            <a class="page-link" href="#" data-page="${this.currentPage + 1}" aria-label="Next">
+                                <span aria-hidden="true">&raquo;</span>
+                            </a>
+                        </li>
+                        <li class="page-item ${this.currentPage === totalPages ? 'disabled' : ''}">
+                            <a class="page-link" href="#" data-page="${totalPages}" aria-label="Last">
+                                <span aria-hidden="true">&raquo;&raquo;</span>
+                            </a>
+                        </li>
+                    </ul>
+                </nav>
+            </div>
+        `;
+
+        paginationContainer.innerHTML = paginationHTML;
+        paginationContainerTop.innerHTML = paginationHTML;
+
+        // 페이지 클릭 이벤트 리스너 등록
+        [paginationContainer, paginationContainerTop].forEach(container => {
+            container.querySelectorAll('a.page-link').forEach(link => {
+                link.addEventListener('click', (e) => {
+                    e.preventDefault();
+                    const page = parseInt(e.target.closest('a').dataset.page);
+                    
+                    if (page && page !== this.currentPage && page >= 1 && page <= totalPages) {
+                        this.currentPage = page;
+                        this.updateImageGrid();
+                        
+                        // 페이지 변경 시 스크롤을 컨테이너 상단으로 이동
+                        const imageGridContainer = document.getElementById('images-grid-container');
+                        if (imageGridContainer) {
+                            imageGridContainer.scrollTop = 0;
+                        }
+                        
+                        // 전체 페이지도 상단으로 스크롤
+                        const cardBody = imageGridContainer?.parentElement;
+                        if (cardBody) {
+                            cardBody.scrollIntoView({ behavior: 'smooth', block: 'start' });
+                        }
+                    }
+                });
+            });
+        });
+    }
+
+    generatePaginationNumbers(totalPages) {
+        const maxVisible = 5;
+        let startPage = Math.max(1, this.currentPage - Math.floor(maxVisible / 2));
+        let endPage = Math.min(totalPages, startPage + maxVisible - 1);
+
+        // 끝에 가까우면 시작 페이지 조정
+        if (endPage - startPage < maxVisible - 1) {
+            startPage = Math.max(1, endPage - maxVisible + 1);
+        }
+
+        let html = '';
+
+        // 첫 페이지가 범위에 없으면 ... 추가
+        if (startPage > 1) {
+            html += `<li class="page-item disabled"><span class="page-link">...</span></li>`;
+        }
+
+        // 페이지 번호들
+        for (let i = startPage; i <= endPage; i++) {
+            html += `
+                <li class="page-item ${i === this.currentPage ? 'active' : ''}">
+                    <a class="page-link" href="#" data-page="${i}">${i}</a>
+                </li>
+            `;
+        }
+
+        // 마지막 페이지가 범위에 없으면 ... 추가
+        if (endPage < totalPages) {
+            html += `<li class="page-item disabled"><span class="page-link">...</span></li>`;
+        }
+
+        return html;
     }
 
     async refreshImages() {
@@ -638,6 +1038,11 @@ class DatasetsPage {
         if (app) {
             app.innerHTML = this.render();
             this.attachEventListeners();
+            
+            // 페이지 다시 로드 후 이미지 그리드 업데이트
+            if (this.datasetImages.length > 0) {
+                this.updateImageGrid();
+            }
         }
     }
 }

@@ -487,111 +487,199 @@ class APIService {
      * @returns {Promise} Upload result with dataset info and successful/failed uploads
      */
     async uploadWithPresignedUrl(files, datasetId = null, datasetName = null, description = null, onProgress = null) {
-        console.log('[API] Starting presigned URL upload...');
-        console.log('[API] Files:', files.length, 'Dataset ID:', datasetId, 'Dataset Name:', datasetName);
+        const BATCH_SIZE = 500;  // 500장씩 배치 처리
+        const CONCURRENT_UPLOADS = 10;  // 배치 내에서도 10개씩만 동시 업로드
+        const MAX_RETRIES = 5;  // 최대 5번 재시도
+
+        console.log(`[API] Starting upload: ${files.length} files in batches of ${BATCH_SIZE}`);
+        console.log('[API] Dataset ID:', datasetId, 'Dataset Name:', datasetName);
 
         try {
-            // Step 1: Get presigned URLs
-            const filenames = Array.from(files).map(f => f.name);
-            const urlRequest = {
-                filenames
-                // content_type 제거 - 백엔드가 각 파일의 확장자로 자동 감지
-            };
-
-            if (datasetId) {
-                urlRequest.dataset_id = datasetId;
-            } else if (datasetName) {
-                urlRequest.name = datasetName;
-                if (description) {
-                    urlRequest.description = description;
+            let targetDatasetId = datasetId;
+            const allUploadedItems = [];
+            const filesArray = Array.from(files);
+            
+            // 배치로 나누기
+            for (let batchIndex = 0; batchIndex < filesArray.length; batchIndex += BATCH_SIZE) {
+                const batch = filesArray.slice(batchIndex, batchIndex + BATCH_SIZE);
+                const batchNumber = Math.floor(batchIndex / BATCH_SIZE) + 1;
+                const totalBatches = Math.ceil(filesArray.length / BATCH_SIZE);
+                
+                console.log(`[API] Processing batch ${batchNumber}/${totalBatches}: ${batch.length} files`);
+                
+                // Step 1: 배치별 Presigned URL 요청
+                const filenames = batch.map(f => f.name);
+                const urlRequest = { filenames };
+                
+                // 첫 배치는 dataset 생성, 이후 배치는 기존 dataset 사용
+                if (batchIndex === 0) {
+                    if (datasetId) {
+                        urlRequest.dataset_id = datasetId;
+                    } else if (datasetName) {
+                        urlRequest.name = datasetName;
+                        if (description) {
+                            urlRequest.description = description;
+                        }
+                    } else {
+                        throw new Error('Either datasetId or datasetName must be provided');
+                    }
+                } else {
+                    urlRequest.dataset_id = targetDatasetId;
                 }
-            } else {
-                throw new Error('Either datasetId or datasetName must be provided');
-            }
-
-            console.log('[API] Requesting presigned URLs:', urlRequest);
-            const urlResponse = await this.post('/datasets/presigned-upload-urls', urlRequest);
-            console.log('[API] Received presigned URLs:', urlResponse);
-
-            const targetDatasetId = urlResponse.dataset.id;
-
-            // Step 2: Upload files to S3 in parallel
-            console.log('[API] Uploading files to S3...');
-            const uploadPromises = urlResponse.urls.map(async (urlInfo, index) => {
-                const file = files[index];
-
-                try {
-                    // Upload to S3 without explicit Content-Type header
-                    // Browser will automatically set it, avoiding CORS preflight issues
-                    const uploadResponse = await fetch(urlInfo.upload_url, {
-                        method: 'PUT',
-                        body: file
-                        // No headers - let browser set Content-Type automatically
+                
+                console.log('[API] Requesting presigned URLs for batch:', urlRequest);
+                const urlResponse = await this.post('/datasets/presigned-upload-urls', urlRequest);
+                targetDatasetId = urlResponse.dataset.id;
+                console.log(`[API] Received ${urlResponse.urls.length} presigned URLs for batch ${batchNumber}`);
+                
+                // Step 2: 배치 내 파일들을 동시성 제어하며 업로드 (Retry 포함)
+                const batchUploadedItems = [];
+                
+                for (let i = 0; i < batch.length; i += CONCURRENT_UPLOADS) {
+                    const chunk = batch.slice(i, i + CONCURRENT_UPLOADS);
+                    const chunkUrls = urlResponse.urls.slice(i, i + CONCURRENT_UPLOADS);
+                    
+                    const chunkPromises = chunk.map(async (file, idx) => {
+                        const urlInfo = chunkUrls[idx];
+                        
+                        // Retry 로직으로 업로드 시도
+                        const uploadSuccess = await this._uploadFileWithRetry(
+                            urlInfo.upload_url,
+                            file,
+                            MAX_RETRIES
+                        );
+                        
+                        if (!uploadSuccess) {
+                            console.error(`[API] Failed to upload ${file.name} after ${MAX_RETRIES} retries`);
+                            return null;
+                        }
+                        
+                        // 메타데이터 추출
+                        let metadata = {
+                            s3_key: urlInfo.s3_key,
+                            original_filename: file.name,
+                            file_size: file.size
+                        };
+                        
+                        // Extract dimensions for images/videos
+                        if (file.type.startsWith('image/')) {
+                            try {
+                                const { width, height } = await this.getImageDimensions(file);
+                                metadata.width = width;
+                                metadata.height = height;
+                            } catch (error) {
+                                console.warn('[API] Failed to get image dimensions:', error);
+                            }
+                        } else if (file.type.startsWith('video/')) {
+                            try {
+                                const { width, height, duration_ms } = await this.getVideoMetadata(file);
+                                metadata.width = width;
+                                metadata.height = height;
+                                metadata.duration_ms = duration_ms;
+                            } catch (error) {
+                                console.warn('[API] Failed to get video metadata:', error);
+                            }
+                        }
+                        
+                        // 전체 진행률 업데이트
+                        if (onProgress) {
+                            const completed = batchIndex + i + idx + 1;
+                            onProgress(completed, filesArray.length);
+                        }
+                        
+                        return metadata;
                     });
-
-                    if (!uploadResponse.ok) {
-                        throw new Error(`S3 upload failed: ${uploadResponse.status}`);
-                    }
-
-                    // Get file metadata
-                    let metadata = {
-                        s3_key: urlInfo.s3_key,
-                        original_filename: file.name,
-                        file_size: file.size
-                    };
-
-                    // Extract dimensions for images/videos
-                    if (file.type.startsWith('image/')) {
-                        try {
-                            const { width, height } = await this.getImageDimensions(file);
-                            metadata.width = width;
-                            metadata.height = height;
-                        } catch (error) {
-                            console.warn('[API] Failed to get image dimensions:', error);
-                        }
-                    } else if (file.type.startsWith('video/')) {
-                        try {
-                            const { width, height, duration_ms } = await this.getVideoMetadata(file);
-                            metadata.width = width;
-                            metadata.height = height;
-                            metadata.duration_ms = duration_ms;
-                        } catch (error) {
-                            console.warn('[API] Failed to get video metadata:', error);
-                        }
-                    }
-
-                    if (onProgress) {
-                        onProgress(index + 1, files.length);
-                    }
-
-                    return metadata;
-                } catch (error) {
-                    console.error(`[API] Failed to upload ${file.name}:`, error);
-                    throw error;
+                    
+                    const chunkResults = await Promise.all(chunkPromises);
+                    batchUploadedItems.push(...chunkResults.filter(r => r !== null));
                 }
-            });
-
-            const uploadedItems = await Promise.all(uploadPromises);
-            console.log('[API] All files uploaded to S3:', uploadedItems);
-
-            // Step 3: Notify backend of upload completion
-            console.log('[API] Notifying backend of upload completion...');
-            const completeResponse = await this.post(
-                `/datasets/${targetDatasetId}/upload-complete-batch`,
-                { items: uploadedItems }
-            );
-
-            console.log('[API] Upload complete:', completeResponse);
+                
+                // Step 3: 배치별 업로드 완료 알림
+                if (batchUploadedItems.length > 0) {
+                    console.log(`[API] Notifying backend: batch ${batchNumber} complete (${batchUploadedItems.length} files)`);
+                    const completeResponse = await this.post(
+                        `/datasets/${targetDatasetId}/upload-complete-batch`,
+                        { items: batchUploadedItems }
+                    );
+                    allUploadedItems.push(...batchUploadedItems);
+                }
+                
+                // 배치 간 짧은 대기 (Rate Limiting 방지)
+                if (batchIndex + BATCH_SIZE < filesArray.length) {
+                    console.log('[API] Waiting 1s before next batch...');
+                    await new Promise(resolve => setTimeout(resolve, 1000));
+                }
+            }
+            
+            const failedCount = filesArray.length - allUploadedItems.length;
+            
+            console.log(`[API] Upload complete: ${allUploadedItems.length} succeeded, ${failedCount} failed`);
+            
             return {
-                ...completeResponse,
-                dataset_id: targetDatasetId,
-                dataset: urlResponse.dataset
+                success: true,
+                successful_count: allUploadedItems.length,
+                failed_count: failedCount,
+                dataset_id: targetDatasetId
             };
-
+            
         } catch (error) {
             console.error('[API] Presigned URL upload failed:', error);
             throw error;
         }
+    }
+
+    /**
+     * Exponential Backoff를 사용한 파일 업로드 재시도
+     * @param {string} uploadUrl - S3 Presigned URL
+     * @param {File} file - 업로드할 파일
+     * @param {number} maxRetries - 최대 재시도 횟수
+     * @returns {Promise<boolean>} 성공 여부
+     */
+    async _uploadFileWithRetry(uploadUrl, file, maxRetries = 5) {
+        let attempt = 0;
+        
+        while (attempt < maxRetries) {
+            try {
+                const response = await fetch(uploadUrl, {
+                    method: 'PUT',
+                    body: file
+                });
+                
+                // 성공
+                if (response.ok) {
+                    if (attempt > 0) {
+                        console.log(`[API] ${file.name} uploaded successfully after ${attempt} retries`);
+                    }
+                    return true;
+                }
+                
+                // 재시도 가능한 에러 (503 SlowDown, 500 Internal Error, 429 Too Many Requests)
+                if (response.status === 503 || response.status === 500 || response.status === 429) {
+                    const backoffMs = Math.min(1000 * Math.pow(2, attempt), 10000); // 최대 10초
+                    console.warn(`[API] ${file.name} upload failed (${response.status}), retrying in ${backoffMs}ms... (attempt ${attempt + 1}/${maxRetries})`);
+                    
+                    await new Promise(resolve => setTimeout(resolve, backoffMs));
+                    attempt++;
+                    continue;
+                }
+                
+                // 재시도 불가능한 에러 (400, 403, 404 등)
+                console.error(`[API] ${file.name} upload failed with non-retryable error: ${response.status}`);
+                return false;
+                
+            } catch (error) {
+                // 네트워크 에러 등 - 재시도 가능
+                const backoffMs = Math.min(1000 * Math.pow(2, attempt), 10000);
+                console.warn(`[API] ${file.name} upload error (${error.message}), retrying in ${backoffMs}ms... (attempt ${attempt + 1}/${maxRetries})`);
+                
+                await new Promise(resolve => setTimeout(resolve, backoffMs));
+                attempt++;
+            }
+        }
+        
+        // 최대 재시도 횟수 초과
+        console.error(`[API] ${file.name} upload failed after ${maxRetries} attempts`);
+        return false;
     }
 
     /**

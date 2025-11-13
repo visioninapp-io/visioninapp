@@ -92,3 +92,27 @@ class Progress:
             "metrics": metrics or {},
         }
         _safe_publish(self.ch, self.ex, "train.log", body)
+
+    def train_llm_log(self, epoch: int , total_epochs: int | None = None):
+        """
+        1 epoch마다 학습 로그 전송.
+        routing_key: train.log
+        body:
+        {
+          "job_id": ...,
+          "epoch": <int>,
+          "total_epochs": <int>,
+          "percentage": <int>
+        }
+        """
+        if total_epochs and total_epochs > 0:
+            percentage = (int(epoch) / int(total_epochs)) * 80 + 20
+        else:
+            percentage = 0.0
+        body = {
+            "job_id": self.job_id,
+            "epoch": int(epoch),
+            "total_epochs": int(total_epochs),
+            "percentage": int(percentage)
+        }
+        _safe_publish(self.ch, self.ex, "train.llm.log", body)

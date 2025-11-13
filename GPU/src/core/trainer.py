@@ -187,8 +187,10 @@ def train_yolo(data_dir: str, out_dir: str, hyper: dict, progress=None) -> dict:
         def _on_fit_epoch_end(trainer):
             try:
                 epoch = int(getattr(trainer, "epoch", 0))
+                total_epochs = int(getattr(trainer, "epochs", 0) or getattr(getattr(trainer, "args", None), "epochs", 0))
             except Exception:
                 epoch = 0
+                total_epochs = 0
 
             raw_metrics = {}
             m = getattr(trainer, "metrics", None)
@@ -204,6 +206,7 @@ def train_yolo(data_dir: str, out_dir: str, hyper: dict, progress=None) -> dict:
             safe_metrics = _to_jsonable(raw_metrics)
             try:
                 progress.train_log(epoch=epoch, metrics=safe_metrics)
+                progress.train_llm_log(epoch=epoch, total_epochs=total_epochs)
             except Exception as e:
                 print(f"[progress] train.log publish failed (after sanitize): {e}")
 

@@ -1,4 +1,5 @@
 from pathlib import Path
+from datetime import datetime
 from ultralytics import YOLO
 
 # 유틸: 문자열로 온 값들 안전 변환
@@ -32,6 +33,13 @@ def _norm_optimizer(v):
     if isinstance(v, str) and v.strip().lower() in ("null", "none", ""):
         return None
     return str(v)
+
+def _unique_run_dir(base_project: str, job_id: str) -> tuple[str, str]:
+    ts = datetime.now().strftime("%Y%m%d_%H%M%S")
+    # runs/yolo-autolabel-trainer/20251113_130102_abcd12  같은 식
+    project = base_project  # 예: "runs/yolo-autolabel-trainer"
+    name = f"{ts}_{job_id[:6]}"
+    return project, name
 
 # core/trainer.py (콜백 내부에 추가)
 def _to_jsonable(x):
@@ -130,14 +138,18 @@ def train_yolo(data_dir: str, out_dir: str, hyper: dict, progress=None) -> dict:
     mosaic = None if hyper.get("mosaic")  is None else _as_bool(hyper.get("mosaic"))
     mixup  = None if hyper.get("mixup")   is None else _as_bool(hyper.get("mixup"))
 
+    job_id = (hyper.get("job_id")
+          or getattr(progress, "job_id", None)
+          or "nojob")
+    project, name = _unique_run_dir(out_dir, job_id)
     # .train에 넘길 인자 구성 (None은 제외해서 라이브러리 기본을 쓰게 함)
     train_kwargs = {
         "data": str(Path(data_dir, "data.yaml")),
         "epochs": epochs,
         "imgsz": imgsz,
         "batch": batch,
-        "project": out_dir,
-        "name": "train",
+        "project": project,     # 예: out_dir
+        "name": name,           # 예: 20251113_130102_abcd12
         "exist_ok": True,
         "workers": workers,
         "lr0": lr0,

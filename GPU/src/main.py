@@ -30,11 +30,16 @@ def _as_model_name_from_onnx_filename(onnx_filename: str) -> str:
     base = Path(onnx_filename).name
     return base[:-5] if base.lower().endswith(".onnx") else (base or "model")
 
+def _as_model_name_from_engine_filename(engine_filename: str) -> str:
+    base = Path(engine_filename).name
+    return base[:-7] if base.lower().endswith(".engine") else (base or "model")
+
 def _coerce_bool(v, default=None):
     if v is None: return default
     if isinstance(v, bool): return v
     if isinstance(v, str): return v.strip().lower() in ("1", "true", "yes", "y", "t")
     return bool(v)
+
 
 def _coerce_int(v, default=None):
     try: return int(v)
@@ -160,6 +165,7 @@ def handle_train(mq: MQ, exchanges: dict, msg: dict):
             progress.send("upload.metrics", 96, f"uploading {metrics_name}")
             upload_s3(results_csv, bucket, metrics_key)
 
+        progress.send("done", 100, "finish work")
         progress.done({"s3_bucket": bucket, "s3_uri": f"s3://{bucket}/{key}"}, metrics)
 
     except Exception as e:
@@ -257,6 +263,7 @@ def handle_onnx(mq: MQ, exchanges: dict, msg: dict):
         if saved_metrics and Path(metrics_out_json).exists():
             upload_s3(metrics_out_json, bucket, f"{msg['output']['prefix'].rstrip('/')}/metrics.json")
 
+        progress.send("done", 100, "finish work")
         progress.done({
             "s3_bucket": bucket,
             "s3_uri": f"s3://{bucket}/{key}",
@@ -310,20 +317,35 @@ def handle_trt(mq: MQ, exchanges: dict, msg: dict):
         imgsz     = int(trt_cfg.get("imgsz") or 640)
         dynamic   = bool(trt_cfg.get("dynamic")) if "dynamic" in trt_cfg else True
 
+        # ★ 로컬 표준 경로 계산: models/{model_name}/trt/best.engine
+        models_root = os.getenv("LOCAL_MODELS_ROOT", "/models")
+        # output.model_name이 "my_model.engine"이면 폴더명은 "my_model"
+        engine_filename = msg["output"].get("model_name", "best.engine")
+        model_name_for_dir = _as_model_name_from_engine_filename(engine_filename)
+
+        local_dir = os.path.join(models_root, model_name_for_dir, "trt")
+        Path(local_dir).mkdir(parents=True, exist_ok=True)
+        local_engine_path = os.path.join(local_dir, "best.engine")  # ← 고정 파일명
+
         progress.send("convert.trt", 60, f"build TensorRT ({precision})")
-        out_engine = os.path.join(tempfile.gettempdir(), f"{job_id}.engine")
+        # ★ 최종 위치로 바로 내보내기(정규화 복사 포함)
+        to_tensorrt(
+            tmp_pt,
+            local_engine_path,
+            precision=precision,
+            imgsz=imgsz,
+            dynamic=dynamic,
+        )
 
-        # PT → TensorRT 엔진 변환
-        to_tensorrt(tmp_pt, out_engine, precision=precision, imgsz=imgsz, dynamic=dynamic)
-
-        # 업로드
+        # 업로드는 로컬 표준 경로에서
         progress.send("upload", 90, "upload engine")
         bucket     = S3_BUCKET
-        model_name = msg["output"].get("model_name", "best.engine")
-        key        = f"{msg['output']['prefix'].rstrip('/')}/{model_name}"
-        upload_s3(out_engine, bucket, key)
+        key        = f"{msg['output']['prefix'].rstrip('/')}/{engine_filename}"  # 업로드 파일명은 기존 스키마 유지
+        upload_s3(local_engine_path, bucket, key)
 
-        progress.done({"s3_bucket": bucket, "s3_uri": f"s3://{bucket}/{key}"})
+        progress.send("done", 100, "finish work")
+        progress.done({"s3_bucket": bucket, "s3_uri": f"s3://{bucket}/{key}", "local_path": local_engine_path})
+
     except Exception as e:
         logger.exception("trt failed")
         progress.error("convert.trt", str(e))

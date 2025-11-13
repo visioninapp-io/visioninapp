@@ -14,7 +14,7 @@ class TrainingPage {
         console.log('[Training Page] Initializing...');
 
         try {
-            await this.loadTrainingJobs();
+            // await this.loadTrainingJobs();
 
             // Render the page
             const app = document.getElementById('app');
@@ -272,7 +272,7 @@ class TrainingPage {
          * When RabbitMQ is connected, only refresh job status (not metrics)
          */
         try {
-            const jobs = await apiService.getTrainingJobs();
+            // const jobs = await apiService.getTrainingJobs();
             if (!jobs) return;
 
             // Only load S3 metrics if RabbitMQ is NOT connected
@@ -353,7 +353,7 @@ class TrainingPage {
     async loadTrainingJobs() {
         try {
             console.log('[Training Page] Loading training jobs...');
-            const jobs = await apiService.getTrainingJobs();
+            // const jobs = await apiService.getTrainingJobs();
 
             this.trainingJobs = jobs || [];
             console.log('[Training Page] Loaded jobs:', this.trainingJobs.length);

@@ -868,6 +868,64 @@ class APIService {
         }
     }
 
+    async getTrainingResultsFromS3(modelName) {
+        console.log(`[API] Fetching training results from S3 for model ${modelName}...`);
+        try {
+            // Fetch result.csv from S3: /{model_name}/results.csv
+            const endpoint = `/training/results/${modelName}/results.csv`;
+            console.log(`[API] Fetching CSV from: ${this.baseURL}${endpoint}`);
+
+            // Build headers manually
+            const headers = {};
+            const token = this.getAuthToken();
+            if (token) {
+                headers['Authorization'] = `Bearer ${token}`;
+            }
+
+            const response = await fetch(`${this.baseURL}${endpoint}`, {
+                method: 'GET',
+                headers: headers
+            });
+
+            if (!response.ok) {
+                throw new Error(`HTTP ${response.status}: ${response.statusText}`);
+            }
+
+            const csvText = await response.text();
+            console.log(`[API] Fetched CSV (${csvText.length} chars)`);
+
+            // Parse CSV to JSON
+            const lines = csvText.trim().split('\n');
+            if (lines.length < 2) {
+                console.warn('[API] CSV file is empty or has no data rows');
+                return [];
+            }
+
+            const csvHeaders = lines[0].split(',').map(h => h.trim());
+            const metrics = [];
+
+            for (let i = 1; i < lines.length; i++) {
+                const values = lines[i].split(',').map(v => v.trim());
+                const metric = {};
+
+                csvHeaders.forEach((header, index) => {
+                    const value = values[index];
+                    // Convert numeric values
+                    metric[header] = isNaN(value) ? value : parseFloat(value);
+                });
+
+                metrics.push(metric);
+            }
+
+            console.log(`[API] Parsed ${metrics.length} metric rows from CSV`);
+            return metrics;
+
+        } catch (error) {
+            console.error(`[API] Failed to fetch training results from S3:`, error);
+            return [];
+        }
+    }
+
     // ========== EVALUATION ==========
     async getEvaluations() {
         return this.get('/evaluation/');

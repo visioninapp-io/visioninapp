@@ -7,6 +7,7 @@ class TrainingPage {
         this.chart = null;
         this.rabbitmqConnected = false;
         this.metricsData = {}; // Store real-time metrics by job_id
+        this.refreshInterval = null; // Auto-refresh interval
     }
 
     async init() {
@@ -26,6 +27,9 @@ class TrainingPage {
 
             // Connect to RabbitMQ and subscribe to training logs
             await this.connectToRabbitMQ();
+
+            // Start periodic refresh (every 10 seconds)
+            this.startPeriodicRefresh();
 
             console.log('[Training Page] Initialized successfully');
 
@@ -59,6 +63,9 @@ class TrainingPage {
             console.log('[Training Page] ✅ Connected to RabbitMQ and subscribed to gpu.train.log');
             showToast('Connected to real-time training updates', 'success');
 
+            // Restart periodic refresh with longer interval (now that RabbitMQ is connected)
+            this.startPeriodicRefresh();
+
         } catch (error) {
             console.error('[Training Page] Failed to connect to RabbitMQ:', error);
             showToast('Failed to connect to real-time updates. Using manual refresh.', 'warning');
@@ -91,8 +98,11 @@ class TrainingPage {
 
             console.log(`[Training Page] Metrics: epoch=${epoch}, loss=${loss}, accuracy=${accuracy}`);
 
+            // GPU sends 0-based epoch, convert to 1-based for display
+            const displayEpoch = epoch + 1;
+
             // Just update the display with received metrics (no job matching)
-            this.updateMetricsDisplay({ epoch, loss, accuracy: accuracy * 100 });
+            this.updateMetricsDisplay({ epoch: displayEpoch, loss, accuracy: accuracy * 100 });
 
             // // TODO: Enable job matching when external_job_id mapping is ready
             // // Find job by external_job_id (UUID stored in hyperparameters)
@@ -233,6 +243,86 @@ class TrainingPage {
         }
     }
 
+    startPeriodicRefresh() {
+        /**
+         * Start periodic refresh of training jobs
+         * Uses longer interval when RabbitMQ is connected (real-time updates)
+         * Uses shorter interval as fallback when RabbitMQ is disconnected
+         */
+        // Clear existing interval if any
+        if (this.refreshInterval) {
+            clearInterval(this.refreshInterval);
+        }
+
+        // Use longer interval if RabbitMQ is connected (60s vs 10s)
+        // RabbitMQ provides real-time metrics, so we only need periodic refresh for job status
+        const interval = this.rabbitmqConnected ? 60000 : 10000;
+        console.log(`[Training Page] Starting periodic refresh (${interval/1000}s interval, RabbitMQ: ${this.rabbitmqConnected ? 'ON' : 'OFF'})`);
+
+        // Refresh periodically
+        this.refreshInterval = setInterval(async () => {
+            console.log('[Training Page] Auto-refreshing training jobs...');
+            await this.refreshTrainingJobs();
+        }, interval);
+    }
+
+    async refreshTrainingJobs() {
+        /**
+         * Refresh training jobs without full page re-render
+         * When RabbitMQ is connected, only refresh job status (not metrics)
+         */
+        try {
+            const jobs = await apiService.getTrainingJobs();
+            if (!jobs) return;
+
+            // Only load S3 metrics if RabbitMQ is NOT connected
+            // When RabbitMQ is connected, metrics come from real-time stream
+            if (!this.rabbitmqConnected) {
+                // Load S3 metrics for jobs that changed
+                for (const job of jobs) {
+                    const existingJob = this.trainingJobs.find(j => j.id === job.id);
+
+                    // Only reload S3 if epoch changed or status changed
+                    if (!existingJob ||
+                        existingJob.current_epoch !== job.current_epoch ||
+                        existingJob.status !== job.status) {
+                        await this.loadS3MetricsForJob(job);
+                    }
+                }
+            }
+
+            this.trainingJobs = jobs;
+
+            // Update selected job reference
+            if (this.selectedJob) {
+                const updated = this.trainingJobs.find(j => j.id === this.selectedJob.id);
+                if (updated) {
+                    this.selectedJob = updated;
+                }
+            }
+
+            // Re-render only the jobs list without destroying the chart
+            this.updateJobsListDisplay();
+
+        } catch (error) {
+            console.error('[Training Page] Error refreshing jobs:', error);
+        }
+    }
+
+    updateJobsListDisplay() {
+        /**
+         * Update only the jobs list without re-rendering entire page
+         */
+        const jobsContainer = document.getElementById('training-jobs-list');
+        if (jobsContainer) {
+            const rendered = this.renderTrainingJobs();
+            jobsContainer.innerHTML = Array.isArray(rendered) ? rendered.join('') : rendered;
+        }
+
+        // Update stats
+        this.updateStatsDisplay();
+    }
+
     destroy() {
         /**
          * Cleanup when page is destroyed
@@ -250,6 +340,14 @@ class TrainingPage {
             this.chart.destroy();
             this.chart = null;
         }
+
+        // Clear refresh interval
+        if (this.refreshInterval) {
+            clearInterval(this.refreshInterval);
+            this.refreshInterval = null;
+        }
+
+        console.log('[Training Page] Destroyed and cleaned up');
     }
 
     async loadTrainingJobs() {
@@ -259,10 +357,6 @@ class TrainingPage {
 
             this.trainingJobs = jobs || [];
             console.log('[Training Page] Loaded jobs:', this.trainingJobs.length);
-
-            this.trainingJobs.forEach(job => {
-                console.log(`  Job ${job.id}: ${job.name} - Status: ${job.status}, Epoch: ${job.current_epoch || 0}/${job.total_epochs || 0}`);
-            });
 
             // Select a job to display metrics for
             if (!this.selectedJob) {
@@ -277,9 +371,16 @@ class TrainingPage {
                 }
             }
 
+            // Only load S3 metrics for the selected job initially
+            // Other jobs will load S3 metrics when selected or when RabbitMQ is not connected
             if (this.selectedJob) {
-                console.log('[Training Page] Selected job:', this.selectedJob.id, this.selectedJob.name);
+                console.log('[Training Page] Loading S3 metrics for selected job:', this.selectedJob.id, this.selectedJob.name);
+                await this.loadS3MetricsForJob(this.selectedJob);
             }
+
+            this.trainingJobs.forEach(job => {
+                console.log(`  Job ${job.id}: ${job.name} - Status: ${job.status}, Epoch: ${job.current_epoch + 1 || 0}/${job.total_epochs || 0}`);
+            });
 
         } catch (error) {
             console.error('[Training Page] Error loading jobs:', error);
@@ -316,11 +417,15 @@ class TrainingPage {
                                 <div class="col-md-6">
                                     <label class="form-label fw-bold mb-2">Select Training Job:</label>
                                     <select class="form-select" id="job-selector" onchange="window.trainingPage.selectJob(this.value)">
-                                        ${this.trainingJobs.map(job => `
+                                        ${this.trainingJobs.map(job => {
+                                            // current_epoch is 0-based: 0 means completed epoch 1
+                                            // Display as 1-based for user: epoch 0 -> "1/N", epoch 1 -> "2/N"
+                                            const displayEpoch = (job.current_epoch ?? 0) + 1;
+                                            return `
                                             <option value="${job.id}" ${selectedJob?.id === job.id ? 'selected' : ''}>
-                                                ${job.name} - ${job.status.toUpperCase()} (${job.current_epoch || 0}/${job.total_epochs || 0} epochs)
+                                                ${job.name} - ${job.status.toUpperCase()} (${displayEpoch}/${job.total_epochs || 0} epochs)
                                             </option>
-                                        `).join('')}
+                                        `;}).join('')}
                                     </select>
                                 </div>
                                 <div class="col-md-6 text-end">
@@ -393,8 +498,11 @@ class TrainingPage {
                                 </div>
                             </div>
                         </div>
-                        <div class="card-body" id="jobs-container">
-                            ${this.trainingJobs.length > 0 ? this.renderTrainingJobs() : this.renderEmptyState()}
+                        <div class="card-body" id="training-jobs-list">
+                            ${(() => {
+                                const rendered = this.renderTrainingJobs();
+                                return Array.isArray(rendered) ? rendered.join('') : rendered;
+                            })()}
                         </div>
                     </div>
                 </div>
@@ -408,8 +516,11 @@ class TrainingPage {
         }
 
         return this.trainingJobs.map(job => {
+            // current_epoch is 0-based: 0 means completed epoch 1
+            // Display as 1-based for user: epoch 0 -> "1/N", epoch 1 -> "2/N"
+            const displayEpoch = (job.current_epoch ?? 0) + 1;
             const progress = job.total_epochs > 0
-                ? Math.round((job.current_epoch || 0) / job.total_epochs * 100)
+                ? Math.round(displayEpoch / job.total_epochs * 100)
                 : 0;
 
             const statusBadge = {
@@ -447,13 +558,20 @@ class TrainingPage {
                                 </h5>
                                 <p class="text-muted mb-0 small">Architecture: ${job.architecture || 'N/A'}</p>
                             </div>
-                            <span class="badge ${statusBadge}">${job.status.toUpperCase()}</span>
+                            <div class="d-flex align-items-center gap-2">
+                                <span class="badge ${statusBadge}">${job.status.toUpperCase()}</span>
+                                <button class="btn btn-sm btn-outline-danger"
+                                        onclick="event.stopPropagation(); window.trainingPage.deleteTrainingJob(${job.id}, ${job.model_id})"
+                                        title="Delete model and artifacts">
+                                    <i class="bi bi-trash"></i>
+                                </button>
+                            </div>
                         </div>
 
                         <div class="mb-3">
                             <div class="d-flex justify-content-between mb-2">
                                 <span class="text-muted small">Progress</span>
-                                <span class="fw-medium small">${job.current_epoch || 0}/${job.total_epochs || 0} epochs</span>
+                                <span class="fw-medium small">${displayEpoch}/${job.total_epochs || 0} epochs</span>
                             </div>
                             <div class="progress" style="height: 8px;">
                                 <div class="progress-bar ${job.status === 'running' ? 'progress-bar-striped progress-bar-animated' : ''}"
@@ -502,7 +620,66 @@ class TrainingPage {
         // Event listeners are handled via onclick in HTML
     }
 
-    selectJob(jobId) {
+    async loadS3MetricsForJob(job) {
+        /**
+         * Load metrics from S3 results.csv for a job
+         */
+        if (!job || !job.name) return null;
+
+        try {
+            const modelName = `${job.name}_model`;
+            console.log(`[Training Page] Loading S3 results for model: ${modelName}`);
+            const s3Metrics = await apiService.getTrainingResultsFromS3(modelName);
+
+            if (s3Metrics && s3Metrics.length > 0) {
+                console.log(`[Training Page] Loaded ${s3Metrics.length} metrics from S3 for job ${job.id}`);
+
+                // Store S3 metrics for later use
+                job.s3Metrics = s3Metrics;
+
+                // Update job with latest metrics from S3
+                const latestMetric = s3Metrics[s3Metrics.length - 1];
+
+                // IMPORTANT: YOLO v8 results.csv uses 1-based epoch (1, 2, 3, ..., N for N epochs)
+                // But DB current_epoch uses 0-based (0 = first epoch completed)
+                // Convert: CSV epoch 1 -> DB 0, CSV epoch 20 -> DB 19
+                const csvEpoch = latestMetric.epoch;
+                console.log(`[Training Page] CSV epoch value (1-based): ${csvEpoch}, Total epochs: ${job.total_epochs}`);
+
+                // Convert from 1-based (CSV) to 0-based (DB)
+                job.current_epoch = (csvEpoch && csvEpoch > 0) ? csvEpoch - 1 : 0;
+                job.current_accuracy = (latestMetric['metrics/mAP50(B)'] || latestMetric['metrics/precision(B)'] || 0) * 100;
+                job.current_loss = latestMetric['val/box_loss'] || latestMetric['train/box_loss'] || 0;
+
+                // Extract hyperparameters from S3 if available
+                if (s3Metrics[0]) {
+                    const firstMetric = s3Metrics[0];
+                    if (!job.hyperparameters) job.hyperparameters = {};
+
+                    // Learning rate from lr/pg0, lr/pg1, lr/pg2
+                    if (firstMetric['lr/pg0']) {
+                        job.hyperparameters.learning_rate = firstMetric['lr/pg0'];
+                    }
+                }
+
+                console.log('[Training Page] Updated job with S3 metrics:', {
+                    csvEpoch: csvEpoch,
+                    current_epoch: job.current_epoch,
+                    total_epochs: job.total_epochs,
+                    displayWillBe: `${job.current_epoch + 1}/${job.total_epochs}`,
+                    accuracy: job.current_accuracy?.toFixed(2),
+                    loss: job.current_loss?.toFixed(4)
+                });
+
+                return s3Metrics;
+            }
+        } catch (error) {
+            console.warn(`[Training Page] Could not load S3 results for job ${job.id}:`, error);
+        }
+        return null;
+    }
+
+    async selectJob(jobId) {
         const id = parseInt(jobId);
         const job = this.trainingJobs.find(j => j.id === id);
 
@@ -510,13 +687,15 @@ class TrainingPage {
             console.log('[Training Page] Selected job:', job.id, job.name);
             this.selectedJob = job;
 
+            // Load S3 metrics for this job
+            await this.loadS3MetricsForJob(job);
+
             // Re-render the page
             const app = document.getElementById('app');
             if (app) {
                 app.innerHTML = this.render();
-                this.afterRender();
+                await this.afterRender();
             }
-
         }
     }
 
@@ -529,17 +708,7 @@ class TrainingPage {
     }
 
     async initChart() {
-        if (!this.selectedJob) {
-            console.log('[Training Page] No selected job for chart');
-            return;
-        }
-
         try {
-            console.log('[Training Page] Initializing chart for job', this.selectedJob.id);
-            const metrics = await apiService.getTrainingMetrics(this.selectedJob.id);
-            console.log('[Training Page] Loaded metrics:', metrics?.length || 0);
-            console.log('[Training Page] Raw metrics data:', metrics);
-
             const ctx = document.getElementById('trainingChart');
             if (!ctx) {
                 console.warn('[Training Page] Chart canvas not found');
@@ -552,20 +721,41 @@ class TrainingPage {
                 this.chart = null;
             }
 
-            // Create chart only if we have metrics
-            if (!metrics || metrics.length === 0) {
-                console.log('[Training Page] No metrics to display');
-                const context = ctx.getContext('2d');
-                context.fillStyle = '#6c757d';
-                context.font = '16px sans-serif';
-                context.fillText('No metrics available yet. Metrics will appear once training starts.', 50, 100);
-                return;
-            }
+            // Initialize with empty or existing metrics
+            let labels = [];
+            let lossData = [];
+            let accuracyData = [];
 
-            // Extract chart data
-            const labels = metrics.map((m, idx) => `Epoch ${m.epoch || idx + 1}`);
-            const lossData = metrics.map(m => m.train_loss || 0);
-            const accuracyData = metrics.map(m => (m.train_accuracy || 0));
+            if (this.selectedJob) {
+                console.log('[Training Page] Initializing chart for job', this.selectedJob.id);
+
+                // Try to use S3 metrics first (more complete)
+                let metrics = this.selectedJob.s3Metrics;
+
+                if (!metrics || metrics.length === 0) {
+                    // Fallback to API metrics
+                    metrics = await apiService.getTrainingMetrics(this.selectedJob.id);
+                    console.log('[Training Page] Loaded API metrics:', metrics?.length || 0);
+                } else {
+                    console.log('[Training Page] Using S3 metrics:', metrics.length);
+                }
+
+                console.log('[Training Page] Raw metrics data:', metrics);
+
+                if (metrics && metrics.length > 0) {
+                    // Extract chart data from metrics
+                    // For S3 metrics: epoch is 1-based in CSV (1, 2, 3, ..., N)
+                    // Display as-is for chart labels (already correct for display)
+                    labels = metrics.map((m, idx) => `Epoch ${m.epoch ?? (idx + 1)}`);
+                    lossData = metrics.map(m => m['val/box_loss'] || m['train/box_loss'] || m.train_loss || 0);
+                    accuracyData = metrics.map(m => {
+                        const acc = m['metrics/mAP50(B)'] || m['metrics/precision(B)'] || m.train_accuracy || 0;
+                        return acc * 100; // Convert to percentage
+                    });
+                }
+            } else {
+                console.log('[Training Page] Initializing empty chart - will populate with real-time data');
+            }
             
             console.log('[Training Page] Chart labels:', labels);
             console.log('[Training Page] Loss data:', lossData);
@@ -646,9 +836,10 @@ class TrainingPage {
             }
 
             console.log(`[Training Page] Updating chart with ${metrics.length} metrics`);
-            
+
             // Update chart data
-            this.chart.data.labels = metrics.map((m, idx) => `Epoch ${m.epoch || idx + 1}`);
+            // API metrics may have different format, but epoch should be used as-is
+            this.chart.data.labels = metrics.map((m, idx) => `Epoch ${m.epoch ?? (idx + 1)}`);
             this.chart.data.datasets[0].data = metrics.map(m => m.train_loss || 0);
             this.chart.data.datasets[1].data = metrics.map(m => (m.train_accuracy || 0));
             this.chart.update('none');
@@ -918,6 +1109,11 @@ class TrainingPage {
                 showToast('Model created successfully', 'success');
             }
 
+            // If using existing model as pretrained, add to hyperparameters
+            if (modelId !== 'new' && modelId) {
+                hyperparameters.pretrained_model_id = parseInt(modelId);
+            }
+
             // Start training
             await apiService.startTraining({
                 name,
@@ -940,6 +1136,63 @@ class TrainingPage {
         } catch (error) {
             console.error('Error starting training:', error);
             showToast('Failed to start training: ' + error.message, 'error');
+        }
+    }
+
+    async deleteTrainingJob(jobId, modelId) {
+        /**
+         * Delete a training job and its associated model (including S3 artifacts)
+         */
+        try {
+            // Find the job to get its name for confirmation
+            const job = this.trainingJobs.find(j => j.id === jobId);
+            if (!job) {
+                showToast('Training job not found', 'error');
+                return;
+            }
+
+            // Confirm deletion
+            const confirmed = confirm(
+                `Are you sure you want to delete "${job.name}"?\n\n` +
+                `This will permanently delete:\n` +
+                `- Training job from database\n` +
+                `- Associated model and all versions\n` +
+                `- All model artifacts from S3\n\n` +
+                `This action cannot be undone.`
+            );
+
+            if (!confirmed) {
+                return;
+            }
+
+            console.log(`[Training Page] Deleting training job ${jobId} and model ${modelId}...`);
+
+            // Delete the model (this will also delete all artifacts from S3 via backend)
+            if (modelId) {
+                await apiService.deleteModel(modelId);
+                showToast('Model and artifacts deleted successfully', 'success');
+            }
+
+            // If this was the selected job, clear selection
+            if (this.selectedJob?.id === jobId) {
+                this.selectedJob = null;
+            }
+
+            // Reload training jobs
+            await this.loadTrainingJobs();
+
+            // Re-render the page
+            const app = document.getElementById('app');
+            if (app) {
+                app.innerHTML = this.render();
+                await this.afterRender();
+            }
+
+            console.log(`[Training Page] Successfully deleted job ${jobId}`);
+
+        } catch (error) {
+            console.error('[Training Page] Error deleting training job:', error);
+            showToast('Failed to delete: ' + error.message, 'error');
         }
     }
 }

@@ -92,7 +92,8 @@ def train_yolo(data_dir: str, out_dir: str, hyper: dict, progress=None) -> dict:
       "epochs": 1, "imgsz": 640, "batch": 32, "device": "cuda:0",
       "workers": 8, "optimizer": "null", "lr0": 0.01, "lrf": 0.01,
       "weight_decay": 0.0005, "momentum": 0.937, "patience": 30,
-      "save": true, "augment": true, "mosaic": true, "mixup": false
+      "save": true, "augment": true, "mosaic": true, "mixup": false,
+      "job_id": "abc123"  # (권장) run 폴더 고유화에 사용
     }
     """
     Path(out_dir).mkdir(parents=True, exist_ok=True)
@@ -105,16 +106,16 @@ def train_yolo(data_dir: str, out_dir: str, hyper: dict, progress=None) -> dict:
         "epochs": 100,
         "imgsz": 640,
         "batch": 16,
-        "device": None,        # 미지정 시 Ultralytics 기본
+        "device": None,
         "workers": 8,
-        "optimizer": None,     # "null"/None이면 전달 안 함
+        "optimizer": None,
         "lr0": 0.01,
         "lrf": 0.01,
         "weight_decay": 0.0005,
         "momentum": 0.937,
         "patience": 30,
         "save": True,
-        "augment": None,       # 미지정 시 라이브러리 기본
+        "augment": None,
         "mosaic": None,
         "mixup": None,
     }
@@ -138,19 +139,25 @@ def train_yolo(data_dir: str, out_dir: str, hyper: dict, progress=None) -> dict:
     mosaic = None if hyper.get("mosaic")  is None else _as_bool(hyper.get("mosaic"))
     mixup  = None if hyper.get("mixup")   is None else _as_bool(hyper.get("mixup"))
 
-    job_id = (hyper.get("job_id")
-          or getattr(progress, "job_id", None)
-          or "nojob")
+    # 고유 run 폴더 구성
+    job_id = (hyper.get("job_id") or getattr(progress, "job_id", None) or "nojob")
     project, name = _unique_run_dir(out_dir, job_id)
-    # .train에 넘길 인자 구성 (None은 제외해서 라이브러리 기본을 쓰게 함)
+
+    # .train 인자 구성
     train_kwargs = {
         "data": str(Path(data_dir, "data.yaml")),
         "epochs": epochs,
         "imgsz": imgsz,
         "batch": batch,
-        "project": project,     # 예: out_dir
-        "name": name,           # 예: 20251113_130102_abcd12
-        "exist_ok": True,
+
+        # ✅ 매 실행마다 고유 폴더
+        "project": project,     # ex) out_dir
+        "name": name,           # ex) 20251113_130102_abcd12
+
+        # ✅ 누적 방지: 동일 폴더 재사용/재개 금지
+        "exist_ok": False,
+        "resume": False,
+
         "workers": workers,
         "lr0": lr0,
         "lrf": lrf,
@@ -170,6 +177,12 @@ def train_yolo(data_dir: str, out_dir: str, hyper: dict, progress=None) -> dict:
     if mixup is not None:
         train_kwargs["mixup"] = mixup
 
+    # 런 폴더 경로 (학습 전 계산해둠)
+    run_dir = Path(project) / name
+    best_pt = run_dir / "weights" / "best.pt"
+    results_csv = run_dir / "results.csv"
+
+    # 진행 콜백
     if progress is not None:
         def _on_fit_epoch_end(trainer):
             try:
@@ -177,7 +190,6 @@ def train_yolo(data_dir: str, out_dir: str, hyper: dict, progress=None) -> dict:
             except Exception:
                 epoch = 0
 
-            # 원본 메트릭 수집
             raw_metrics = {}
             m = getattr(trainer, "metrics", None)
             if isinstance(m, dict):
@@ -189,20 +201,26 @@ def train_yolo(data_dir: str, out_dir: str, hyper: dict, progress=None) -> dict:
                 if hasattr(trainer, attr):
                     raw_metrics[attr] = getattr(trainer, attr)
 
-            # ✅ JSON 직렬화 가능하게 변환
             safe_metrics = _to_jsonable(raw_metrics)
-
             try:
                 progress.train_log(epoch=epoch, metrics=safe_metrics)
             except Exception as e:
                 print(f"[progress] train.log publish failed (after sanitize): {e}")
 
         model.add_callback("on_fit_epoch_end", _on_fit_epoch_end)
-    
+
+    # 학습 실행
     r = model.train(**train_kwargs)
 
-    # 간단 메트릭 반환
+    # 반환(경로 포함)
     try:
-        return {"map50": float(getattr(r, "metrics", {}).get("map50", 0.0))}
+        metrics_obj = getattr(r, "metrics", {}) or {}
     except Exception:
-        return {}
+        metrics_obj = {}
+
+    return {
+        "metrics": metrics_obj,
+        "run_dir": str(run_dir),
+        "best_pt": str(best_pt),
+        "results_csv": str(results_csv) if results_csv.exists() else None,
+    }

@@ -89,24 +89,10 @@ def handle_train(mq: MQ, exchanges: dict, msg: dict):
     message 예시 (s3 폴더 동기화 방식)
     {
         "job_id": "abc12345",
-        "dataset": {
-            "s3_prefix": "datasets/myset/",   // S3 내 prefix (끝 슬래시 권장)
-            "name": "myset"                   // 로컬 동기화 폴더명(옵션)
-        },
-        "output": {
-            "prefix": "models/abc12345",
-            "model_name": "myset.pt",         // 업로드 파일명(기본: best.pt)
-            "metrics_name": "results.csv"     // 결과 CSV 업로드 파일명(기본: results.csv)
-        },
-        "hyperparams": {
-            "model": "yolo12n",
-            "epochs": 20,
-            "batch": 8,
-            "imgsz": 640
-        },
-        "split": [0.8, 0.1, 0.1],             // (옵션) train/val/test 비율
-        "split_seed": 42,                     // (옵션) 분할 시드
-        "move_files": false                   // (옵션) 분할 시 복사 대신 이동
+        "dataset": {"s3_prefix": "datasets/myset/", "name": "myset"},
+        "output": {"prefix": "models/abc12345", "model_name": "myset.pt", "metrics_name": "results.csv"},
+        "hyperparams": {"model": "yolo12n", "epochs": 20, "batch": 8, "imgsz": 640},
+        "split": [0.8, 0.1, 0.1], "split_seed": 42, "move_files": false
     }
     """
     logger.info("[trainer] 모델 학습 시작")
@@ -125,7 +111,6 @@ def handle_train(mq: MQ, exchanges: dict, msg: dict):
             p = prefix.strip("/")
             dataset_name = p.split("/")[-1] if p else f"ds_{job_id}"
 
-        # download_s3_folder는 LOCAL_DATA_ROOT/<dataset_name> 하위로 동기화된 경로를 반환해야 함
         local_dir = download_s3_folder(prefix, dataset_name)
         logger.info(f"[train] dataset synced: prefix='{prefix}' -> local_dir='{local_dir}'")
 
@@ -146,10 +131,21 @@ def handle_train(mq: MQ, exchanges: dict, msg: dict):
         # --- 학습 ---
         progress.send("train.start", 20, "start training")
         out_dir = os.path.join(models_root, dataset_name)
-        metrics = train_yolo(local_dir, out_dir, msg.get("hyperparams", {}) or {}, progress=progress)
+
+        # 하이퍼파라미터에 job_id를 주입(고유 run 폴더 위해)
+        hyper = (msg.get("hyperparams") or {}).copy()
+        hyper.setdefault("job_id", job_id)
+
+        train_out = train_yolo(local_dir, out_dir, hyper, progress=progress)
+        # train_out: { "metrics": {...}, "run_dir": "...", "best_pt": "...", "results_csv": "..."|None }
+        metrics = train_out.get("metrics", {}) or {}
+        best_pt = train_out.get("best_pt")
+        results_csv = train_out.get("results_csv")
+
+        if not best_pt or not os.path.exists(best_pt):
+            raise FileNotFoundError(f"best.pt not found at {best_pt}")
 
         # --- 결과 업로드 ---
-        best_pt = os.path.join(out_dir, "train", "weights", "best.pt")
         bucket = S3_BUCKET
         model_name = msg["output"].get("model_name", "best.pt")
         key = f"{msg['output']['prefix'].rstrip('/')}/{model_name}"
@@ -158,8 +154,7 @@ def handle_train(mq: MQ, exchanges: dict, msg: dict):
         upload_s3(best_pt, bucket, key)
 
         # results.csv 업로드 (있을 때만)
-        results_csv = os.path.join(out_dir, "train", "results.csv")
-        if os.path.exists(results_csv):
+        if results_csv and os.path.exists(results_csv):
             metrics_name = msg["output"].get("metrics_name", "results.csv")
             metrics_key = f"{msg['output']['prefix'].rstrip('/')}/{metrics_name}"
             progress.send("upload.metrics", 96, f"uploading {metrics_name}")

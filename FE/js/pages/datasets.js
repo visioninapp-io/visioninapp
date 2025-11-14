@@ -359,9 +359,6 @@ class DatasetsPage {
                                         <i class="bi bi-gear me-2"></i>Actions
                                     </label>
                                     <div class="d-flex gap-2">
-                                        <button class="btn btn-outline-primary flex-fill" onclick="showConfigureDatasetModal()">
-                                            <i class="bi bi-plus-circle me-1"></i> Create New
-                                        </button>
                                         <button class="btn btn-primary flex-fill" onclick="showUploadDatasetModal()">
                                             <i class="bi bi-upload me-1"></i> Upload Images
                                         </button>

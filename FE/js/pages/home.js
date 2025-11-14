@@ -10,7 +10,7 @@ class HomePage {
                         <div class="row align-items-center g-4">
                             <div class="col-lg-6">
                                 <h1 class="hero-title mb-4">
-                                    Enterprise AI Object Detection Platform
+                                    In-house AI Object Detection Platform
                                 </h1>
                                 <p class="lead text-muted mb-4">
                                     Complete lifecycle management for industrial computer vision. From dataset annotation to production deployment, all in one secure platform.
@@ -48,7 +48,7 @@ class HomePage {
                 <div class="bg-light py-5">
                     <div class="container">
                         <div class="text-center mb-5">
-                            <h2 class="display-5 fw-bold mb-3">Why VisionAI Platform?</h2>
+                            <h2 class="display-5 fw-bold mb-3">Why VisionInApp?</h2>
                             <p class="lead text-muted">
                                 Built for enterprise teams who need control, security, and scalability
                             </p>

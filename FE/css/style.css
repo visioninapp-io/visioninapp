@@ -55,6 +55,11 @@ body {
     color: white !important;
 }
 
+  /* Navbar interval */
+.navbar-nav .nav-item {
+    margin: 0 8px;
+}
+
 /* Modal tabs - let Bootstrap handle the styling */
 .modal .nav-tabs .nav-link {
     font-weight: 500;

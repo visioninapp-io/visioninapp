@@ -17,11 +17,6 @@ def convert_dispatcher(state: TrainState) -> TrainState:
     onnx = bool(parsed.get("onnx"))
     tensorrt = bool(parsed.get("tensorrt"))
 
-    # 아무것도 요청 안했으면 패스
-    if not onnx and not tensorrt:
-        print("[convert_dispatcher] 변환 요청 없음 → 통과")
-        return state
-
     payload = {
         "job_id": getattr(state, "job_id", None),
         "onnx": str(onnx).lower(),       # "true"/"false"

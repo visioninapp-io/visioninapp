@@ -1542,7 +1542,15 @@ async function uploadLabelToS3(datasetId, filename, content) {
         prefix: "labels"
     });
 
-    const uploadUrl = presigned.upload_urls[0];
+    const uploadUrl =
+        presigned.upload_urls?.[0] ||
+        presigned.upload_url ||
+        presigned.url;
+
+    if (!uploadUrl) {
+        console.error("[S3] Invalid presigned response:", presigned);
+        throw new Error("Failed to get presigned upload URL");
+    }
 
     await fetch(uploadUrl, {
         method: "PUT",

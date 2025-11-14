@@ -1508,7 +1508,7 @@ function convertAnnotationsToYOLO(annotations, labelClassesMap) {
     return lines.join("\n");
 }
 
-// 2) presigned-upload (.txt)
+// presigned-upload (.txt)
 async function uploadYoloTxt(datasetId, txtFileName, txtContent) {
     const presigned = await apiService.post(
         `/datasets/${datasetId}/labels/presigned-upload`,
@@ -1522,20 +1522,26 @@ async function uploadYoloTxt(datasetId, txtFileName, txtContent) {
     });
 }
 
-// 3) sync current annotation → YOLO txt → S3 Upload
+// sync current annotation → YOLO txt → S3 Upload
 async function syncCurrentImageLabelToS3(imageId, datasetId) {
     const annotations = await apiService.getImageAnnotations(imageId);
     if (!annotations || annotations.length === 0) return;
 
+    // Load label classes
     const labelClasses = await apiService.get(`/datasets/${datasetId}/label-classes`);
     const labelClassesMap = new Map();
     labelClasses.forEach(cls => {
         labelClassesMap.set(cls.display_name, cls);
     });
 
+    // Generate YOLO txt
     const txt = convertAnnotationsToYOLO(annotations, labelClassesMap);
 
-    const assetFilename = annotations[0].asset.filename;
+    // Fallback: use image.filename instead of annotation.asset.filename
+    const page = window.currentDatasetDetailPage;
+    const image = page.images.find(img => img.id === imageId);
+    const assetFilename = image.filename;
+
     const txtFileName = assetFilename.replace(/\.[^/.]+$/, ".txt");
 
     await uploadYoloTxt(datasetId, txtFileName, txt);

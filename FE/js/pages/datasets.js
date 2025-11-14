@@ -198,7 +198,6 @@ class DatasetsPage {
                              aria-valuemax="100">
                         </div>
                     </div>
-                    <p class="text-muted small mb-0">이미지 목록을 가져오는 중입니다...</p>
                 </div>
             `;
         }
@@ -679,7 +678,6 @@ class DatasetsPage {
                              aria-valuemax="100">
                         </div>
                     </div>
-                    <p class="text-muted small mb-0">데이터셋 정보를 불러오는 중입니다...</p>
                 </div>
             `;
         }
@@ -692,8 +690,16 @@ class DatasetsPage {
                     <div class="spinner-border text-primary mb-3" style="width: 3rem; height: 3rem;" role="status">
                         <span class="visually-hidden">Loading...</span>
                     </div>
-                    <h5 class="text-muted">Loading Dataset Images...</h5>
-                    <p class="text-muted small">데이터셋 "${datasetName}"의 이미지를 불러오는 중입니다.</p>
+                    <h5 class="text-muted mb-3">Loading Images...</h5>
+                    <div class="progress mx-auto mb-2" style="max-width: 400px; height: 8px;">
+                        <div class="progress-bar progress-bar-striped progress-bar-animated" 
+                             role="progressbar" 
+                             style="width: 100%" 
+                             aria-valuenow="100" 
+                             aria-valuemin="0" 
+                             aria-valuemax="100">
+                        </div>
+                    </div>
                 </div>
             `;
         }
@@ -1015,6 +1021,21 @@ class DatasetsPage {
     async reloadDatasets(datasetIdToSelect = null) {
         console.log('[DatasetsPage] Reloading datasets...', datasetIdToSelect ? `Select: ${datasetIdToSelect}` : '');
 
+        // 먼저 현재 상태로 페이지 렌더링 (DOM 준비)
+        const app = document.getElementById('app');
+        if (app) {
+            app.innerHTML = this.render();
+            this.attachEventListeners();
+        }
+
+        // 데이터셋 ID가 제공되면 로딩 상태 표시
+        if (datasetIdToSelect) {
+            // 데이터셋 이름을 찾을 수 있으면 표시, 없으면 기본 메시지
+            const existingDataset = this.datasets.find(d => d.id === datasetIdToSelect);
+            const datasetName = existingDataset ? existingDataset.name : 'Dataset';
+            this.showDatasetLoadingState(datasetName);
+        }
+
         // Reload datasets and stats
         await Promise.all([
             this.loadDatasets(),
@@ -1030,8 +1051,7 @@ class DatasetsPage {
             }
         }
 
-        // Re-render the page
-        const app = document.getElementById('app');
+        // Re-render the page with loaded data
         if (app) {
             app.innerHTML = this.render();
             this.attachEventListeners();

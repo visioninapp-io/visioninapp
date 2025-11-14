@@ -106,9 +106,6 @@ class DatasetDetailPage {
                                 <button class="btn btn-outline-primary" onclick="window.location.hash='#/auto-annotate/${this.datasetId}'">
                                     <i class="bi bi-sparkles me-1"></i> Auto-Annotate
                                 </button>
-                                <button class="btn btn-outline-secondary" onclick="showExportModal(${this.datasetId})">
-                                    <i class="bi bi-download me-1"></i> Export
-                                </button>
                                 <button class="btn btn-danger" onclick="confirmDeleteDataset(${this.datasetId})">
                                     <i class="bi bi-trash me-1"></i> Delete
                                 </button>
@@ -858,38 +855,28 @@ function changePage(page) {
     }
 }
 
-function showExportModal(datasetId) {
+function confirmDeleteDataset(datasetId) {
     const modalHTML = `
-        <div class="modal fade" id="exportDatasetModal" tabindex="-1" aria-hidden="true">
-            <div class="modal-dialog">
-                <div class="modal-content">
-                    <div class="modal-header">
-                        <h5 class="modal-title">
-                            <i class="bi bi-download me-2"></i>Export Dataset
+        <div class="modal fade" id="deleteDatasetModal" tabindex="-1" aria-hidden="true">
+            <div class="modal-dialog modal-dialog-centered">
+                <div class="modal-content border-0 shadow-lg">
+                    <div class="modal-header border-0 pb-0">
+                        <h5 class="modal-title fw-bold">
+                            <i class="bi bi-exclamation-triangle-fill text-warning me-2"></i>Delete Dataset
                         </h5>
                         <button type="button" class="btn-close" data-bs-dismiss="modal"></button>
                     </div>
-                    <div class="modal-body">
-                        <div class="mb-3">
-                            <label class="form-label">Export Format</label>
-                            <select class="form-select" id="export-format">
-                                <option value="yolo">YOLO (txt files)</option>
-                                <option value="coco">COCO JSON</option>
-                                <option value="pascal-voc">Pascal VOC (XML)</option>
-                                <option value="tfrecord">TFRecord</option>
-                            </select>
-                        </div>
-                        <div class="form-check">
-                            <input class="form-check-input" type="checkbox" id="include-images" checked>
-                            <label class="form-check-label" for="include-images">
-                                Include images in export
-                            </label>
+                    <div class="modal-body pt-4">
+                        <p class="mb-3">Are you sure you want to delete this dataset?</p>
+                        <div class="d-flex align-items-start text-muted">
+                            <i class="bi bi-info-circle me-2 mt-1"></i>
+                            <small>This action cannot be undone. All images and annotations in this dataset will be permanently deleted.</small>
                         </div>
                     </div>
-                    <div class="modal-footer">
-                        <button type="button" class="btn btn-secondary" data-bs-dismiss="modal">Cancel</button>
-                        <button type="button" class="btn btn-primary" onclick="handleExport(${datasetId})">
-                            <i class="bi bi-download me-1"></i> Export
+                    <div class="modal-footer border-0 pt-0">
+                        <button type="button" class="btn btn-outline-secondary" data-bs-dismiss="modal">Cancel</button>
+                        <button type="button" class="btn btn-danger" id="confirm-delete-btn">
+                            <i class="bi bi-trash me-1"></i> Delete
                         </button>
                     </div>
                 </div>
@@ -897,29 +884,14 @@ function showExportModal(datasetId) {
         </div>
     `;
 
-    const existingModal = document.getElementById('exportDatasetModal');
+    const existingModal = document.getElementById('deleteDatasetModal');
     if (existingModal) existingModal.remove();
 
     document.body.insertAdjacentHTML('beforeend', modalHTML);
-    const modal = new bootstrap.Modal(document.getElementById('exportDatasetModal'));
-    modal.show();
-}
+    const modal = new bootstrap.Modal(document.getElementById('deleteDatasetModal'));
 
-function handleExport(datasetId) {
-    const format = document.getElementById('export-format').value;
-    const includeImages = document.getElementById('include-images').checked;
-
-    showToast('Preparing export...', 'info');
-
-    // In real app, this would call the API
-    setTimeout(() => {
-        showToast('Dataset exported successfully!', 'success');
-        bootstrap.Modal.getInstance(document.getElementById('exportDatasetModal')).hide();
-    }, 2000);
-}
-
-function confirmDeleteDataset(datasetId) {
-    if (confirm('Are you sure you want to delete this dataset? This action cannot be undone.')) {
+    document.getElementById('confirm-delete-btn').addEventListener('click', () => {
+        modal.hide();
         apiService.delete(`/datasets/${datasetId}`)
             .then(() => {
                 showToast('Dataset deleted successfully', 'success');
@@ -933,7 +905,9 @@ function confirmDeleteDataset(datasetId) {
                 console.error('Failed to delete dataset:', error);
                 showToast('Failed to delete dataset: ' + error.message, 'error');
             });
-    }
+    });
+
+    modal.show();
 }
 
 // Open single image annotation modal

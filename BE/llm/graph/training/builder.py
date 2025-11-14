@@ -37,6 +37,7 @@ def builder(user_query: str, dataset_path: str, job_id: str):
     graph = StateGraph(TrainState)
     graph.add_node("init_context", NODE_REGISTRY["init_context"])
     graph.add_node("query_analyzer", NODE_REGISTRY["query_analyzer"])
+    graph.add_node("convert_dispatcher", NODE_REGISTRY["convert_dispatcher"])
     graph.add_node("param_synthesizer", NODE_REGISTRY["param_synthesizer"])
     # graph.add_node("selfrag_scorer", NODE_REGISTRY["selfrag_scorer"])
     # graph.add_node("selfrag_decider", NODE_REGISTRY["selfrag_decider"])
@@ -59,7 +60,8 @@ def builder(user_query: str, dataset_path: str, job_id: str):
     graph.add_edge(START, "init_context")
 
     graph.add_edge("init_context", "query_analyzer")
-    graph.add_edge("query_analyzer", "param_synthesizer")
+    graph.add_edge("query_analyzer", "convert_dispatcher")
+    graph.add_edge("convert_dispatcher", "param_synthesizer")
     graph.add_edge("param_synthesizer", "load_dataset")
     graph.add_edge("load_dataset", "decide_mode")
     graph.add_conditional_edges(

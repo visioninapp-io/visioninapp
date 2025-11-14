@@ -40,6 +40,7 @@ def _parse_with_llm(user_query: str) -> Dict[str, Any]:
     자연어 요구사항을 구조화. LLM 실패 시 빈 딕셔너리 반환.
     모델/정밀도 표기는 'v' 없이(yolo8n, yolo11s, yolo12x)라는 팀 규칙을 따름.
     """
+    print("[query_analyzer] start")
     if not _LLM or not _clean(user_query):
         return {}
     try:
@@ -75,8 +76,8 @@ def _parse_with_llm(user_query: str) -> Dict[str, Any]:
               "use_hpo":null,
               "max_trials":null,
               "urgent":null,
-              "onnx":null,
-              "tensorrt":null,
+              "onnx":true|false,
+              "tensorrt":true|false,
               "notes":"짧은 요약"
             }}
 

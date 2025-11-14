@@ -18,10 +18,12 @@ from .registry_publish import registry_publish
 from .onnx_converter import onnx_converter
 from .tensor_converter import tensor_converter
 from .evaluate_convert_model import evaluate_convert_model
+from .convert_dispatcher import convert_dispatcher
 
 NODE_REGISTRY = {
     "init_context": init_context,
     "query_analyzer": query_analyzer,
+    "convert_dispatcher": convert_dispatcher,
     "param_synthesizer": param_synthesizer,
     "selfrag_scorer": selfrag_scorer,
     "selfrag_decider": selfrag_decider,

@@ -117,6 +117,7 @@ def init_context(state: TrainState) -> TrainState:
     - HPO/게이트 초기화
     - context 구성
     """
+    print("[init_context] start")
     # 1️⃣ training.yaml 로드
     config_path = state.config_path or "configs/training.yaml"
     train_cfg = _load_yaml(config_path) if Path(config_path).exists() else {}

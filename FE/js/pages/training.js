@@ -353,9 +353,9 @@ class TrainingPage {
     async loadTrainingJobs() {
         try {
             console.log('[Training Page] Loading training jobs...');
-            const jobs = await apiService.getTrainingJobs();
+            const response = await apiService.getTrainingJobs();
 
-            this.trainingJobs = jobs || [];
+            this.trainingJobs = Array.isArray(response) ? response : (response.jobs || response.data || []);
             console.log('[Training Page] Loaded jobs:', this.trainingJobs.length);
 
             // Select a job to display metrics for
@@ -869,46 +869,56 @@ class TrainingPage {
             existingFAB.remove();
         }
 
-        // FAB 버튼 생성
+        // FAB 버튼 생성 (pill 형태로 변경)
         const fabButton = document.createElement('button');
         fabButton.id = 'llm-fab-button';
-        fabButton.className = 'btn btn-info rounded-circle shadow-lg';
-        fabButton.innerHTML = '<i class="bi bi-robot fs-4"></i>';
-        fabButton.title = 'LLM 모델 변환';
+        fabButton.className = 'btn shadow-lg';
+        fabButton.innerHTML = `
+            <div class="d-flex align-items-center gap-2 px-1">
+                <i class="bi bi-robot fs-4"></i>
+                <span class="fw-bold" style="font-size: 1.1rem;">AI Training</span>
+            </div>
+        `;
+        fabButton.title = 'AI 자동 학습 시작';
         
-        // CSS 스타일 적용
+        // CSS 스타일 적용 (pill 형태, 더 작고 반투명)
         fabButton.style.cssText = `
             position: fixed;
-            bottom: 30px;
-            right: 30px;
-            width: 64px;
-            height: 64px;
+            bottom: 24px;
+            right: 24px;
+            height: 48px;
+            padding: 0 20px;
             display: flex;
             justify-content: center;
             align-items: center;
             z-index: 1050;
             border: none;
+            border-radius: 24px;
             transition: all 0.3s ease;
             background: linear-gradient(135deg, #3b82f6, #0ea5e9);
+            color: white;
+            opacity: 0.9;
         `;
 
         // 호버 효과
         fabButton.addEventListener('mouseenter', () => {
-            fabButton.style.transform = 'scale(1.1)';
-            fabButton.style.boxShadow = '0 8px 16px rgba(59, 130, 246, 0.4)';
+            fabButton.style.transform = 'scale(1.05) translateY(-2px)';
+            fabButton.style.boxShadow = '0 12px 24px rgba(59, 130, 246, 0.4)';
+            fabButton.style.opacity = '1';
         });
 
         fabButton.addEventListener('mouseleave', () => {
-            fabButton.style.transform = 'scale(1)';
+            fabButton.style.transform = 'scale(1) translateY(0)';
             fabButton.style.boxShadow = '';
+            fabButton.style.opacity = '0.9';
         });
 
         fabButton.addEventListener('mousedown', () => {
-            fabButton.style.transform = 'scale(0.95)';
+            fabButton.style.transform = 'scale(0.98) translateY(0)';
         });
 
         fabButton.addEventListener('mouseup', () => {
-            fabButton.style.transform = 'scale(1)';
+            fabButton.style.transform = 'scale(1.05) translateY(-2px)';
         });
 
         // 클릭 이벤트

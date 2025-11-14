@@ -9,7 +9,9 @@ let llmModalState = {
     timers: [],
     trainingJob: null,  // 학습 작업 정보 저장
     jobId: null,        // RabbitMQ 구독을 위한 job_id
-    rabbitmqSubscriptions: []  // 구독 관리
+    rabbitmqSubscriptions: [],  // 구독 관리
+    needsConversion: false,  // 모델 변환 필요 여부
+    conversionType: null  // 'onnx' 또는 'tensorrt'
 };
 
 // Show LLM Modal
@@ -28,7 +30,9 @@ async function showLLMModal() {
         timers: [],
         trainingJob: null,
         jobId: null,
-        rabbitmqSubscriptions: []
+        rabbitmqSubscriptions: [],
+        needsConversion: false,
+        conversionType: null
     };
 
     // Show modal first
@@ -228,7 +232,8 @@ function renderQueryInputStep(container) {
 // 데이터셋 로드 함수
 async function loadDatasetsForLLMModal() {
     try {
-        llmModalState.datasets = await apiService.getDatasets();
+        const response = await apiService.getDatasets();
+        llmModalState.datasets = Array.isArray(response) ? response : (response.datasets || response.data || []);
         console.log('[LLM Modal] Loaded datasets:', llmModalState.datasets.length);
         
         // 데이터셋이 있으면 첫 번째 선택
@@ -445,7 +450,7 @@ function renderTrainingProgressStep(container) {
 
             <!-- Status Boxes - 균형 있는 배치 -->
             <div class="row g-3 mb-4">
-                <div class="col-12 col-md-6">
+                <div class="col-12 col-md-4">
                     <div class="p-3 border rounded h-100 d-flex align-items-center" id="status-analyze" style="min-height: 60px;">
                         <div class="d-flex align-items-center gap-2 w-100">
                             <div class="rounded-circle bg-secondary" style="width: 10px; height: 10px; flex-shrink: 0;"></div>
@@ -453,7 +458,7 @@ function renderTrainingProgressStep(container) {
                         </div>
                     </div>
                 </div>
-                <div class="col-12 col-md-6">
+                <div class="col-12 col-md-4">
                     <div class="p-3 border rounded h-100 d-flex align-items-center" id="status-download" style="min-height: 60px;">
                         <div class="d-flex align-items-center gap-2 w-100">
                             <div class="rounded-circle bg-secondary" style="width: 10px; height: 10px; flex-shrink: 0;"></div>
@@ -482,6 +487,14 @@ function renderTrainingProgressStep(container) {
                         <div class="d-flex align-items-center gap-2 w-100">
                             <div class="rounded-circle bg-secondary" style="width: 10px; height: 10px; flex-shrink: 0;"></div>
                             <span class="small fw-medium flex-grow-1" style="white-space: nowrap; overflow: hidden; text-overflow: ellipsis;">Uploading Model</span>
+                        </div>
+                    </div>
+                </div>
+                <div class="col-12 col-md-4" id="status-export-container" style="display: none;">
+                    <div class="p-3 border rounded h-100 d-flex align-items-center" id="status-export" style="min-height: 60px;">
+                        <div class="d-flex align-items-center gap-2 w-100">
+                            <div class="rounded-circle bg-secondary" style="width: 10px; height: 10px; flex-shrink: 0;"></div>
+                            <span class="small fw-medium flex-grow-1" style="white-space: nowrap; overflow: hidden; text-overflow: ellipsis;">Converting Model</span>
                         </div>
                     </div>
                 </div>
@@ -547,7 +560,10 @@ async function startRabbitMQProgress() {
             'job.progress.train.start',
             'job.progress.upload',
             'job.progress.done',                // 완료 이벤트 (100%)
-            'train.llm.log'                     // 학습 진행률 업데이트 (epoch별 퍼센트)
+            'train.llm.log',                    // 학습 진행률 업데이트 (epoch별 퍼센트)
+            'convert.exchanges',                // 변환 정보 수신
+            'job.progress.onnx.done',           // ONNX 변환 완료
+            'job.progress.trt.done'             // TensorRT 변환 완료
         ];
         
         // 에러 이벤트 구독 (job.{job_id}.error 또는 job.#.error)
@@ -570,6 +586,8 @@ async function startRabbitMQProgress() {
         // 모든 개별 routing key에 구독
         individualKeys.forEach(routingKey => {
             try {
+                // convert.exchanges는 jobs.event exchange를 사용 (LLM convert_dispatcher)
+                const exchangeName = (routingKey === 'convert.exchanges') ? 'jobs.event' : 'jobs.events';
                 const subscriptionId = rabbitmqService.subscribe(
                     routingKey,
                     (message) => { 
@@ -622,7 +640,7 @@ async function startRabbitMQProgress() {
                         }
                     },
                     'exchange',
-                    'jobs.events'
+                    exchangeName  // 동적으로 exchange 선택 (convert.exchanges는 jobs.event 사용)
                 );
                 llmModalState.rabbitmqSubscriptions.push({ routingKey, subscriptionId });
                 console.log(`[LLM Modal] ✅ Subscribed to: ${routingKey}`);
@@ -737,6 +755,31 @@ function handleProgressMessage(message, routingKey = '') {
         console.warn(`[LLM Modal] ⚠️ Ignoring message - current step is ${llmModalState.currentStep}, not 2`);
         return;
     }
+    
+    // convert.exchanges 메시지 처리 (변환 정보 수신)
+    if (routingKey === 'convert.exchanges') {
+        console.log(`[LLM Modal] 🔄 Conversion info received:`, message);
+        const onnx = String(message.onnx || 'false').toLowerCase() === 'true';
+        const tensorrt = String(message.tensorrt || 'false').toLowerCase() === 'true';
+        
+        if (onnx || tensorrt) {
+            llmModalState.needsConversion = true;
+            llmModalState.conversionType = onnx ? 'onnx' : 'tensorrt';
+            console.log(`[LLM Modal] ✅ Model conversion required: ${llmModalState.conversionType}`);
+            
+            // Export 박스 표시
+            const exportContainer = document.getElementById('status-export-container');
+            if (exportContainer) {
+                exportContainer.style.display = 'block';
+            }
+        } else {
+            // 둘 다 false인 경우 = 일반 모델 (변환 불필요)
+            llmModalState.needsConversion = false;
+            llmModalState.conversionType = null;
+            console.log(`[LLM Modal] ✅ Regular model (no conversion needed)`);
+        }
+        return; // convert.exchanges 메시지는 여기서 처리 완료
+    }
         
     // train.llm.log 메시지 처리 (epoch별 학습 진행률 업데이트)
     // 메시지 구조: { job_id, epoch, total_epochs, percentage }
@@ -790,7 +833,8 @@ function handleProgressMessage(message, routingKey = '') {
             'train.download_dataset': { id: 'status-download', order: 1 },
             'train.prepare_split': { id: 'status-prepare', order: 2 },
             'train.start': { id: 'status-train', order: 3 },
-            'upload': { id: 'status-upload', order: 4 }
+            'upload': { id: 'status-upload', order: 4 },
+            'export': { id: 'status-export', order: 5 }
         };
         
         // train.start 이전 단계들을 complete로 설정
@@ -822,6 +866,47 @@ function handleProgressMessage(message, routingKey = '') {
 
     console.log(`[LLM Modal] Raw Stage: "${stage}", Percent: ${percent}, Message: "${messageText}", RoutingKey: "${routingKey}"`);
     
+    // ONNX/TensorRT 변환 완료 메시지 처리
+    if (routingKey === 'job.progress.onnx.done' || routingKey === 'job.progress.trt.done') {
+        console.log(`[LLM Modal] 🎉 Model conversion completed: ${routingKey}`);
+        
+        // Export 상태 박스를 complete로 설정
+        updateStatusBox('status-export', 'complete');
+        
+        // 프로그레스 바 100%
+        const progressBar = document.getElementById('training-progress-bar');
+        const progressText = document.getElementById('training-progress-text');
+        const progressMessage = document.getElementById('training-progress-message');
+        
+        if (progressBar) {
+            progressBar.style.width = '100%';
+            progressBar.setAttribute('aria-valuenow', 100);
+            progressBar.classList.remove('progress-bar-striped', 'progress-bar-animated');
+        }
+        if (progressText) {
+            progressText.textContent = '100%';
+        }
+        if (progressMessage) {
+            progressMessage.className = 'badge bg-success text-white px-3 py-2 fw-normal border';
+            const conversionType = routingKey.includes('onnx') ? 'ONNX' : 'TensorRT';
+            progressMessage.textContent = `${conversionType} conversion completed successfully!`;
+        }
+        
+        // Step 3로 이동
+        const timer = setTimeout(() => {
+            if (llmModalState.currentStep === 2) {
+                cleanupRabbitMQSubscriptions();
+                currentActiveStage = null;
+                completedStages.clear();
+                llmModalState.currentStep = 3;
+                renderStep(3);
+            }
+        }, 1000);
+        llmModalState.timers.push(timer);
+        
+        return; // onnx/trt done 이벤트는 여기서 처리 완료
+    }
+    
     // routingKey가 'job.progress.done'이면 완료로 처리 (더 확실한 감지)
     if (routingKey === 'job.progress.done' || routingKey.endsWith('.done')) {
         stage = 'done';
@@ -850,11 +935,54 @@ function handleProgressMessage(message, routingKey = '') {
     
     // done 이벤트 처리 (100% 완료)
     // 조건: stage가 'done'이거나, percent가 100 이상이거나, routingKey가 'job.progress.done'인 경우
-    if (stage === 'done' || percent >= 100 || routingKey === 'job.progress.done' || routingKey.endsWith('.done')) {
-        console.log('[LLM Modal] Training completed (100%), marking all stages as complete');
+    // 단, 변환이 필요한 경우는 여기서 완료 처리하지 않음 (onnx.done/trt.done에서 처리)
+    if (stage === 'done' || percent >= 100 || routingKey === 'job.progress.done') {
+        console.log('[LLM Modal] Training completed (100%), checking conversion requirements');
         console.log(`[LLM Modal] Completion detected: stage="${stage}", percent=${percent}, routingKey="${routingKey}"`);
+        console.log(`[LLM Modal] Needs conversion: ${llmModalState.needsConversion}, type: ${llmModalState.conversionType}`);
         
-        // 모든 상태 박스를 complete로 설정
+        // 변환이 필요한 경우, Upload까지만 complete로 설정하고 Export는 active로 설정
+        if (llmModalState.needsConversion) {
+            console.log('[LLM Modal] 🔄 Conversion required, waiting for onnx/trt.done message');
+            
+            const stageOrder = {
+                'analyze.prompt': { id: 'status-analyze', order: 0, label: 'Analyze Prompt' },
+                'train.download_dataset': { id: 'status-download', order: 1, label: 'Downloading Dataset' },
+                'train.prepare_split': { id: 'status-prepare', order: 2, label: 'Preparing Data' },
+                'train.start': { id: 'status-train', order: 3, label: 'Training Model' },
+                'upload': { id: 'status-upload', order: 4, label: 'Uploading Model' }
+            };
+            
+            Object.keys(stageOrder).forEach(key => {
+                updateStatusBox(stageOrder[key].id, 'complete');
+            });
+            
+            // Export 상태를 active로 설정
+            updateStatusBox('status-export', 'active');
+            
+            // 프로그레스 바는 95% 정도로 설정 (변환 대기 중)
+            const progressBar = document.getElementById('training-progress-bar');
+            const progressText = document.getElementById('training-progress-text');
+            const progressMessage = document.getElementById('training-progress-message');
+            
+            if (progressBar) {
+                progressBar.style.width = '95%';
+                progressBar.setAttribute('aria-valuenow', 95);
+                progressBar.classList.add('progress-bar-striped', 'progress-bar-animated');
+            }
+            if (progressText) {
+                progressText.textContent = '95%';
+            }
+            if (progressMessage) {
+                progressMessage.className = 'badge bg-light text-dark px-3 py-2 fw-normal border';
+                const conversionType = llmModalState.conversionType === 'onnx' ? 'ONNX' : 'TensorRT';
+                progressMessage.textContent = `Converting model to ${conversionType}...`;
+            }
+            
+            return; // 변환 대기 중, onnx/trt.done에서 완료 처리
+        }
+        
+        // 변환이 필요 없는 경우, 모든 상태 박스를 complete로 설정
         const stageOrder = {
             'analyze.prompt': { id: 'status-analyze', order: 0, label: 'Analyze Prompt' },
             'train.download_dataset': { id: 'status-download', order: 1, label: 'Downloading Dataset' },
@@ -907,7 +1035,8 @@ function handleProgressMessage(message, routingKey = '') {
         'train.download_dataset': { id: 'status-download', order: 1, label: 'Downloading Dataset' },
         'train.prepare_split': { id: 'status-prepare', order: 2, label: 'Preparing Data' },
         'train.start': { id: 'status-train', order: 3, label: 'Training Model' },
-        'upload': { id: 'status-upload', order: 4, label: 'Uploading Model' }
+        'upload': { id: 'status-upload', order: 4, label: 'Uploading Model' },
+        'export': { id: 'status-export', order: 5, label: 'Converting Model' }
     };
 
     // 프로그레스 바 업데이트

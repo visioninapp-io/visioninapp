@@ -10,7 +10,7 @@ class LabelOntologyVersion(Base):
     __tablename__ = "label_ontology_version"
 
     id = Column(Integer, primary_key=True, index=True)
-    dataset_version_id = Column(Integer, ForeignKey("dataset_version.id"), nullable=False, index=True, comment="데이터셋 버전 ID")
+    dataset_version_id = Column(Integer, ForeignKey("dataset_version.id", ondelete="CASCADE"), nullable=False, index=True, comment="데이터셋 버전 ID")
     version_tag = Column(String(50), nullable=False, comment="버전명")
     is_frozen = Column(Boolean, nullable=False, default=False, comment="수정 불가 여부")
     created_at = Column(DateTime, nullable=False, default=get_kst_now_naive, comment="생성일")

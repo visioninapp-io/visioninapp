@@ -426,16 +426,29 @@ async def delete_dataset(
 
     print(f"[DELETE DATASET] Deleting dataset {dataset_id}: {dataset.name}")
     
+    # Step 1: Delete all files from S3 (must succeed before DB deletion)
     try:
-        # Delete all files from S3
         file_storage.delete_dataset_files(dataset.name)
+        print(f"[DELETE DATASET] S3 files deleted successfully for dataset {dataset_id}")
     except Exception as e:
-        print(f"[WARNING] Failed to delete S3 files for dataset {dataset_id}: {e}")
-        # Continue with database deletion even if S3 deletion fails
+        print(f"[ERROR] Failed to delete S3 files for dataset {dataset_id}: {e}")
+        raise HTTPException(
+            status_code=500,
+            detail=f"Failed to delete dataset files from S3: {str(e)}"
+        )
     
-    # Delete from database (cascade will handle related records)
-    db.delete(dataset)
-    db.commit()
+    # Step 2: Delete from database (only if S3 deletion succeeded)
+    try:
+        db.delete(dataset)
+        db.commit()
+        print(f"[DELETE DATASET] Database records deleted successfully for dataset {dataset_id}")
+    except Exception as e:
+        db.rollback()
+        print(f"[ERROR] Failed to delete database records for dataset {dataset_id}: {e}")
+        raise HTTPException(
+            status_code=500,
+            detail=f"S3 files deleted but database deletion failed: {str(e)}"
+        )
 
     return None
 

@@ -1424,6 +1424,8 @@ async function saveViewerAnnotations() {
             }
             showToast(message, 'error');
         }
+        
+        await syncCurrentImageLabelToS3(viewerState.currentImage.id, page.datasetId);
 
     } catch (error) {
         console.error('[ViewerAnnotation] Save error:', error);
@@ -1487,4 +1489,54 @@ function getRandomColorForLabel() {
         color += letters[Math.floor(Math.random() * 16)];
     }
     return color;
+}
+
+// annotation[] → YOLO txt conversion
+function convertAnnotationsToYOLO(annotations, labelClassesMap) {
+    const lines = [];
+
+    for (const ann of annotations) {
+        if (!ann.geometry || !ann.geometry.bbox) continue;
+
+        const cls = labelClassesMap.get(ann.label_class.display_name);
+        if (!cls) continue;
+
+        const bb = ann.geometry.bbox;
+        lines.push(`${cls.yolo_index} ${bb.x_center} ${bb.y_center} ${bb.width} ${bb.height}`);
+    }
+
+    return lines.join("\n");
+}
+
+// 2) presigned-upload (.txt)
+async function uploadYoloTxt(datasetId, txtFileName, txtContent) {
+    const presigned = await apiService.post(
+        `/datasets/${datasetId}/labels/presigned-upload`,
+        { filename: txtFileName }
+    );
+
+    await fetch(presigned.upload_url, {
+        method: "PUT",
+        body: txtContent,
+        headers: { "Content-Type": "text/plain" }
+    });
+}
+
+// 3) sync current annotation → YOLO txt → S3 Upload
+async function syncCurrentImageLabelToS3(imageId, datasetId) {
+    const annotations = await apiService.getImageAnnotations(imageId);
+    if (!annotations || annotations.length === 0) return;
+
+    const labelClasses = await apiService.get(`/datasets/${datasetId}/label-classes`);
+    const labelClassesMap = new Map();
+    labelClasses.forEach(cls => {
+        labelClassesMap.set(cls.display_name, cls);
+    });
+
+    const txt = convertAnnotationsToYOLO(annotations, labelClassesMap);
+
+    const assetFilename = annotations[0].asset.filename;
+    const txtFileName = assetFilename.replace(/\.[^/.]+$/, ".txt");
+
+    await uploadYoloTxt(datasetId, txtFileName, txt);
 }

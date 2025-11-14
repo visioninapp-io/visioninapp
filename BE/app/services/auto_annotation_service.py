@@ -55,6 +55,20 @@ def handle_inference_done(payload: dict):
             log.error(f"[INFERENCE-DONE] Dataset not found: {dataset_id}")
             return
 
+        # Get dataset version and ontology
+        from app.utils.dataset_helper import get_or_create_dataset_version
+        dataset_version = get_or_create_dataset_version(db, dataset_id, 'v0')
+        if not dataset_version:
+            log.error(f"[INFERENCE-DONE] Dataset version not found for dataset {dataset_id}")
+            return
+
+        ontology = dataset_version.ontology_version
+        if not ontology:
+            log.error(f"[INFERENCE-DONE] Ontology not found for dataset {dataset_id}")
+            return
+
+        log.info(f"[INFERENCE-DONE] Using ontology_id={ontology.id} for dataset {dataset_id}")
+
         total_annotations = 0
 
         # S3에서 label 파일 읽기 및 DB 저장
@@ -66,7 +80,12 @@ def handle_inference_done(payload: dict):
                 continue
 
             # S3에서 label 파일 다운로드
-            s3_label_key = f"{s3_labels_path}/{label_filename}"
+            # s3_labels_path should be like "datasets/pothole/labels" or "pothole/labels"
+            # Ensure it starts with "datasets/" prefix
+            if not s3_labels_path.startswith("datasets/"):
+                s3_label_key = f"datasets/{s3_labels_path}/{label_filename}"
+            else:
+                s3_label_key = f"{s3_labels_path}/{label_filename}"
             log.info(f"[INFERENCE-DONE] Downloading label from S3: {s3_label_key}")
 
             try:
@@ -77,6 +96,9 @@ def handle_inference_done(payload: dict):
 
                 # YOLO format 파싱 (class_id x_center y_center width height)
                 lines = label_content.decode("utf-8").strip().split("\n")
+                if not lines or (len(lines) == 1 and not lines[0].strip()):
+                    log.info(f"[INFERENCE-DONE] Empty label file: {s3_label_key}")
+                    continue
 
                 # overwrite_existing 처리
                 if overwrite_existing:
@@ -91,6 +113,7 @@ def handle_inference_done(payload: dict):
                 for line in lines:
                     parts = line.strip().split()
                     if len(parts) != 5:
+                        log.warning(f"[INFERENCE-DONE] Invalid line format (expected 5 parts): {line}")
                         continue
 
                     yolo_class_id = int(parts[0])
@@ -99,13 +122,14 @@ def handle_inference_done(payload: dict):
                     width = float(parts[3])
                     height = float(parts[4])
 
-                    # yolo_index로 LabelClass 찾기
+                    # yolo_index로 LabelClass 찾기 (ontology version으로 필터링)
                     label_class = db.query(LabelClass).filter(
+                        LabelClass.ontology_version_id == ontology.id,
                         LabelClass.yolo_index == yolo_class_id
                     ).first()
 
                     if not label_class:
-                        log.warning(f"[INFERENCE-DONE] LabelClass not found for yolo_index={yolo_class_id}")
+                        log.warning(f"[INFERENCE-DONE] LabelClass not found for ontology_id={ontology.id}, yolo_index={yolo_class_id}")
                         continue
 
                     # Geometry 데이터

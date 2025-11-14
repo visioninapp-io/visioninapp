@@ -15,24 +15,22 @@ class ConversionPage {
 
     async loadModels() {
         try {
-            const response = await window.apiService.getModels();
-            this.models = response;
+            // Get trained models from S3 (backend now includes artifact info from database)
+            const trainedModels = await window.apiService.getTrainedModels();
             
-            // 각 모델의 artifact 정보 가져오기
-            for (let model of this.models) {
-                try {
-                    const artifacts = await window.apiService.getModelArtifacts(model.id);
-                    if (artifacts && artifacts.length > 0) {
-                        // PT 파일 찾기
-                        const ptArtifact = artifacts.find(a => a.format === 'pt' || a.storage_uri?.endsWith('.pt'));
-                        if (ptArtifact) {
-                            model.s3_uri = `s3://visioninapp-bucket/${ptArtifact.storage_uri}`;
-                        }
-                    }
-                } catch (error) {
-                    console.warn(`Failed to load artifacts for model ${model.id}:`, error);
-                }
-            }
+            // Transform to match expected format with s3_uri
+            // Backend now provides: has_artifact, artifact_id, model_version_id
+            this.models = trainedModels.map(m => ({
+                id: m.id || m.model_id || m.model_name,
+                model_id: m.model_id,
+                name: m.model_name,
+                s3_key: m.s3_key || m.relative_path,
+                s3_uri: m.s3_bucket ? `s3://${m.s3_bucket}/${m.s3_key || m.relative_path}` : null,
+                file_size_mb: m.file_size_mb,
+                hasArtifact: m.has_artifact || false,  // From backend database check
+                artifact_id: m.artifact_id || null,
+                model_version_id: m.model_version_id || null
+            })).filter(m => m.s3_uri); // Only include models with valid S3 URI
             
             this.renderModelsSection();
         } catch (error) {
@@ -42,10 +40,22 @@ class ConversionPage {
         }
     }
 
-    selectModel(modelId, s3Uri) {
+    selectModel(modelId, s3Uri, hasArtifact) {
         if (!s3Uri) {
-            alert('This model does not have a valid artifact. Please ensure the model has been trained.');
+            alert('This model does not have a valid S3 URI. Please ensure the model has been uploaded to S3.');
             return;
+        }
+        
+        if (!hasArtifact) {
+            const proceed = confirm(
+                'Warning: This model may not have an artifact record in the database.\n\n' +
+                'Conversion requires the model to have a ModelArtifact record.\n' +
+                'If conversion fails, the model may need to be re-uploaded or the artifact record created.\n\n' +
+                'Do you want to proceed anyway?'
+            );
+            if (!proceed) {
+                return;
+            }
         }
         
         this.selectedModelId = modelId;
@@ -138,19 +148,24 @@ class ConversionPage {
         }
 
         modelsContainer.innerHTML = this.models.map(model => `
-            <div class="card mb-3 hover-shadow cursor-pointer model-card" 
+            <div class="card mb-3 hover-shadow cursor-pointer model-card ${!model.hasArtifact ? 'border-warning' : ''}" 
                  data-model-id="${model.id}"
-                 onclick="window.currentPage.selectModel(${model.id}, '${model.s3_uri || ''}')">
+                 onclick="window.currentPage.selectModel('${model.id}', '${model.s3_uri || ''}', ${model.hasArtifact})">
                 <div class="card-body">
                     <div class="d-flex justify-content-between align-items-center">
                         <div>
                             <h6 class="fw-bold mb-2">${model.name}</h6>
                             <div class="d-flex gap-3 text-muted small">
                                 <span><i class="bi bi-cpu me-1"></i>PyTorch</span>
-                                ${model.s3_uri ? '<span class="text-success"><i class="bi bi-check-circle me-1"></i>Ready</span>' : '<span class="text-warning"><i class="bi bi-exclamation-triangle me-1"></i>No artifact</span>'}
+                                <span><i class="bi bi-hdd me-1"></i>${model.file_size_mb || 'N/A'}MB</span>
+                                ${model.hasArtifact 
+                                    ? '<span class="text-success"><i class="bi bi-check-circle me-1"></i>Ready for Conversion</span>' 
+                                    : '<span class="text-warning"><i class="bi bi-exclamation-triangle me-1"></i>No Artifact Record</span>'}
                             </div>
+                            ${model.s3_key ? `<small class="text-muted d-block mt-1">${model.s3_key}</small>` : ''}
+                            ${!model.hasArtifact ? '<small class="text-warning d-block mt-1"><i class="bi bi-info-circle me-1"></i>Conversion may fail - artifact record missing</small>' : ''}
                         </div>
-                        <span class="badge bg-secondary">ID: ${model.id}</span>
+                        <span class="badge ${model.hasArtifact ? 'bg-success' : 'bg-warning'}">${model.model_id ? `ID: ${model.model_id}` : 'S3 Only'}</span>
                     </div>
                 </div>
             </div>

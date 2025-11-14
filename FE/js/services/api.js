@@ -1,7 +1,7 @@
 // API Service Layer - Handles all backend communications
 // Enhanced with robust error handling and debugging
 
-const API_BASE_URL = '/api/v1';
+const API_BASE_URL = 'http://localhost:8000/api/v1';
 
 class APIService {
     constructor() {

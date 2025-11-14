@@ -30,6 +30,15 @@ class AutoAnnotatePage {
             app.innerHTML = this.render();
             // Re-attach event listeners after re-rendering
             this.attachEventListeners();
+            
+            // Explicitly set the dropdown value after re-render to ensure selection is preserved
+            if (this.selectedModel) {
+                const modelSelect = document.getElementById('model-select');
+                if (modelSelect) {
+                    const selectedValue = String(this.selectedModel.id);
+                    modelSelect.value = selectedValue;
+                }
+            }
         }
     }
 
@@ -51,10 +60,13 @@ class AutoAnnotatePage {
             console.log('[AutoAnnotatePage] Trained models:', trainedModels);
             
             // Transform trained models to match expected format
+            // Use 'id' field from backend (always present), fallback to model_id or model_name
             this.models = trainedModels.map(m => ({
-                id: m.model_id,
+                id: m.id || m.model_id || m.model_name,  // Backend provides 'id' field that's always present
+                // model_id: m.model_id,  // Keep original model_id for API calls
                 name: m.model_name,
                 model_path: m.relative_path,
+                s3_key: m.s3_key,  // Keep S3 key for reference
                 file_size_mb: m.file_size_mb,
                 framework: 'YOLO',
                 architecture: 'YOLOv8',
@@ -156,11 +168,15 @@ class AutoAnnotatePage {
                                             <label for="model-select" class="form-label">Select Trained Model</label>
                                             <select class="form-select" id="model-select" ${this.isAnnotating ? 'disabled' : ''}>
                                                 <option value="">-- Choose a trained model --</option>
-                                                ${this.models.map(model => `
-                                                    <option value="${model.id}">
+                                                ${this.models.map(model => {
+                                                    const isSelected = this.selectedModel && (
+                                                        String(this.selectedModel.id) === String(model.id) || 
+                                                        this.selectedModel.id === model.id
+                                                    );
+                                                    return `<option value="${model.id}" ${isSelected ? 'selected' : ''}>
                                                         ${model.name} (${model.file_size_mb}MB)
-                                                    </option>
-                                                `).join('')}
+                                                    </option>`;
+                                                }).join('')}
                                             </select>
                                             ${this.models.length === 0 ? `
                                                 <small class="text-warning">
@@ -173,16 +189,19 @@ class AutoAnnotatePage {
                                             `}
                                         </div>
 
-                                        ${this.selectedModel ? `
-                                            <div class="alert alert-info mb-0">
-                                                <h6 class="alert-heading mb-1">Selected Model</h6>
-                                                <p class="mb-1"><strong>${this.selectedModel.name}</strong></p>
-                                                <small class="text-muted">
-                                                    Framework: ${this.selectedModel.framework}<br>
-                                                    Architecture: ${this.selectedModel.architecture || 'N/A'}
-                                                </small>
-                                            </div>
-                                        ` : ''}
+                                        <div id="selected-model-info">
+                                            ${this.selectedModel ? `
+                                                <div class="alert alert-info mb-0">
+                                                    <h6 class="alert-heading mb-1">Selected Model</h6>
+                                                    <p class="mb-1"><strong>${this.selectedModel.name}</strong></p>
+                                                    <small class="text-muted">
+                                                        Framework: ${this.selectedModel.framework}<br>
+                                                        Architecture: ${this.selectedModel.architecture || 'YOLOv8'}<br>
+                                                        Size: ${this.selectedModel.file_size_mb}MB
+                                                    </small>
+                                                </div>
+                                            ` : ''}
+                                        </div>
                                     </div>
                                 </div>
                             </div>
@@ -363,6 +382,33 @@ class AutoAnnotatePage {
         `;
     }
 
+    updateSelectedModelInfo() {
+        // Update only the selected model info section without re-rendering entire page
+        const selectedModelInfo = document.getElementById('selected-model-info');
+        if (selectedModelInfo) {
+            if (this.selectedModel) {
+                selectedModelInfo.innerHTML = `
+                    <div class="alert alert-info mb-0">
+                        <h6 class="alert-heading mb-1">Selected Model</h6>
+                        <p class="mb-1"><strong>${this.selectedModel.name}</strong></p>
+                        <small class="text-muted">
+                            Framework: ${this.selectedModel.framework}<br>
+                            Architecture: ${this.selectedModel.architecture || 'YOLOv8'}<br>
+                            Size: ${this.selectedModel.file_size_mb}MB
+                        </small>
+                    </div>
+                `;
+                selectedModelInfo.classList.remove('d-none');
+            } else {
+                selectedModelInfo.innerHTML = '';
+                selectedModelInfo.classList.add('d-none');
+            }
+        } else {
+            // If the element doesn't exist, we need to re-render
+            this.updatePage();
+        }
+    }
+
     attachEventListeners() {
         // Use default model toggle
         const useDefaultModelCheckbox = document.getElementById('use-default-model');
@@ -380,9 +426,21 @@ class AutoAnnotatePage {
         const modelSelect = document.getElementById('model-select');
         if (modelSelect) {
             modelSelect.addEventListener('change', (e) => {
-                const modelId = parseInt(e.target.value);
-                this.selectedModel = this.models.find(m => m.id === modelId);
-                this.updatePage();
+                const selectedValue = e.target.value;
+                
+                if (!selectedValue || selectedValue === '') {
+                    this.selectedModel = null;
+                } else {
+                    // Find model by id (handle both string and number comparisons)
+                    this.selectedModel = this.models.find(m => 
+                        String(m.id) === String(selectedValue) || 
+                        m.id === selectedValue ||
+                        m.id === parseInt(selectedValue)
+                    );
+                }
+                
+                // Update only the selected model info section instead of re-rendering entire page
+                this.updateSelectedModelInfo();
             });
         }
 
@@ -415,8 +473,10 @@ class AutoAnnotatePage {
         console.log('[AutoAnnotate] Confidence threshold:', this.confidenceThreshold);
 
         // Determine which model to use
-        const modelId = this.useDefaultModel ? null : (this.selectedModel ? this.selectedModel.id : null);
-        console.log('[AutoAnnotate] Selected model ID:', modelId);
+        // Use model_id (database ID) if available, otherwise use id (hash/fallback)
+        const modelId = this.useDefaultModel ? null : (this.selectedModel ? (this.selectedModel.model_id || this.selectedModel.id) : null);
+        // console.log('[AutoAnnotate] Selected model ID:', modelId);
+        // console.log('[AutoAnnotate] Selected model:', this.selectedModel);
 
         // Get overwrite existing checkbox value
         const overwriteExisting = document.getElementById('overwrite-existing')?.checked || false;

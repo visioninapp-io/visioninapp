@@ -106,15 +106,15 @@ class HomePage {
             },
             {
                 icon: 'bar-chart',
-                title: 'Live Monitoring',
-                description: 'Monitor inference results and trigger automatic retraining when needed',
-                link: '/monitoring'
+                title: 'Insightful Evaluation',
+                description: 'Analyze model quality with rich metrics and uncover actionable insights',
+                link: '/evaluation'
             },
             {
                 icon: 'layers',
-                title: 'Complete Lifecycle',
-                description: 'End-to-end AI workflow management from data to deployment',
-                link: '#'
+                title: 'Seamless Export',
+                description: 'Deliver your models and datasets anywhere with streamlined packaging',
+                link: '/export'
             }
         ];
 

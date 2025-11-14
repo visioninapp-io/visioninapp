@@ -106,7 +106,7 @@ class Progress:
         }
         """
         if total_epochs and total_epochs > 0:
-            percentage = (int(epoch) / int(total_epochs)) * 80 + 20
+            percentage = (int(epoch) / int(total_epochs)) * 70 + 20
         else:
             percentage = 0.0
         body = {

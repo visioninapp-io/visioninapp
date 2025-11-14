@@ -10,7 +10,7 @@ class LabelClass(Base):
     __tablename__ = "label_class"
 
     id = Column(Integer, primary_key=True, index=True)
-    ontology_version_id = Column(Integer, ForeignKey("label_ontology_version.id"), nullable=False, index=True, comment="온톨로지 버전 ID")
+    ontology_version_id = Column(Integer, ForeignKey("label_ontology_version.id", ondelete="CASCADE"), nullable=False, index=True, comment="온톨로지 버전 ID")
     display_name = Column(String(100), nullable=False, comment="라벨이름")
     shape_type = Column(Text, nullable=True, comment="형태")  # 'bbox', 'polygon', 'keypoint' 등
     color = Column(String(20), nullable=False, comment="표시색상")

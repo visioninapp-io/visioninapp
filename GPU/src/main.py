@@ -258,7 +258,7 @@ def handle_onnx(mq: MQ, exchanges: dict, msg: dict):
         if saved_metrics and Path(metrics_out_json).exists():
             upload_s3(metrics_out_json, bucket, f"{msg['output']['prefix'].rstrip('/')}/metrics.json")
 
-        progress.send("done", 100, "finish work")
+        progress.send("onnx.done", 100, "finish work")
         progress.done({
             "s3_bucket": bucket,
             "s3_uri": f"s3://{bucket}/{key}",
@@ -338,7 +338,7 @@ def handle_trt(mq: MQ, exchanges: dict, msg: dict):
         key        = f"{msg['output']['prefix'].rstrip('/')}/{engine_filename}"  # 업로드 파일명은 기존 스키마 유지
         upload_s3(local_engine_path, bucket, key)
 
-        progress.send("done", 100, "finish work")
+        progress.send("trt.done", 100, "finish work")
         progress.done({"s3_bucket": bucket, "s3_uri": f"s3://{bucket}/{key}", "local_path": local_engine_path})
 
     except Exception as e:

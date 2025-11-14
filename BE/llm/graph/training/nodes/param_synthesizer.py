@@ -97,6 +97,7 @@ def param_synthesizer(state: TrainState) -> TrainState:
     - 여기서는 model/model_name/model_variant를 '강제로' 덮어쓰지 않는다.
     - 최종 모델 선택은 train_trial._merge_train_params에서 일관 규칙으로 처리한다.
     """
+    print("[param_synthesizer] start")
     # --- 컨텍스트 & query_analyzer 결과 ---
     ctx: Dict[str, Any] = dict(getattr(state, "context", {}) or {})
     qa_ctx: Dict[str, Any] = ctx.get("query_analyzer", {}) or {}

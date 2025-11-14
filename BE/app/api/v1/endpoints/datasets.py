@@ -14,6 +14,7 @@ from app.core.auth import get_current_user
 from app.models.dataset import Dataset, Annotation, DatasetVersion
 from app.models.label_class import LabelClass
 from app.models.label_ontology_version import LabelOntologyVersion
+from app.models.model import Model
 from app.utils.project_helper import get_or_create_default_project
 from app.utils.dataset_helper import (
     get_or_create_dataset_version,
@@ -638,14 +639,18 @@ async def get_image_annotations(
     """
     Get all annotations for a specific asset
     """
+    from sqlalchemy.orm import joinedload
+    
     # Asset 조회
     asset = db.query(Asset).filter(Asset.id == image_id).first()
     
     if not asset:
         raise HTTPException(status_code=404, detail="Asset not found")
     
-    # Asset 기반 Annotation 조회
-    query = db.query(Annotation).filter(Annotation.asset_id == asset.id)
+    # Asset 기반 Annotation 조회 with eager loading of label_class
+    query = db.query(Annotation).options(
+        joinedload(Annotation.label_class)
+    ).filter(Annotation.asset_id == asset.id)
 
     # Apply confidence threshold filter if specified
     if min_confidence is not None:
@@ -654,6 +659,18 @@ async def get_image_annotations(
 
     annotations = query.all()
     print(f"[GET ANNOTATIONS] Found {len(annotations)} annotations for asset {image_id}")
+    
+    # Debug: Check if label_class is loaded and geometry structure
+    for ann in annotations:
+        if ann.label_class:
+            print(f"[GET ANNOTATIONS] Annotation {ann.id}: label_class={ann.label_class.display_name}, label_class_id={ann.label_class_id}, geometry={ann.geometry}")
+        else:
+            print(f"[GET ANNOTATIONS] WARNING: Annotation {ann.id} has no label_class (label_class_id={ann.label_class_id})")
+            # Try to load it manually if missing
+            if ann.label_class_id:
+                ann.label_class = db.query(LabelClass).filter(LabelClass.id == ann.label_class_id).first()
+                if ann.label_class:
+                    print(f"[GET ANNOTATIONS] Manually loaded label_class: {ann.label_class.display_name}")
 
     return annotations
 
@@ -755,22 +772,34 @@ async def auto_annotate_dataset(
 
         # DB에서 모델 정보 조회
         model = db.query(Model).filter(Model.id == request.model_id).first()
-        if model and model.versions:
+        if not model:
+            print(f"[AUTO-ANNOTATE] ⚠️ Model {request.model_id} not found in DB")
+        elif not model.versions:
+            print(f"[AUTO-ANNOTATE] ⚠️ Model {request.model_id} has no versions")
+        else:
             # 최신 버전의 artifact 가져오기
             latest_version = sorted(model.versions, key=lambda v: v.created_at, reverse=True)[0]
+            print(f"[AUTO-ANNOTATE] Latest version: {latest_version.id}, artifacts count: {len(latest_version.artifacts) if latest_version.artifacts else 0}")
+            
             if latest_version.artifacts:
-                artifact = latest_version.artifacts[0]
-                model_s3_path = artifact.storage_uri  # 예: "models/yolov8n/pothole.pt"
-                print(f"[AUTO-ANNOTATE] ✅ Using model from S3: {model_s3_path}")
+                # Get PT artifacts only
+                pt_artifacts = [a for a in latest_version.artifacts if a.format == 'pt']
+                if pt_artifacts:
+                    artifact = pt_artifacts[0]  # Get first PT artifact
+                    model_s3_path = artifact.storage_uri  # 예: "models/model_123/artifacts/xxx.pt"
+                    print(f"[AUTO-ANNOTATE] ✅ Using model from S3: {model_s3_path}")
+                    print(f"[AUTO-ANNOTATE] Artifact ID: {artifact.id}, Format: {artifact.format}")
+                else:
+                    print(f"[AUTO-ANNOTATE] ⚠️ Model {request.model_id} has no PT artifacts")
+                    print(f"[AUTO-ANNOTATE] Available artifacts: {[(a.id, a.format) for a in latest_version.artifacts]}")
             else:
-                print(f"[AUTO-ANNOTATE] ⚠️ Model {request.model_id} has no artifacts")
-        else:
-            print(f"[AUTO-ANNOTATE] ⚠️ Model {request.model_id} not found in DB")
+                print(f"[AUTO-ANNOTATE] ⚠️ Model version {latest_version.id} has no artifacts")
 
     if not model_s3_path:
         # 기본 모델 사용 (사전 학습된 YOLO 모델)
-        model_s3_path = "models/default/yolov8n.pt"
-        print(f"[AUTO-ANNOTATE] Using default model: {model_s3_path}")
+        # Use Ultralytics model name directly - GPU service will handle downloading
+        model_s3_path = "yolov8n.pt"
+        print(f"[AUTO-ANNOTATE] Using default Ultralytics model: {model_s3_path}")
 
     # DatasetVersion에서 LabelClass 정보 가져오기
     dataset_version = get_or_create_dataset_version(db, request.dataset_id, 'v0')
@@ -797,21 +826,33 @@ async def auto_annotate_dataset(
     job_id = str(uuid.uuid4())
 
     # S3 경로 구성
-    s3_dataset_prefix = f"{dataset.name}"  # 예: "pothole"
-    s3_images_path = f"{s3_dataset_prefix}/images"  # "pothole/images"
-    s3_labels_path = f"{s3_dataset_prefix}/labels"  # "pothole/labels" (GPU가 저장할 경로)
-    s3_data_yaml_path = f"{s3_dataset_prefix}/data.yaml"  # "pothole/data.yaml"
+    # Images are stored at: datasets/{dataset_name}/images/{filename}
+    s3_dataset_prefix = f"datasets/{dataset.name}"  # 예: "datasets/pothole"
+    s3_images_path = f"{s3_dataset_prefix}/images"  # "datasets/pothole/images"
+    s3_labels_path = f"{s3_dataset_prefix}/labels"  # "datasets/pothole/labels" (GPU가 저장할 경로)
+    s3_data_yaml_path = f"{s3_dataset_prefix}/data.yaml"  # "datasets/pothole/data.yaml"
 
-    # Asset 정보 리스트 (파일명만 전달, GPU가 S3에서 다운로드)
-    image_files = [
-        {
+    # Asset 정보 리스트 (S3 key 또는 filename 전달)
+    # Use storage_uri if available, otherwise construct from dataset name
+    image_files = []
+    for asset in assets:
+        # Get S3 key from storage_uri if available, otherwise construct it
+        if asset.storage_uri:
+            # Extract filename from storage_uri (e.g., "datasets/pothole/images/pothole_1.jpg" -> "pothole_1.jpg")
+            s3_key = asset.storage_uri
+            filename = s3_key.split('/')[-1] if '/' in s3_key else asset.name
+        else:
+            # Fallback: construct from dataset name
+            filename = asset.name if asset.name else f"{dataset.name}_{asset.id}.jpg"
+            s3_key = f"{s3_images_path}/{filename}"
+        
+        image_files.append({
             "asset_id": asset.id,
-            "filename": asset.name,  # 예: "pothole_1.jpg"
+            "filename": filename,  # 예: "pothole_1.jpg"
+            "s3_key": s3_key,  # Full S3 key: "datasets/pothole/images/pothole_1.jpg"
             "width": asset.width,
             "height": asset.height
-        }
-        for asset in assets
-    ]
+        })
 
     # RabbitMQ payload 구성
     payload = {

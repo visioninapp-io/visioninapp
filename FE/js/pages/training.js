@@ -20,13 +20,10 @@ class TrainingPage {
             const app = document.getElementById('app');
             if (app) {
                 app.innerHTML = this.render();
-                await this.afterRender();
+                await this.afterRender(); // This will initialize chart and connect to RabbitMQ
             }
 
             this.attachEventListeners();
-
-            // Connect to RabbitMQ and subscribe to training logs
-            await this.connectToRabbitMQ();
 
             // Start periodic refresh (every 10 seconds)
             this.startPeriodicRefresh();
@@ -50,6 +47,16 @@ class TrainingPage {
     async connectToRabbitMQ() {
         try {
             console.log('[Training Page] Connecting to RabbitMQ...');
+
+            // Unsubscribe first if already subscribed (prevent duplicate subscriptions)
+            if (this.rabbitmqConnected) {
+                try {
+                    rabbitmqService.unsubscribe('gpu.train.log');
+                    console.log('[Training Page] Unsubscribed from previous subscription');
+                } catch (e) {
+                    console.warn('[Training Page] Error unsubscribing:', e);
+                }
+            }
 
             // Connect to RabbitMQ
             await rabbitmqService.connect();
@@ -204,7 +211,8 @@ class TrainingPage {
          */
         try {
             if (!this.chart) {
-                console.warn('[Training Page] Chart not initialized, skipping chart update');
+                // Silently skip if chart not initialized (will be initialized soon)
+                // Don't log warning as it's expected during initialization
                 return;
             }
 
@@ -701,8 +709,15 @@ class TrainingPage {
 
     async afterRender() {
         console.log('[Training Page] afterRender called');
+        // Initialize chart first (before RabbitMQ messages can arrive)
         await this.initChart();
-        console.log('[Training Page] Chart initialized, creating FAB...');
+        console.log('[Training Page] Chart initialized');
+        
+        // Ensure RabbitMQ is connected and subscribed (only if not already connected)
+        if (!this.rabbitmqConnected) {
+            await this.connectToRabbitMQ();
+        }
+        
         // FAB 버튼 생성 (afterRender 완료 후)
         this.createFAB();
     }

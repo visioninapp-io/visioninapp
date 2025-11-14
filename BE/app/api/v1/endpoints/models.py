@@ -5,6 +5,7 @@ from pathlib import Path
 from datetime import datetime
 import os
 import boto3
+import hashlib
 from botocore.exceptions import ClientError
 from app.core.database import get_db
 from app.core.auth import get_current_user
@@ -42,109 +43,112 @@ async def get_models(
 
 @router.get("/trained", response_model=List[dict])
 async def get_trained_models(
+    db: Session = Depends(get_db),
     current_user: dict = Depends(get_current_user)
 ):
-    """Get all trained models from S3 bucket"""
+    """Get trained models from database (user's models only), enriched with S3 metadata"""
     try:
-        # Check if S3 is configured
-        if not settings.AWS_BUCKET_NAME:
-            raise HTTPException(
-                status_code=500, 
-                detail="AWS_BUCKET_NAME not configured. Cannot list models from S3."
-            )
+        # Get user's default project
+        from app.models.model_version import ModelVersion
         
-        if not settings.AWS_ACCESS_KEY_ID or not settings.AWS_SECRET_ACCESS_KEY:
-            raise HTTPException(
-                status_code=500,
-                detail="AWS credentials not configured. Cannot access S3."
-            )
+        default_project = get_or_create_default_project(db, current_user["uid"])
         
-        # Initialize S3 client
-        s3_client = boto3.client(
-            's3',
-            aws_access_key_id=settings.AWS_ACCESS_KEY_ID,
-            aws_secret_access_key=settings.AWS_SECRET_ACCESS_KEY,
-            region_name=settings.AWS_REGION
-        )
+        # Query models from database that belong to user's project
+        user_models = db.query(Model).filter(
+            Model.project_id == default_project.id
+        ).all()
+        
+        if not user_models:
+            return []
+        
+        # Get S3 client for metadata (optional - only if S3 is configured)
+        s3_client = None
+        if (settings.AWS_BUCKET_NAME and 
+            settings.AWS_ACCESS_KEY_ID and 
+            settings.AWS_SECRET_ACCESS_KEY):
+            try:
+                s3_client = boto3.client(
+                    's3',
+                    aws_access_key_id=settings.AWS_ACCESS_KEY_ID,
+                    aws_secret_access_key=settings.AWS_SECRET_ACCESS_KEY,
+                    region_name=settings.AWS_REGION
+                )
+            except Exception:
+                s3_client = None  # S3 not available, continue without metadata
         
         trained_models = []
-        prefix = "models/"
         
-        # S3 structure: models/{model_name}/{model_name}.pt and models/{model_name}/results.csv
-        # We only want .pt files, not results.csv
-        # Example: models/model_25/model_25.pt and models/model_25/results.csv
-        
-        # List all objects with prefix "models/"
-        paginator = s3_client.get_paginator('list_objects_v2')
-        pages = paginator.paginate(Bucket=settings.AWS_BUCKET_NAME, Prefix=prefix)
-        
-        # Track models to avoid duplicates (one .pt file per folder expected)
-        model_dict = {}  # {model_name: model_data}
-        
-        for page in pages:
-            if 'Contents' not in page:
-                continue
+        # For each model, get its artifacts (PT files)
+        for model in user_models:
+            # Get model versions
+            model_versions = db.query(ModelVersion).filter(
+                ModelVersion.model_id == model.id
+            ).all()
             
-            for obj in page['Contents']:
-                key = obj['Key']
+            for model_version in model_versions:
+                # Get PT artifacts for this model version
+                pt_artifacts = db.query(ModelArtifact).filter(
+                    ModelArtifact.model_version_id == model_version.id,
+                    ModelArtifact.format == 'pt'  # Only PT files
+                ).all()
                 
-                # Filter for .pt files only (skip results.csv and other files)
-                if not key.endswith('.pt'):
-                    continue
-                
-                # Skip nested subdirectories like weights/ or artifacts/
-                # We want direct structure: models/{model_name}/{model_name}.pt
-                if '/weights/' in key or '/artifacts/' in key:
-                    continue
-                
-                # Extract model information from S3 key
-                # Format: models/{model_name}/{model_name}.pt
-                # Example: models/model_25/model_25.pt -> ['model_25', 'model_25.pt']
-                key_parts = key.replace(prefix, '').split('/')
-                
-                # Must have at least folder and filename
-                if len(key_parts) < 2:
-                    continue
-                
-                model_folder = key_parts[0]  # e.g., "model_25" or "abc12345"
-                filename = key_parts[-1]  # e.g., "model_25.pt" or "mymodel.pt"
-                
-                # Extract model ID from folder name if it matches pattern "model_{id}"
-                model_id = None
-                model_name = model_folder
-                
-                if model_folder.startswith("model_"):
-                    try:
-                        model_id = int(model_folder.split("_")[1])
-                        model_name = model_folder
-                    except (ValueError, IndexError):
-                        pass
-                
-                # Get file metadata
-                file_size_bytes = obj.get('Size', 0)
-                file_size_mb = round(file_size_bytes / (1024 * 1024), 2)
-                modified_time = obj.get('LastModified', None)
-                modified_timestamp = modified_time.timestamp() if modified_time else None
-                
-                model_data = {
-                    "model_id": model_id,
-                    "model_name": model_name,
-                    "model_path": f"s3://{settings.AWS_BUCKET_NAME}/{key}",
-                    "relative_path": key,  # S3 key path
-                    "s3_key": key,  # Explicit S3 key
-                    "s3_bucket": settings.AWS_BUCKET_NAME,
-                    "file_size_mb": file_size_mb,
-                    "file_size_bytes": file_size_bytes,
-                    "modified_at": modified_timestamp,
-                    "filename": filename
-                }
-                
-                # Store model (if multiple .pt files exist, keep the first one found)
-                if model_name not in model_dict:
-                    model_dict[model_name] = model_data
-        
-        # Convert dict to list
-        trained_models = list(model_dict.values())
+                for artifact in pt_artifacts:
+                    if not artifact.storage_uri:
+                        continue
+                    
+                    # Get S3 metadata if available
+                    file_size_bytes = None
+                    file_size_mb = None
+                    modified_timestamp = None
+                    
+                    if s3_client and artifact.storage_uri:
+                        try:
+                            # Try to get object metadata from S3
+                            response = s3_client.head_object(
+                                Bucket=settings.AWS_BUCKET_NAME,
+                                Key=artifact.storage_uri
+                            )
+                            file_size_bytes = response.get('ContentLength', 0)
+                            file_size_mb = round(file_size_bytes / (1024 * 1024), 2)
+                            modified_time = response.get('LastModified', None)
+                            modified_timestamp = modified_time.timestamp() if modified_time else None
+                        except ClientError:
+                            # File doesn't exist in S3, but artifact exists in DB
+                            pass
+                    
+                    # Fallback to artifact metadata if S3 metadata not available
+                    if file_size_bytes is None:
+                        file_size_bytes = artifact.size_bytes
+                        if file_size_bytes:
+                            file_size_mb = round(file_size_bytes / (1024 * 1024), 2)
+                    
+                    if modified_timestamp is None and artifact.created_at:
+                        modified_timestamp = artifact.created_at.timestamp()
+                    
+                    # Extract filename from storage_uri
+                    filename = artifact.storage_uri.split('/')[-1] if artifact.storage_uri else None
+                    
+                    # Generate unique ID (use artifact ID or model ID)
+                    unique_id = artifact.id if artifact.id else int(hashlib.md5(f"{model.id}_{artifact.storage_uri}".encode()).hexdigest()[:8], 16) % 1000000
+                    
+                    model_data = {
+                        "id": unique_id,
+                        "model_id": model.id,
+                        "model_name": model.name,
+                        "model_path": f"s3://{settings.AWS_BUCKET_NAME}/{artifact.storage_uri}" if artifact.storage_uri else None,
+                        "relative_path": artifact.storage_uri,
+                        "s3_key": artifact.storage_uri,
+                        "s3_bucket": settings.AWS_BUCKET_NAME,
+                        "file_size_mb": file_size_mb,
+                        "file_size_bytes": file_size_bytes,
+                        "modified_at": modified_timestamp,
+                        "filename": filename,
+                        "has_artifact": True,  # Always true since we're querying from DB
+                        "artifact_id": artifact.id,
+                        "model_version_id": model_version.id
+                    }
+                    
+                    trained_models.append(model_data)
         
         # Sort by model_id descending (newest first), or by modified_at if no model_id
         trained_models.sort(
@@ -157,13 +161,6 @@ async def get_trained_models(
         
         return trained_models
         
-    except ClientError as e:
-        error_code = e.response.get('Error', {}).get('Code', 'Unknown')
-        error_message = e.response.get('Error', {}).get('Message', str(e))
-        raise HTTPException(
-            status_code=500,
-            detail=f"Failed to list models from S3: {error_code} - {error_message}"
-        )
     except Exception as e:
         raise HTTPException(
             status_code=500,

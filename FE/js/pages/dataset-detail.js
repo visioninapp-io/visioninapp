@@ -6,6 +6,8 @@ class DatasetDetailPage {
         this.dataset = null;
         this.images = [];
         this.labelClasses = []; // Store label classes
+        this.versions = []; // Store dataset versions
+        this.selectedVersionId = null; // Currently selected version ID
         this.currentPage = 1;
         this.imagesPerPage = 12;
         this.selectedImage = null;
@@ -16,6 +18,7 @@ class DatasetDetailPage {
 
     async init() {
         await this.loadDataset();
+        await this.loadVersions();
         await this.loadLabelClasses();
         await this.loadImages();
 
@@ -40,6 +43,44 @@ class DatasetDetailPage {
         }
     }
 
+    async loadVersions() {
+        try {
+            console.log('Loading versions for dataset:', this.datasetId);
+            this.versions = await apiService.getDatasetVersions(this.datasetId);
+            console.log('Loaded versions:', this.versions);
+            
+            // Try to restore from localStorage, otherwise select default
+            const storageKey = `dataset_${this.datasetId}_selected_version`;
+            const savedVersionId = localStorage.getItem(storageKey);
+            
+            if (this.versions.length > 0) {
+                if (savedVersionId) {
+                    // Check if saved version still exists
+                    const savedVersion = this.versions.find(v => v.id === parseInt(savedVersionId));
+                    if (savedVersion) {
+                        this.selectedVersionId = savedVersion.id;
+                        console.log('Restored selected version from localStorage:', this.selectedVersionId);
+                    } else {
+                        // Saved version doesn't exist, use default
+                        const v0 = this.versions.find(v => v.version_tag === 'v0');
+                        this.selectedVersionId = v0 ? v0.id : this.versions[0].id;
+                        localStorage.setItem(storageKey, this.selectedVersionId.toString());
+                        console.log('Selected version not found, using default:', this.selectedVersionId);
+                    }
+                } else {
+                    // No saved preference, use default
+                    const v0 = this.versions.find(v => v.version_tag === 'v0');
+                    this.selectedVersionId = v0 ? v0.id : this.versions[0].id;
+                    localStorage.setItem(storageKey, this.selectedVersionId.toString());
+                    console.log('No saved preference, using default:', this.selectedVersionId);
+                }
+            }
+        } catch (error) {
+            console.error('Error loading versions:', error);
+            this.versions = [];
+        }
+    }
+
     async loadLabelClasses() {
         try {
             console.log('Loading label classes for dataset:', this.datasetId);
@@ -53,8 +94,13 @@ class DatasetDetailPage {
 
     async loadImages() {
         try {
-            console.log('Loading images for dataset:', this.datasetId);
-            const images = await apiService.getDatasetImages(this.datasetId);
+            console.log('Loading images for dataset:', this.datasetId, 'version:', this.selectedVersionId);
+            // Pass version_id if selected
+            const params = {};
+            if (this.selectedVersionId) {
+                params.version_id = this.selectedVersionId;
+            }
+            const images = await apiService.getDatasetImages(this.datasetId, params);
             console.log('Received images:', images);
 
             // Store images without file_url (will be loaded on demand)
@@ -116,6 +162,27 @@ class DatasetDetailPage {
                     <div class="row g-4">
                         <!-- Left Sidebar: Dataset Info and Filters -->
                         <div class="col-lg-3">
+                            <!-- Version Selector -->
+                            ${this.versions.length > 0 ? `
+                            <div class="card border-0 shadow-sm mb-3">
+                                <div class="card-header bg-white border-0">
+                                    <h6 class="fw-bold mb-0">Dataset Version</h6>
+                                </div>
+                                <div class="card-body">
+                                    <select class="form-select" id="version-selector" onchange="window.currentDatasetDetailPage.onVersionChange(this.value)">
+                                        ${this.versions.map(v => `
+                                            <option value="${v.id}" ${v.id === this.selectedVersionId ? 'selected' : ''}>
+                                                ${v.version_tag}${v.is_frozen ? ' (Frozen)' : ''}
+                                            </option>
+                                        `).join('')}
+                                    </select>
+                                    <small class="text-muted d-block mt-2">
+                                        ${this.versions.find(v => v.id === this.selectedVersionId)?.total_assets || 0} assets in this version
+                                    </small>
+                                </div>
+                            </div>
+                            ` : ''}
+                            
                             <!-- Dataset Statistics -->
                             <div class="card border-0 shadow-sm mb-3">
                                 <div class="card-header bg-white border-0">
@@ -158,7 +225,7 @@ class DatasetDetailPage {
                                         <div class="d-flex flex-wrap gap-2">
                                             ${this.labelClasses.map((labelClass) => `
                                                 <span class="badge" style="background-color: ${labelClass.color}">
-                                                    ${labelClass.id}: ${labelClass.display_name}
+                                                    ${labelClass.display_name}
                                                 </span>
                                             `).join('')}
                                         </div>
@@ -445,6 +512,25 @@ class DatasetDetailPage {
     calculateAnnotationProgress() {
         if (!this.dataset.total_images || this.dataset.total_images === 0) return 0;
         return Math.round((this.dataset.annotated_images / this.dataset.total_images) * 100);
+    }
+
+    onVersionChange(versionId) {
+        const versionIdInt = versionId ? parseInt(versionId) : null;
+        console.log('[DatasetDetail] Version changed to:', versionIdInt);
+        this.selectedVersionId = versionIdInt;
+        
+        // Persist to localStorage
+        const storageKey = `dataset_${this.datasetId}_selected_version`;
+        if (versionIdInt) {
+            localStorage.setItem(storageKey, versionIdInt.toString());
+        } else {
+            localStorage.removeItem(storageKey);
+        }
+        
+        this.loadImages().then(() => {
+            this.updateUI();
+            this.attachEventListeners();
+        });
     }
 
     attachEventListeners() {

@@ -355,10 +355,27 @@ class APIService {
         }
     }
 
-    async getDatasetImages(datasetId) {
-        console.log(`[API] Fetching images for dataset ${datasetId}...`);
+    async getDatasetImages(datasetId, params = {}) {
+        console.log(`[API] Fetching images for dataset ${datasetId}...`, params);
         try {
-            const data = await this.get(`/datasets/${datasetId}/images`);
+            // Build query string with optional version_id
+            const queryParams = new URLSearchParams();
+            if (params.version_id) {
+                queryParams.append('version_id', params.version_id);
+            }
+            if (params.version_tag) {
+                queryParams.append('version_tag', params.version_tag);
+            }
+            if (params.page) {
+                queryParams.append('page', params.page);
+            }
+            if (params.limit) {
+                queryParams.append('limit', params.limit);
+            }
+            
+            const queryString = queryParams.toString();
+            const endpoint = `/datasets/${datasetId}/images${queryString ? '?' + queryString : ''}`;
+            const data = await this.get(endpoint);
 
             // BE returns: { dataset_id, page, images: [...], total_images }
             // Extract the images array

@@ -193,16 +193,36 @@ def get_assets_from_dataset(
     split_type: Optional[DatasetSplitType] = None,
     asset_type: Optional[AssetType] = None,
     page: int = 1,
-    limit: int = 1000
+    limit: int = 1000,
+    version_id: Optional[int] = None,
+    version_tag: Optional[str] = None
 ) -> tuple[list[Asset], int]:
     """
     데이터셋에서 Asset 조회
     
+    Args:
+        dataset_id: Dataset ID
+        split_type: Optional split type filter
+        asset_type: Optional asset type filter
+        page: Page number (1-based)
+        limit: Page size
+        version_id: Optional specific version ID to filter by
+        version_tag: Optional version tag (e.g., 'v0', 'v1.0') - used if version_id not provided
+    
     Returns:
         (assets, total_count)
     """
-    # v0 버전 조회 (고정 정책)
-    version = get_or_create_dataset_version(db, dataset_id, 'v0')
+    # Get version - prefer version_id, then version_tag, then default to 'v0'
+    if version_id:
+        version = db.query(DatasetVersion).filter(
+            DatasetVersion.id == version_id,
+            DatasetVersion.dataset_id == dataset_id
+        ).first()
+    elif version_tag:
+        version = get_or_create_dataset_version(db, dataset_id, version_tag)
+    else:
+        # Default to v0 (backward compatibility)
+        version = get_or_create_dataset_version(db, dataset_id, 'v0')
     
     if not version:
         # 버전이 없으면 빈 리스트 반환

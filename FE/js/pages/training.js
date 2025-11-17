@@ -1438,15 +1438,32 @@ class TrainingPage {
                 );
                 console.log('[Training Page] Synced jobs:', response.updated_jobs);
                 
-                // Reload training jobs to reflect updated status
-                await this.loadTrainingJobs();
-                
-                // Re-render the page
-                const app = document.getElementById('app');
-                if (app) {
-                    app.innerHTML = this.render();
-                    await this.afterRender();
+                // Reload training jobs
+                const jobs = await apiService.getTrainingJobs();
+                if (jobs) {
+                    this.trainingJobs = Array.isArray(jobs) ? jobs : (jobs.jobs || jobs.data || []);
+                    
+                    // Sync로 변경된 job들의 S3 metrics를 명시적으로 로드
+                    // RabbitMQ 연결 여부와 관계없이 S3에서 최신 데이터 가져오기
+                    for (const updatedJobInfo of response.updated_jobs || []) {
+                        const job = this.trainingJobs.find(j => j.id === updatedJobInfo.id);
+                        if (job) {
+                            console.log(`[Training Page] Loading S3 metrics for synced job: ${job.id} (${job.name})`);
+                            await this.loadS3MetricsForJob(job);
+                        }
+                    }
+                    
+                    // Update selected job reference
+                    if (this.selectedJob) {
+                        const updated = this.trainingJobs.find(j => j.id === this.selectedJob.id);
+                        if (updated) {
+                            this.selectedJob = updated;
+                        }
+                    }
                 }
+                
+                // Re-render only the jobs list without destroying the chart
+                this.updateJobsListDisplay();
             } else {
                 showToast('No training jobs need status update', 'info');
             }

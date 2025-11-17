@@ -158,7 +158,7 @@ class DatasetDetailPage {
                                         <div class="d-flex flex-wrap gap-2">
                                             ${this.labelClasses.map((labelClass) => `
                                                 <span class="badge" style="background-color: ${labelClass.color}">
-                                                    ${labelClass.id}: ${labelClass.display_name}
+                                                    ${labelClass.display_name}
                                                 </span>
                                             `).join('')}
                                         </div>

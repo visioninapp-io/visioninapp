@@ -225,7 +225,7 @@ class DatasetDetailPage {
                                         <div class="d-flex flex-wrap gap-2">
                                             ${this.labelClasses.map((labelClass) => `
                                                 <span class="badge" style="background-color: ${labelClass.color}">
-                                                    ${labelClass.id}: ${labelClass.display_name}
+                                                    ${labelClass.display_name}
                                                 </span>
                                             `).join('')}
                                         </div>
@@ -1302,7 +1302,7 @@ function updateViewerAnnotationClass(index, newClassName) {
     if (index < 0 || index >= viewerState.annotations.length) return;
 
     const annotation = viewerState.annotations[index];
-    annotation.className = newClassName.trim();
+    annotation.className = newClassName.trim().toLowerCase();
     annotation.saved = false;
 
     console.log(`[ViewerAnnotation] Updated annotation ${index} class to "${newClassName}"`);
@@ -1378,30 +1378,28 @@ async function saveViewerAnnotations() {
         }
 
         // First, create or get label classes
-        const uniqueClassNames = [...new Set(unsavedAnnotations.map(ann => ann.className))];
+        const uniqueClassNames = [...new Set(unsavedAnnotations.map(ann => ann.className.trim().toLowerCase()))];
         const labelClassMap = new Map();
 
         // Get existing label classes
         const existingClasses = await apiService.get(`/datasets/${page.datasetId}/label-classes`);
         if (existingClasses && Array.isArray(existingClasses)) {
             existingClasses.forEach(cls => {
-                labelClassMap.set(cls.display_name, cls.id);
+                labelClassMap.set(cls.display_name.trim().toLowerCase(), cls);
             });
         }
 
         // Create missing label classes
         for (const className of uniqueClassNames) {
-            if (!labelClassMap.has(className)) {
-                try {
-                    const newClass = await apiService.post(`/datasets/${page.datasetId}/label-classes`, {
-                        display_name: className,
-                        color: getRandomColorForLabel()
-                    });
-                    labelClassMap.set(className, newClass.id);
-                    console.log(`[ViewerAnnotation] Created label class: ${className} (id: ${newClass.id})`);
-                } catch (error) {
-                    console.error(`[ViewerAnnotation] Failed to create label class ${className}:`, error);
-                }
+            const key = className.trim().toLowerCase();
+
+            if (!labelClassMap.has(key)) {
+                const newClass = await apiService.post(
+                    `/datasets/${page.datasetId}/label-classes`,
+                    { display_name: className.trim(), color: getRandomColorForLabel() }
+                );
+
+                labelClassMap.set(key, newClass);
             }
         }
 
@@ -1411,7 +1409,8 @@ async function saveViewerAnnotations() {
         // Save each annotation
         for (const ann of unsavedAnnotations) {
             try {
-                const labelClassId = labelClassMap.get(ann.className);
+                const clsObj = labelClassMap.get(ann.className.trim().toLowerCase());
+                const labelClassId = clsObj?.id;
                 if (!labelClassId) {
                     console.error(`[ViewerAnnotation] No label class ID for ${ann.className}`);
                     failCount++;
@@ -1516,7 +1515,10 @@ async function saveViewerAnnotations() {
         // Build class map(display_name → class object)
         const clsMap = new Map();
         const labelClasses = await apiService.get(`/datasets/${page.datasetId}/label-classes`);
-        labelClasses.forEach(cls => clsMap.set(cls.display_name, cls));
+
+        labelClasses.forEach(cls => {
+            clsMap.set(cls.display_name.trim().toLowerCase(), cls);
+        });
 
         // Normalize viewer annotations
         const normalized = viewerState.annotations.map(ann => {
@@ -1530,7 +1532,7 @@ async function saveViewerAnnotations() {
             const oh = ann.height / scale;
 
             return {
-                className: ann.className,
+                className: ann.className.trim().toLowerCase(),
                 x_center: (ox + ow / 2) / OW,
                 y_center: (oy + oh / 2) / OH,
                 width: ow / OW,
@@ -1543,7 +1545,7 @@ async function saveViewerAnnotations() {
 
         // Upload to S3
         const txtFile = viewerState.currentImage.filename.replace(/\.[^/.]+$/, ".txt");
-        await uploadLabelToS3(page.datasetId, txtFile, yoloTxt);
+        await apiService.uploadLabel(page.datasetId, txtFile, yoloTxt);
 
         showToast("Label file updated successfully", "success");
 
@@ -1615,32 +1617,8 @@ function getRandomColorForLabel() {
 function convertToYOLO(normalizedAnnotations, classMap) {
     return normalizedAnnotations
         .map(a => {
-            const cls = classMap.get(a.className);
+            const cls = classMap.get(a.className.trim().toLowerCase());
             return `${cls.yolo_index} ${a.x_center} ${a.y_center} ${a.width} ${a.height}`;
         })
         .join("\n");
-}
-
-async function uploadLabelToS3(datasetId, filename, content) {
-    const presigned = await apiService.post("/datasets/presigned-upload-urls", {
-        dataset_id: datasetId,
-        filenames: [filename],
-        prefix: "labels"
-    });
-
-    const uploadUrl =
-        presigned.upload_urls?.[0] ||
-        presigned.upload_url ||
-        presigned.url;
-
-    if (!uploadUrl) {
-        console.error("[S3] Invalid presigned response:", presigned);
-        throw new Error("Failed to get presigned upload URL");
-    }
-
-    await fetch(uploadUrl, {
-        method: "PUT",
-        headers: { "Content-Type": "text/plain" },
-        body: content
-    });
 }

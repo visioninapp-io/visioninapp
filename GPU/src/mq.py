@@ -25,10 +25,12 @@ def declare_topology(ch, exchanges: dict, queues: dict):
     ch.queue_declare(queue=queues["train"], durable=True)
     ch.queue_declare(queue=queues["onnx"], durable=True)
     ch.queue_declare(queue=queues["trt"], durable=True)
+    ch.queue_declare(queue=queues["inference"], durable=True)
 
     ch.queue_bind(queue=queues["train"], exchange=exchanges["cmd"], routing_key="train.start")
     ch.queue_bind(queue=queues["onnx"],  exchange=exchanges["cmd"], routing_key="onnx.start")
     ch.queue_bind(queue=queues["trt"],   exchange=exchanges["cmd"], routing_key="trt.start")
+    ch.queue_bind(queue=queues["inference"], exchange=exchanges["cmd"], routing_key="inference.start")
 
 
 def publish(ch, ex: str, routing_key: str, body: dict):

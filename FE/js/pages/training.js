@@ -1298,48 +1298,160 @@ class TrainingPage {
                 return;
             }
 
-            // Confirm deletion
-            const confirmed = confirm(
-                `Are you sure you want to delete "${job.name}"?\n\n` +
-                `This will permanently delete:\n` +
-                `- Training job from database\n` +
-                `- Associated model and all versions\n` +
-                `- All model artifacts from S3\n\n` +
-                `This action cannot be undone.`
-            );
+            // Show Bootstrap modal for confirmation
+            this.showDeleteConfirmModal(job, async () => {
+                try {
+                    console.log(`[Training Page] Deleting training job ${jobId} and model ${modelId}...`);
 
-            if (!confirmed) {
-                return;
-            }
+                    // Delete the training job (this will also delete associated model if exists)
+                    await apiService.deleteTrainingJob(jobId);
+                    showToast('Training job deleted successfully', 'success');
 
-            console.log(`[Training Page] Deleting training job ${jobId} and model ${modelId}...`);
+                    // If this was the selected job, clear selection
+                    if (this.selectedJob?.id === jobId) {
+                        this.selectedJob = null;
+                    }
 
-            // Delete the model (this will also delete all artifacts from S3 via backend)
-            if (modelId) {
-                await apiService.deleteModel(modelId);
-                showToast('Model and artifacts deleted successfully', 'success');
-            }
+                    // Reload training jobs
+                    await this.loadTrainingJobs();
 
-            // If this was the selected job, clear selection
-            if (this.selectedJob?.id === jobId) {
-                this.selectedJob = null;
-            }
+                    // Re-render the page
+                    const app = document.getElementById('app');
+                    if (app) {
+                        app.innerHTML = this.render();
+                        await this.afterRender();
+                    }
 
-            // Reload training jobs
-            await this.loadTrainingJobs();
+                    console.log(`[Training Page] Successfully deleted job ${jobId}`);
 
-            // Re-render the page
-            const app = document.getElementById('app');
-            if (app) {
-                app.innerHTML = this.render();
-                await this.afterRender();
-            }
-
-            console.log(`[Training Page] Successfully deleted job ${jobId}`);
+                } catch (error) {
+                    console.error('[Training Page] Error deleting training job:', error);
+                    showToast(error.message || 'Failed to delete training job', 'error');
+                }
+            });
 
         } catch (error) {
             console.error('[Training Page] Error deleting training job:', error);
             showToast('Failed to delete: ' + error.message, 'error');
+        }
+    }
+
+    showDeleteConfirmModal(job, onConfirm) {
+        /**
+         * Show a Bootstrap modal for delete confirmation
+         */
+        // Remove existing modal if any
+        const existingModal = document.getElementById('deleteTrainingModal');
+        if (existingModal) {
+            existingModal.remove();
+        }
+
+        // Create modal HTML
+        const modalHTML = `
+            <div class="modal fade" id="deleteTrainingModal" tabindex="-1" aria-labelledby="deleteTrainingModalLabel" aria-hidden="true">
+                <div class="modal-dialog modal-dialog-centered">
+                    <div class="modal-content">
+                        <div class="modal-header border-0 pb-0">
+                            <h5 class="modal-title fw-bold" id="deleteTrainingModalLabel">
+                                <i class="bi bi-exclamation-triangle-fill text-danger me-2"></i>
+                                Delete Training Job
+                            </h5>
+                            <button type="button" class="btn-close" data-bs-dismiss="modal" aria-label="Close"></button>
+                        </div>
+                        <div class="modal-body">
+                            <p class="mb-3">Are you sure you want to delete <strong>"${job.name}"</strong>?</p>
+                            <div class="alert alert-warning mb-0">
+                                <p class="mb-2 fw-bold">This will permanently delete:</p>
+                                <ul class="mb-0 ps-3">
+                                    <li>Training job from database</li>
+                                    <li>Associated model and all versions</li>
+                                    <li>All model artifacts from S3</li>
+                                </ul>
+                                <p class="mt-3 mb-0 text-danger fw-bold">
+                                    <i class="bi bi-exclamation-circle me-1"></i>
+                                    This action cannot be undone.
+                                </p>
+                            </div>
+                        </div>
+                        <div class="modal-footer border-0">
+                            <button type="button" class="btn btn-secondary" data-bs-dismiss="modal">Cancel</button>
+                            <button type="button" class="btn btn-danger" id="confirmDeleteBtn">
+                                <i class="bi bi-trash me-1"></i>
+                                Delete
+                            </button>
+                        </div>
+                    </div>
+                </div>
+            </div>
+        `;
+
+        // Add modal to body
+        document.body.insertAdjacentHTML('beforeend', modalHTML);
+
+        // Get modal element and buttons
+        const modalElement = document.getElementById('deleteTrainingModal');
+        const confirmBtn = document.getElementById('confirmDeleteBtn');
+
+        // Initialize Bootstrap modal
+        const modal = new bootstrap.Modal(modalElement);
+
+        // Handle confirm button click
+        confirmBtn.addEventListener('click', () => {
+            modal.hide();
+            onConfirm();
+        });
+
+        // Clean up modal after it's hidden
+        modalElement.addEventListener('hidden.bs.modal', () => {
+            modalElement.remove();
+        });
+
+        // Show modal
+        modal.show();
+    }
+
+    async syncCompletedStatus(event) {
+        /**
+         * Sync completed status by checking S3 for results.csv files
+         * Useful for trainings that completed before train.done consumer was added
+         */
+        const syncBtn = event?.target || document.querySelector('button[onclick*="syncCompletedStatus"]');
+        
+        try {
+            if (syncBtn) {
+                syncBtn.disabled = true;
+                syncBtn.innerHTML = '<i class="bi bi-arrow-clockwise me-1 spinner-border spinner-border-sm"></i> Syncing...';
+            }
+
+            const response = await apiService.syncCompletedStatus();
+            
+            if (response.updated_count > 0) {
+                showToast(
+                    `Synced ${response.updated_count} training job(s) to completed status`,
+                    'success'
+                );
+                console.log('[Training Page] Synced jobs:', response.updated_jobs);
+                
+                // Reload training jobs to reflect updated status
+                await this.loadTrainingJobs();
+                
+                // Re-render the page
+                const app = document.getElementById('app');
+                if (app) {
+                    app.innerHTML = this.render();
+                    await this.afterRender();
+                }
+            } else {
+                showToast('No training jobs need status update', 'info');
+            }
+        } catch (error) {
+            console.error('[Training Page] Error syncing completed status:', error);
+            showToast('Failed to sync status: ' + error.message, 'error');
+        } finally {
+            if (syncBtn) {
+                syncBtn.disabled = false;
+                syncBtn.innerHTML = '<i class="bi bi-arrow-clockwise me-1"></i> Sync Status';
+            }
         }
     }
 

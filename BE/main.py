@@ -87,21 +87,47 @@ app.mount("/datasets", StaticFiles(directory=str(datasets_dir)), name="datasets"
 @app.on_event("startup")
 def start_rabbitmq_consumers():
     """Start RabbitMQ consumers in background threads"""
-    from app.rabbitmq.consumer import start_inference_consumer
+    from app.rabbitmq.consumer import start_inference_consumer, start_training_consumer
     from app.services.auto_annotation_service import handle_inference_done
+    from app.services.training_completion_service import handle_training_done
+    from app.services.training_sync_service import run_periodic_sync
     import logging
     import threading
 
     log = logging.getLogger(__name__)
 
-    def run_consumer():
+    def run_inference_consumer():
         try:
             log.info("[RMQ] Starting inference.done consumer...")
             start_inference_consumer(handle_inference_done)
         except Exception as e:
-            log.error(f"[RMQ] Consumer error: {e}", exc_info=True)
+            log.error(f"[RMQ] Inference consumer error: {e}", exc_info=True)
+
+    def run_training_consumer():
+        try:
+            log.info("[RMQ] Starting train.done consumer...")
+            start_training_consumer(handle_training_done)
+        except Exception as e:
+            log.error(f"[RMQ] Training consumer error: {e}", exc_info=True)
+
+    def run_training_sync():
+        """Periodic sync service to catch any missed train.done events"""
+        try:
+            # Run every 5 minutes
+            run_periodic_sync(interval_minutes=5)
+        except Exception as e:
+            log.error(f"[Training Sync] Sync service error: {e}", exc_info=True)
 
     # Background thread로 Consumer 시작
-    consumer_thread = threading.Thread(target=run_consumer, daemon=True)
-    consumer_thread.start()
-    log.info("[RMQ] Consumer thread started")
+    inference_thread = threading.Thread(target=run_inference_consumer, daemon=True)
+    inference_thread.start()
+    log.info("[RMQ] Inference consumer thread started")
+
+    training_thread = threading.Thread(target=run_training_consumer, daemon=True)
+    training_thread.start()
+    log.info("[RMQ] Training consumer thread started")
+
+    # Periodic sync service (backup for missed events)
+    sync_thread = threading.Thread(target=run_training_sync, daemon=True)
+    sync_thread.start()
+    log.info("[Training Sync] Periodic sync service started (5 minute interval)")

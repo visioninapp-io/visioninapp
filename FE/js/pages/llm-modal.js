@@ -370,6 +370,7 @@ async function submitQuery() {
         // LLM 학습 요청
         const response = await apiService.createLLMTraining({
             user_query: llmModalState.query,
+            dataset_id: dataset.id,              // dataset_id 추가
             dataset_name: dataset.name,
             dataset_s3_prefix: s3Prefix,
             run_name: `llm_${dataset.name}_${Date.now()}`

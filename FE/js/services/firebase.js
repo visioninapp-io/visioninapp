@@ -7,6 +7,9 @@ class FirebaseAuthService {
         this.currentUser = null;
         this.initialized = false;
         this.tokenRefreshTimer = null;
+        this.activityCheckTimer = null;
+        this.activityListenersSetup = false;
+        this.isRefreshingToken = false;
     }
 
     // Initialize Firebase
@@ -82,21 +85,81 @@ class FirebaseAuthService {
 
         if (!user) return;
 
-        // 40 minutes
-        const intervalMs = 40 * 60 * 1000;
+        // 50분마다 갱신 (토큰 만료는 1시간이므로 여유있게)
+        const intervalMs = 50 * 60 * 1000;
+
+        // 사용자 활동 감지 리스너 추가
+        this.setupActivityListeners();
 
         this.tokenRefreshTimer = setInterval(async () => {
-            try {
-                console.log('[FirebaseAuth] Forcing ID token refresh...');
-                const newToken = await user.getIdToken(true);  // 강제 새 토큰
-                if (window.apiService) {
-                    window.apiService.setAuthToken(newToken);
-                }
-                console.log('[FirebaseAuth] ID token refreshed by timer');
-            } catch (err) {
-                console.error('[FirebaseAuth] Token refresh timer error:', err);
-            }
+            await this.refreshToken(user, 'periodic timer');
         }, intervalMs);
+    }
+
+    // 토큰 갱신 공통 함수 (중복 방지 포함)
+    async refreshToken(user, source = 'unknown') {
+        if (this.isRefreshingToken) {
+            console.log(`[FirebaseAuth] Token refresh already in progress (${source})`);
+            return false;
+        }
+
+        this.isRefreshingToken = true;
+
+        try {
+            console.log(`[FirebaseAuth] Refreshing ID token (${source})...`);
+            const newToken = await user.getIdToken(true);  // 강제 새 토큰
+            if (window.apiService) {
+                window.apiService.setAuthToken(newToken);
+            }
+            console.log(`[FirebaseAuth] ID token refreshed by ${source}`);
+            return true;
+        } catch (err) {
+            console.error(`[FirebaseAuth] Token refresh error (${source}):`, err);
+            return false;
+        } finally {
+            this.isRefreshingToken = false;
+        }
+    }
+
+    // 사용자 활동 감지 및 토큰 갱신
+    setupActivityListeners() {
+        if (this.activityListenersSetup) return;
+        
+        let lastActivity = Date.now();
+
+        const updateActivity = () => {
+            lastActivity = Date.now();
+        };
+
+        // 사용자 활동 감지 (클릭, 키보드, 마우스 이동, 스크롤)
+        ['click', 'keydown', 'mousemove', 'scroll'].forEach(event => {
+            document.addEventListener(event, updateActivity, { passive: true });
+        });
+
+        // 5분마다 활동 체크
+        this.activityCheckTimer = setInterval(async () => {
+            const minutesSinceActivity = (Date.now() - lastActivity) / (1000 * 60);
+            const user = this.auth?.currentUser;
+            
+            // 최근 5분 내 활동이 있고 사용자가 로그인된 상태
+            if (user && minutesSinceActivity < 5) {
+                try {
+                    const tokenResult = await user.getIdTokenResult();
+                    const expirationTime = new Date(tokenResult.expirationTime).getTime();
+                    const timeUntilExpiry = (expirationTime - Date.now()) / (1000 * 60);
+                    
+                    // 만료 15분 전에 갱신
+                    if (timeUntilExpiry < 15) {
+                        await this.refreshToken(user, 'activity check');
+                    }
+                } catch (err) {
+                    console.error('[FirebaseAuth] Activity-based token check error:', err);
+                }
+            }
+        }, 5 * 60 * 1000); // 5분마다 체크
+
+        this.activityListenersSetup = true;
+        console.log('[FirebaseAuth] Activity listeners setup complete');
     }
 
     // timer clear
@@ -105,6 +168,11 @@ class FirebaseAuthService {
             clearInterval(this.tokenRefreshTimer);
             this.tokenRefreshTimer = null;
         }
+        if (this.activityCheckTimer) {
+            clearInterval(this.activityCheckTimer);
+            this.activityCheckTimer = null;
+        }
+        this.activityListenersSetup = false;
     }
 
     // Hide auth buttons when Firebase is not configured

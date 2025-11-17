@@ -22,6 +22,7 @@ EXCHANGE_CMD = os.getenv("RMQ_EXCHANGE_CMD", "jobs.cmd")
 EXCHANGE_EVENTS = os.getenv("RMQ_EXCHANGE_EVENTS", "jobs.events")
 
 RK_START = "train.start"             # 학습 요청
+RK_HPO = "train.hpo"
 RK_DONE_FMT = "job.{job_id}.done"    # 완료 이벤트 routing key
 RK_ERROR_FMT = "job.{job_id}.error"
 RK_STATUS_FMT = "job.{job_id}.status"
@@ -93,7 +94,6 @@ def _merge_train_params(state: TrainState) -> Dict[str, Any]:
 
     return cleaned
 
-
 def _infer_dataset(state: TrainState) -> Dict[str, str]:
     over = state.train_overrides or {}
     if isinstance(over.get("dataset"), dict):
@@ -131,7 +131,7 @@ def _infer_output(state: TrainState, dataset_name: str) -> Dict[str, str]:
 
 # ------------------- RabbitMQ 통신 -------------------
 
-def _publish_to_rabbitmq(message: Dict[str, Any]) -> None:
+def _publish_to_rabbitmq(message: Dict[str, Any], rk: str) -> None:
     import pika
 
     try:
@@ -148,7 +148,7 @@ def _publish_to_rabbitmq(message: Dict[str, Any]) -> None:
         logger.info(f"[train_trial] 메시지 발행: exchange={EXCHANGE_CMD}, routing_key={RK_START}")
         ch.basic_publish(
             exchange=EXCHANGE_CMD,
-            routing_key=RK_START,
+            routing_key=rk,
             body=body,
             properties=pika.BasicProperties(
                 delivery_mode=2,
@@ -346,6 +346,11 @@ def train_trial(state: TrainState) -> TrainState:
         "hyperparams": merged,     # GPU가 학습 시 사용할 파라미터
     }
 
+    hpo = {
+        "job_id": job_id,
+        "hyperparams": merged,
+    }
+
     # optional fields
     if split is not None:
         payload["split"] = split
@@ -356,7 +361,8 @@ def train_trial(state: TrainState) -> TrainState:
     logger.info(payload)
     # 1️⃣ 학습 요청 발행
     logger.info(f"[train_trial] 학습 요청 발행 시작: job_id={job_id}")
-    _publish_to_rabbitmq(payload)
+    _publish_to_rabbitmq(payload, RK_START)
+    _publish_to_rabbitmq(hpo, RK_HPO)
 
     # 2️⃣ 완료 이벤트 대기 (job.{job_id}.done)
     wait_sec = int(os.getenv("TRAIN_WAIT_TIMEOUT_SEC", "10800"))

@@ -609,6 +609,12 @@ class TrainingPage {
                                     <h5 class="mb-1 fw-bold">All Training Jobs</h5>
                                     <p class="text-muted mb-0 small">View and manage all training pipelines</p>
                                 </div>
+                                <div class="col-auto">
+                                    <button class="btn btn-sm btn-outline-primary" 
+                                            onclick="window.trainingPage.syncCompletedStatus(event)">
+                                        <i class="bi bi-arrow-clockwise me-1"></i> Sync Status
+                                    </button>
+                                </div>
                             </div>
                         </div>
                         <div class="card-body" id="training-jobs-list">

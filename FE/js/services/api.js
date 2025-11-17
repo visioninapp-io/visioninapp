@@ -939,6 +939,21 @@ class APIService {
         return this.post(`/training/${id}/control`, { action: 'cancel' });
     }
 
+    async deleteTrainingJob(id) {
+        console.log(`[API] Deleting training job ${id}...`);
+        return this.delete(`/training/${id}`);
+    }
+
+    async syncCompletedStatus() {
+        console.log('[API] Syncing completed training status from S3...');
+        return this.post('/training/sync-completed-status');
+    }
+
+    async markTrainingCompleted(jobId) {
+        console.log(`[API] Marking training job ${jobId} as completed...`);
+        return this.post(`/training/${jobId}/mark-completed`);
+    }
+
     async hyperparameterTuning(data) {
         console.log('[API] Starting hyperparameter tuning:', data);
         return this.post('/training/hyperparameter-tuning', data);

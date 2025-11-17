@@ -101,6 +101,11 @@ class App {
         if (pageInstance.constructor.name === 'TrainingPage') {
             window.trainingPage = pageInstance;
         }
+
+        // Store for evaluation page
+        if (pageInstance.constructor.name === 'EvaluationPage') {
+            window.evaluationPage = pageInstance;
+        }
     }
 
     updateActiveNav(currentPath) {

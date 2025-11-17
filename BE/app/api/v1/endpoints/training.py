@@ -4,6 +4,9 @@ from sqlalchemy.orm import Session
 from typing import List, Dict, Any
 from datetime import datetime
 import logging, uuid, re
+import asyncio
+import boto3
+from botocore.exceptions import ClientError
 
 from app.core.database import get_db, SessionLocal
 from app.core.auth import get_current_user
@@ -13,6 +16,7 @@ from app.models.training import TrainingJob, TrainingStatus
 from app.models.model import Model
 from app.models.model_version import ModelVersion
 from app.models.model_artifact import ModelArtifact
+from app.models.dataset import Dataset
 from app.utils.project_helper import get_or_create_default_project
 from app.utils.dataset_helper import get_or_create_dataset_version
 
@@ -85,14 +89,125 @@ async def get_training_jobs(
     return jobs
 
 
+@router.delete("/{job_id}", status_code=status.HTTP_204_NO_CONTENT)
+async def delete_training_job(
+    job_id: int,
+    db: Session = Depends(get_db),
+    current_user: dict = Depends(get_current_user)
+):
+    """Delete a training job and optionally its associated model (from both DB and S3)"""
+    job = db.query(TrainingJob).filter(
+        TrainingJob.id == job_id,
+        TrainingJob.created_by == current_user["uid"]
+    ).first()
+    
+    if not job:
+        raise HTTPException(status_code=404, detail="Training job not found")
+    
+    # Initialize S3 client for potential S3 cleanup
+    s3_client = None
+    try:
+        s3_client = boto3.client(
+            's3',
+            aws_access_key_id=settings.AWS_ACCESS_KEY_ID,
+            aws_secret_access_key=settings.AWS_SECRET_ACCESS_KEY,
+            region_name=settings.AWS_REGION
+        )
+    except Exception as e:
+        logger.warning(f"[Training] Failed to initialize S3 client: {e}")
+    
+    # Delete associated model if exists (including S3 artifacts)
+    if job.model_id:
+        model = db.query(Model).filter(Model.id == job.model_id).first()
+        if model:
+            try:
+                # Get all model versions and their artifacts
+                model_versions = db.query(ModelVersion).filter(
+                    ModelVersion.model_id == job.model_id
+                ).all()
+                
+                # Delete all artifacts from S3
+                if s3_client:
+                    for version in model_versions:
+                        for artifact in version.artifacts:
+                            if artifact.storage_uri:
+                                try:
+                                    logger.info(f"[Training] Deleting S3 object: {artifact.storage_uri}")
+                                    s3_client.delete_object(
+                                        Bucket=settings.AWS_BUCKET_NAME,
+                                        Key=artifact.storage_uri
+                                    )
+                                    logger.info(f"[Training] Successfully deleted from S3: {artifact.storage_uri}")
+                                except ClientError as e:
+                                    error_code = e.response.get('Error', {}).get('Code', 'Unknown')
+                                    if error_code != 'NoSuchKey':
+                                        logger.warning(f"[Training] Failed to delete S3 object {artifact.storage_uri}: {e}")
+                                    # Continue even if S3 deletion fails (file might not exist)
+                                except Exception as e:
+                                    logger.warning(f"[Training] Error deleting S3 object {artifact.storage_uri}: {e}")
+                                    # Continue even if S3 deletion fails
+                    
+                    # Also delete results.csv if exists (based on model_key)
+                    try:
+                        model_name = model.name
+                        model_key = _slugify_model_name(model_name)
+                        results_csv_key = f"models/{model_key}/results.csv"
+                        
+                        s3_client.delete_object(
+                            Bucket=settings.AWS_BUCKET_NAME,
+                            Key=results_csv_key
+                        )
+                        logger.info(f"[Training] Successfully deleted results.csv from S3: {results_csv_key}")
+                    except ClientError as e:
+                        error_code = e.response.get('Error', {}).get('Code', 'Unknown')
+                        if error_code != 'NoSuchKey':
+                            logger.warning(f"[Training] Failed to delete results.csv from S3: {e}")
+                    except Exception as e:
+                        logger.warning(f"[Training] Error deleting results.csv from S3: {e}")
+                
+                # Delete model from database (cascade will handle versions and artifacts)
+                db.delete(model)
+                logger.info(f"[Training] Deleted associated model {job.model_id} for job {job_id}")
+            except Exception as e:
+                logger.error(f"[Training] Error deleting model {job.model_id}: {e}", exc_info=True)
+                # Continue with job deletion even if model deletion fails
+    
+    # Even if model_id is None, try to delete potential S3 files based on job name
+    # This handles cases like LLM training where model might not be created yet
+    if not job.model_id and s3_client:
+        try:
+            # Try to delete results.csv based on job name (common pattern: {job_name}_model)
+            model_name = f"{job.name}_model"
+            model_key = _slugify_model_name(model_name)
+            results_csv_key = f"models/{model_key}/results.csv"
+            
+            s3_client.delete_object(
+                Bucket=settings.AWS_BUCKET_NAME,
+                Key=results_csv_key
+            )
+            logger.info(f"[Training] Successfully deleted results.csv from S3 (no model_id): {results_csv_key}")
+        except ClientError as e:
+            error_code = e.response.get('Error', {}).get('Code', 'Unknown')
+            if error_code != 'NoSuchKey':
+                logger.warning(f"[Training] Failed to delete results.csv from S3 (no model_id): {e}")
+            # File might not exist, which is fine
+        except Exception as e:
+            logger.warning(f"[Training] Error deleting results.csv from S3 (no model_id): {e}")
+    
+    # Delete the training job from database
+    db.delete(job)
+    db.commit()
+    
+    logger.info(f"[Training] Deleted training job {job_id} (name: {job.name}) from DB and S3")
+    return None
+
+
 @router.post("/", response_model=TrainingJobResponse, status_code=status.HTTP_201_CREATED)
 async def create_training_job(
     job: TrainingJobCreate,
     db: Session = Depends(get_db),
     current_user: dict = Depends(get_current_user)
 ):
-    from app.models.dataset import Dataset
-
     # 0) 이름 중복 방지
     if db.query(TrainingJob).filter(TrainingJob.name == job.name).first():
         raise HTTPException(status_code=400, detail="Training job with this name already exists")
@@ -236,24 +351,42 @@ async def create_llm_training(
     # 프론트엔드에서 user_query 또는 query로 보낼 수 있음
     user_query = request.get("user_query") or request.get("query", "")
     user_query = user_query.strip() if user_query else ""
+    dataset_id = request.get("dataset_id")
     dataset_name = request.get("dataset_name", "")
     dataset_s3_prefix = request.get("dataset_s3_prefix", "")
     
     if not user_query:
         raise HTTPException(status_code=400, detail="Query is required")
-    if not dataset_name:
-        raise HTTPException(status_code=400, detail="Dataset name is required")
+    
+    # Dataset 조회 (dataset_id 우선, 없으면 dataset_name으로 찾기)
+    dataset = None
+    if dataset_id:
+        dataset = db.query(Dataset).filter(Dataset.id == dataset_id).first()
+        if not dataset:
+            raise HTTPException(status_code=404, detail=f"Dataset with id {dataset_id} not found")
+        dataset_name = dataset.name
+    elif dataset_name:
+        # dataset_name으로 찾기 (fallback)
+        default_project = get_or_create_default_project(db, current_user["uid"])
+        dataset = db.query(Dataset).filter(
+            Dataset.name == dataset_name,
+            Dataset.project_id == default_project.id
+        ).first()
+        if not dataset:
+            raise HTTPException(status_code=404, detail=f"Dataset '{dataset_name}' not found. Please provide dataset_id.")
+    else:
+        raise HTTPException(status_code=400, detail="Either dataset_id or dataset_name is required")
     
     # TrainingJob 생성
     job_name = f"AI-{dataset_name}-{datetime.utcnow().strftime('%Y%m%d%H%M%S')}"
     db_job = TrainingJob(
         name=job_name,
-        dataset_id=None,
+        dataset_id=dataset.id,  # dataset_id를 바로 설정
         architecture="AI-Auto",  # LLM이 자동으로 결정
         hyperparameters={
             "user_query": user_query,
             "dataset_name": dataset_name,
-            "dataset_s3_prefix": dataset_s3_prefix,
+            "dataset_s3_prefix": dataset_s3_prefix or f"datasets/{dataset_name}/",
             "ai_mode": True
         },
         status=TrainingStatus.PENDING,
@@ -262,6 +395,58 @@ async def create_llm_training(
     db.add(db_job)
     db.commit()
     db.refresh(db_job)
+    
+    # Model 생성 및 연결 (일반 training과 동일하게)
+    default_project = get_or_create_default_project(db, current_user["uid"])
+    
+    # Dataset version 생성/조회 (v0로 고정) - 이미 dataset이 확보되어 있음
+    dataset_version = get_or_create_dataset_version(db, dataset.id, version_tag="v0")
+    
+    # Model 생성
+    model = _get_or_create_model(
+        db, name=f"{job_name}_model", project_id=default_project.id, task=None, description=f"Model for {job_name}"
+    )
+    
+    # ModelVersion 생성
+    framework_str = "AI-Auto"
+    framework_version_str = getattr(settings, "FRAMEWORK_VERSION", None) or "unknown"
+    mv = _get_or_create_model_v0(
+        db, model_id=model.id, dataset_version_id=dataset_version.id, framework=framework_str, framework_version=framework_version_str, training_config=db_job.hyperparameters
+    )
+    
+    # job ↔ model 연결
+    db_job.model_id = model.id
+    db.commit()
+    db.refresh(db_job)
+    
+    # external_job_id 생성
+    job_id_str = str(uuid.uuid4()).replace("-", "")
+    db_job.hyperparameters["external_job_id"] = job_id_str
+    db.commit()
+    db.refresh(db_job)
+    
+    # 아티팩트(PT) 선점 INSERT (storage_uri만 확정)
+    try:
+        model_name = f"{job_name}_model"
+        model_key = _slugify_model_name(model_name)
+        object_key = f"models/{model_key}/best.pt"
+        
+        # 중복 방지: 같은 v0에서 같은 key가 있으면 재사용
+        artifact = db.query(ModelArtifact).filter(
+            ModelArtifact.model_version_id == mv.id,
+            ModelArtifact.storage_uri == object_key
+        ).first()
+        if not artifact:
+            artifact = ModelArtifact(
+                model_version_id=mv.id,
+                storage_uri=object_key,
+                format="pt"
+            )
+            db.add(artifact)
+            db.commit()
+            db.refresh(artifact)
+    except Exception as e:
+        logger.warning(f"[LLM Training] Failed to create artifact placeholder: {e}")
     
     # LangGraph 학습 파이프라인을 백그라운드에서 실행
     background_tasks.add_task(
@@ -276,6 +461,7 @@ async def create_llm_training(
     db.commit()
     db.refresh(db_job)
     
+    logger.info(f"[LLM Training] Created training job {db_job.id} with model {model.id}")
     return db_job
 
 
@@ -283,8 +469,6 @@ def run_llm_training_pipeline(job_id: int, user_query: str, dataset_path: str):
     """
     백그라운드에서 LangGraph 기반 학습 실행
     """
-    import asyncio
-    
     db = SessionLocal()
     job = None
     try:
@@ -342,6 +526,120 @@ def run_llm_training_pipeline(job_id: int, user_query: str, dataset_path: str):
             pass  # DB 연결이 이미 끊어진 경우 무시
 
 
+@router.post("/{job_id}/mark-completed", response_model=TrainingJobResponse)
+async def mark_training_completed(
+    job_id: int,
+    db: Session = Depends(get_db),
+    current_user: dict = Depends(get_current_user)
+):
+    """
+    Manually mark a training job as completed
+    Useful when GPU server completed training but didn't send train.done event
+    """
+    job = db.query(TrainingJob).filter(
+        TrainingJob.id == job_id,
+        TrainingJob.created_by == current_user["uid"]
+    ).first()
+    
+    if not job:
+        raise HTTPException(status_code=404, detail="Training job not found")
+    
+    if job.status == TrainingStatus.COMPLETED.value:
+        logger.info(f"[Training] Job {job_id} is already completed")
+        return job
+    
+    # Update status to completed
+    job.status = TrainingStatus.COMPLETED
+    if not job.completed_at:
+        job.completed_at = datetime.utcnow()
+    job.training_log = (job.training_log or "") + "\nManually marked as completed"
+    
+    db.commit()
+    db.refresh(job)
+    
+    logger.info(f"[Training] Manually marked job {job_id} as completed")
+    return job
+
+
+@router.post("/sync-completed-status", response_model=Dict[str, Any])
+async def sync_completed_status(
+    db: Session = Depends(get_db),
+    current_user: dict = Depends(get_current_user)
+):
+    """
+    Check S3 for results.csv files and automatically mark training jobs as completed
+    Useful for syncing status when GPU server completed but didn't send train.done event
+    """
+    s3_client = boto3.client(
+        's3',
+        aws_access_key_id=settings.AWS_ACCESS_KEY_ID,
+        aws_secret_access_key=settings.AWS_SECRET_ACCESS_KEY,
+        region_name=settings.AWS_REGION
+    )
+    
+    # Get all running/pending training jobs for current user
+    running_jobs = db.query(TrainingJob).filter(
+        TrainingJob.created_by == current_user["uid"],
+        TrainingJob.status.in_([TrainingStatus.RUNNING.value, TrainingStatus.PENDING.value])
+    ).all()
+    
+    updated_count = 0
+    updated_jobs = []
+    
+    for job in running_jobs:
+        try:
+            # Get model_key from job
+            model = db.query(Model).filter(Model.id == job.model_id).first() if job.model_id else None
+            
+            if model:
+                model_name = model.name
+            else:
+                model_name = f"{job.name}_model"
+            
+            model_key = _slugify_model_name(model_name)
+            s3_key = f"models/{model_key}/results.csv"
+            
+            # Check if results.csv exists in S3
+            try:
+                s3_client.head_object(
+                    Bucket=settings.AWS_BUCKET_NAME,
+                    Key=s3_key
+                )
+                
+                # results.csv exists, mark as completed
+                if job.status != TrainingStatus.COMPLETED.value:
+                    job.status = TrainingStatus.COMPLETED
+                    if not job.completed_at:
+                        job.completed_at = datetime.utcnow()
+                    job.training_log = (job.training_log or "") + f"\nAuto-detected completion (results.csv found in S3)"
+                    db.commit()
+                    
+                    updated_count += 1
+                    updated_jobs.append({
+                        "id": job.id,
+                        "name": job.name,
+                        "model_key": model_key
+                    })
+                    logger.info(f"[Training] Auto-marked job {job.id} ({job.name}) as completed - results.csv found")
+                    
+            except ClientError as e:
+                if e.response.get('Error', {}).get('Code') == '404':
+                    # File doesn't exist, skip
+                    pass
+                else:
+                    logger.warning(f"[Training] Error checking S3 for job {job.id}: {e}")
+                    
+        except Exception as e:
+            logger.error(f"[Training] Error processing job {job.id}: {e}", exc_info=True)
+            continue
+    
+    return {
+        "updated_count": updated_count,
+        "updated_jobs": updated_jobs,
+        "message": f"Synced {updated_count} training job(s) to completed status"
+    }
+
+
 @router.get("/results/{model_name}/results.csv")
 async def get_training_results_csv(
     model_name: str,
@@ -351,9 +649,6 @@ async def get_training_results_csv(
     Get training results CSV from S3
     Path: s3://bucket/models/{model_name}/results.csv
     """
-    import boto3
-    from botocore.exceptions import ClientError
-
     try:
         logger.info(f"[Training Results] Fetching results.csv for model: {model_name}")
 

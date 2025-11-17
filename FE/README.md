@@ -9,7 +9,7 @@ Firebase 인증을 사용하기 위해 다음 단계를 따르세요:
 #### Step 1: Firebase 프로젝트 생성
 1. [Firebase Console](https://console.firebase.google.com/) 접속
 2. "프로젝트 추가" 클릭
-3. 프로젝트 이름 입력 후 생성
+3. 프로젝트 이름 입력 후 생성.
 
 #### Step 2: Authentication 활성화
 1. 왼쪽 메뉴 > **Build > Authentication**

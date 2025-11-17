@@ -427,29 +427,16 @@ async def delete_dataset(
 
     print(f"[DELETE DATASET] Deleting dataset {dataset_id}: {dataset.name}")
     
-    # Step 1: Delete all files from S3 (must succeed before DB deletion)
     try:
+        # Delete all files from S3
         file_storage.delete_dataset_files(dataset.name)
-        print(f"[DELETE DATASET] S3 files deleted successfully for dataset {dataset_id}")
     except Exception as e:
-        print(f"[ERROR] Failed to delete S3 files for dataset {dataset_id}: {e}")
-        raise HTTPException(
-            status_code=500,
-            detail=f"Failed to delete dataset files from S3: {str(e)}"
-        )
+        print(f"[WARNING] Failed to delete S3 files for dataset {dataset_id}: {e}")
+        # Continue with database deletion even if S3 deletion fails
     
-    # Step 2: Delete from database (only if S3 deletion succeeded)
-    try:
-        db.delete(dataset)
-        db.commit()
-        print(f"[DELETE DATASET] Database records deleted successfully for dataset {dataset_id}")
-    except Exception as e:
-        db.rollback()
-        print(f"[ERROR] Failed to delete database records for dataset {dataset_id}: {e}")
-        raise HTTPException(
-            status_code=500,
-            detail=f"S3 files deleted but database deletion failed: {str(e)}"
-        )
+    # Delete from database (cascade will handle related records)
+    db.delete(dataset)
+    db.commit()
 
     return None
 
@@ -459,6 +446,8 @@ async def get_dataset_images(
     dataset_id: int,
     page: int = 1,
     limit: int = 10000,
+    version_id: Optional[int] = None,
+    version_tag: Optional[str] = None,
     db: Session = Depends(get_db),
     current_user: dict = Depends(get_current_user)
 ):
@@ -469,6 +458,8 @@ async def get_dataset_images(
         dataset_id: Dataset ID
         page: Page number (1-based, default: 1)
         limit: Number of images per page (default: 50)
+        version_id: Optional specific version ID to filter by
+        version_tag: Optional version tag (e.g., 'v0', 'v1.0') - used if version_id not provided
     
     Returns:
         Dictionary with base64 encoded images and metadata
@@ -478,13 +469,15 @@ async def get_dataset_images(
     if not dataset:
         raise HTTPException(status_code=404, detail="Dataset not found")
     
-    # Asset에서 조회
+    # Asset에서 조회 (version filter 적용)
     assets, total_count = get_assets_from_dataset(
         db=db,
         dataset_id=dataset_id,
         asset_type=AssetType.IMAGE,
         page=page,
-        limit=limit
+        limit=limit,
+        version_id=version_id,
+        version_tag=version_tag
     )
     
     if not assets:

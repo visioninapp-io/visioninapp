@@ -10,6 +10,7 @@ mq:
     train: gpu.train.q
     onnx:  gpu.onnx.q
     trt:   gpu.trt.q
+    inference: gpu.inference.q
 
 train_defaults:
   epochs: 100

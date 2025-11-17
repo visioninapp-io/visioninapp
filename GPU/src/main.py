@@ -3,7 +3,7 @@ from pathlib import Path
 from typing import Any, Dict, Optional
 from utils.config import load_config
 from utils.logger import setup_logger
-from mq import MQ, declare_topology, start_consumer_thread
+from mq import MQ, declare_topology, start_consumer_thread, publish
 from s3_client import download_s3, upload_s3, download_s3_folder
 from core.progress import Progress
 from core.trainer import train_yolo
@@ -277,6 +277,239 @@ def handle_onnx(mq: MQ, exchanges: dict, msg: dict):
             except Exception:
                 pass
 
+def handle_inference(mq: MQ, exchanges: dict, msg: dict):
+    """
+    Auto-annotation inference handler
+    
+    Message format from backend:
+    {
+        "job_id": "uuid",
+        "dataset_id": 1,
+        "dataset_name": "pothole",
+        "model_id": 25,
+        "s3": {
+            "bucket": "visioninapp-bucket",
+            "model_path": "models/yolov8n/pothole.pt" or "yolov8n.pt",
+            "images_prefix": "datasets/pothole/images",
+            "labels_prefix": "datasets/pothole/labels",
+            "data_yaml_path": "datasets/pothole/data.yaml"
+        },
+        "images": [
+            {
+                "asset_id": 123,
+                "filename": "pothole_1.jpg",
+                "s3_key": "datasets/pothole/images/pothole_1.jpg",
+                "width": 1920,
+                "height": 1080
+            }
+        ],
+        "label_classes": [
+            {
+                "id": 1,
+                "display_name": "pothole",
+                "yolo_index": 0,
+                "color": "#FF0000"
+            }
+        ],
+        "confidence_threshold": 0.25,
+        "overwrite_existing": false
+    }
+    """
+    logger.info("[inference] Auto-annotation inference 시작")
+    job_id = msg["job_id"]
+    conn, pub_ch = mq.channel()
+    progress = Progress(pub_ch, exchanges["events"], job_id)
+    
+    try:
+        from ultralytics import YOLO
+        
+        dataset_id = msg.get("dataset_id")
+        dataset_name = msg.get("dataset_name", "dataset")
+        s3_config = msg.get("s3", {})
+        bucket = s3_config.get("bucket", S3_BUCKET)
+        model_s3_path = s3_config.get("model_path")
+        images_prefix = s3_config.get("images_prefix", f"datasets/{dataset_name}/images")
+        labels_prefix = s3_config.get("labels_prefix", f"datasets/{dataset_name}/labels")
+        image_files = msg.get("images", [])
+        confidence_threshold = float(msg.get("confidence_threshold", 0.25))
+        overwrite_existing = bool(msg.get("overwrite_existing", False))
+        
+        # 1. Download or load model
+        progress.send("inference.download_model", 10, "downloading model")
+        model_to_load = None
+        
+        if not model_s3_path:
+            logger.info(f"[inference] No model path provided, using default YOLOv8n")
+            model_to_load = "yolov8n.pt"
+        elif model_s3_path.startswith("yolov8") or model_s3_path in ["yolov8n.pt", "yolov8s.pt", "yolov8m.pt", "yolov8l.pt", "yolov8x.pt"]:
+            logger.info(f"[inference] Using Ultralytics model: {model_s3_path}")
+            model_to_load = model_s3_path
+        else:
+            tmp_model = os.path.join(tempfile.gettempdir(), f"{job_id}_model.pt")
+            model_s3_uri = f"s3://{bucket}/{model_s3_path}"
+            logger.info(f"[inference] Downloading model from: {model_s3_uri}")
+            try:
+                download_s3(model_s3_uri, tmp_model)
+                logger.info(f"[inference] Model downloaded: {model_s3_path}")
+                model_to_load = tmp_model
+            except Exception as e:
+                logger.error(f"[inference] Failed to download model: {e}")
+                raise
+        
+        # 2. Load YOLO model
+        progress.send("inference.load_model", 20, "loading model")
+        model = YOLO(model_to_load)
+        logger.info(f"[inference] Model loaded successfully")
+        
+        # 3. Process each image
+        progress.send("inference.process", 30, f"processing {len(image_files)} images")
+        processed_images = []
+        total_annotations = 0
+        
+        for idx, img_info in enumerate(image_files):
+            asset_id = img_info.get("asset_id")
+            filename = img_info.get("filename")
+            
+            if not filename:
+                logger.warning(f"[inference] Skipping image without filename: {img_info}")
+                continue
+            
+            try:
+                # Get S3 key
+                if img_info.get("s3_key"):
+                    image_s3_key = img_info["s3_key"]
+                else:
+                    image_s3_key = f"{images_prefix}/{filename}"
+                
+                tmp_image = os.path.join(tempfile.gettempdir(), f"{job_id}_{filename}")
+                image_s3_uri = f"s3://{bucket}/{image_s3_key}"
+                logger.info(f"[inference] Downloading image: {image_s3_uri}")
+                download_s3(image_s3_uri, tmp_image)
+                
+                # Run inference
+                logger.info(f"[inference] Running inference on {filename} (conf={confidence_threshold})")
+                results = model.predict(
+                    tmp_image,
+                    conf=confidence_threshold,
+                    save=False,
+                    verbose=False
+                )
+                
+                # Parse results and create YOLO format label file
+                label_lines = []
+                annotation_count = 0
+                
+                if results and len(results) > 0:
+                    result = results[0]
+                    if result.boxes is not None and len(result.boxes) > 0:
+                        img_width = result.orig_shape[1]
+                        img_height = result.orig_shape[0]
+                        
+                        for box in result.boxes:
+                            xyxy = box.xyxy[0].cpu().numpy()
+                            x1, y1, x2, y2 = float(xyxy[0]), float(xyxy[1]), float(xyxy[2]), float(xyxy[3])
+                            
+                            # Convert to YOLO format
+                            x_center = ((x1 + x2) / 2.0) / img_width
+                            y_center = ((y1 + y2) / 2.0) / img_height
+                            width = (x2 - x1) / img_width
+                            height = (y2 - y1) / img_height
+                            
+                            class_id = int(box.cls[0].cpu().numpy())
+                            conf_score = float(box.conf[0].cpu().numpy()) if box.conf is not None else 1.0
+                            
+                            logger.info(f"[inference] Detected: class={class_id}, conf={conf_score:.3f}, bbox=({x1:.0f},{y1:.0f},{x2:.0f},{y2:.0f})")
+                            
+                            label_lines.append(f"{class_id} {x_center:.6f} {y_center:.6f} {width:.6f} {height:.6f}")
+                            annotation_count += 1
+                
+                logger.info(f"[inference] Created {annotation_count} annotations for {filename}")
+                
+                # Save and upload label file
+                label_filename = filename.rsplit('.', 1)[0] + '.txt'
+                tmp_label = os.path.join(tempfile.gettempdir(), f"{job_id}_{label_filename}")
+                with open(tmp_label, 'w') as f:
+                    f.write('\n'.join(label_lines))
+                
+                label_s3_key = f"{labels_prefix}/{label_filename}"
+                upload_s3(tmp_label, bucket, label_s3_key)
+                logger.info(f"[inference] Uploaded label to S3: {label_s3_key}")
+                
+                processed_images.append({
+                    "asset_id": asset_id,
+                    "filename": filename,
+                    "label_file": label_filename,
+                    "annotation_count": annotation_count
+                })
+                
+                total_annotations += annotation_count
+                
+                # Cleanup
+                try:
+                    os.remove(tmp_image)
+                    os.remove(tmp_label)
+                except:
+                    pass
+                
+                # Update progress
+                progress_percent = 30 + int((idx + 1) / len(image_files) * 60)
+                progress.send("inference.process", progress_percent, f"processed {idx + 1}/{len(image_files)} images")
+                
+            except Exception as e:
+                logger.error(f"[inference] Error processing {filename}: {e}", exc_info=True)
+                continue
+        
+        # 4. Send completion message
+        progress.send("inference.done", 100, "inference completed")
+        
+        done_payload = {
+            "job_id": job_id,
+            "dataset_id": dataset_id,
+            "status": "completed",
+            "s3_labels_path": labels_prefix,
+            "processed_images": processed_images,
+            "total_annotations": total_annotations,
+            "overwrite_existing": overwrite_existing,
+            "error_message": None
+        }
+        
+        publish(pub_ch, exchanges["events"], "inference.done", done_payload)
+        logger.info(f"[inference] ✅ Completed: {len(processed_images)} images, {total_annotations} annotations")
+        
+        # Cleanup model
+        if model_to_load and model_to_load.startswith(tempfile.gettempdir()):
+            try:
+                os.remove(model_to_load)
+            except:
+                pass
+        
+    except Exception as e:
+        logger.exception("[inference] Inference failed")
+        progress.error("inference", str(e))
+        
+        error_payload = {
+            "job_id": job_id,
+            "dataset_id": msg.get("dataset_id"),
+            "status": "failed",
+            "s3_labels_path": msg.get("s3", {}).get("labels_prefix", ""),
+            "processed_images": [],
+            "error_message": str(e),
+            "overwrite_existing": msg.get("overwrite_existing", False)
+        }
+        try:
+            publish(pub_ch, exchanges["events"], "inference.done", error_payload)
+        except:
+            pass
+    finally:
+        logger.info("[inference] Inference 종료")
+        for obj in (pub_ch, conn):
+            try:
+                obj.close()
+            except (ChannelWrongStateError, ConnectionWrongStateError):
+                pass
+            except Exception:
+                pass
+
 def handle_trt(mq: MQ, exchanges: dict, msg: dict):
     """
     {
@@ -366,7 +599,7 @@ def main():
     declare_topology(ch, cfg["mq"]["exchanges"], cfg["mq"]["queues"])
     ch.close(); conn.close()
 
-    # 3개의 컨슈머 스레드 시작(하나의 프로세스)
+    # 4개의 컨슈머 스레드 시작(하나의 프로세스)
     th_train = start_consumer_thread(
         mq, cfg["mq"]["queues"]["train"],
         handler=lambda m: handle_train(mq, cfg["mq"]["exchanges"], m)
@@ -378,6 +611,10 @@ def main():
     th_trt = start_consumer_thread(
         mq, cfg["mq"]["queues"]["trt"],
         handler=lambda m: handle_trt(mq, cfg["mq"]["exchanges"], m)
+    )
+    th_inference = start_consumer_thread(
+        mq, cfg["mq"]["queues"]["inference"],
+        handler=lambda m: handle_inference(mq, cfg["mq"]["exchanges"], m)
     )
 
     logger.info("[main] All routers started in one process. Waiting for jobs...")

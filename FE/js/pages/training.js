@@ -8,6 +8,7 @@ class TrainingPage {
         this.rabbitmqConnected = false;
         this.metricsData = {}; // Store real-time metrics by job_id
         this.refreshInterval = null; // Auto-refresh interval
+        this.hyperparameters = {}; // Store hyperparameters by job_id (from RabbitMQ train.hpo)
     }
 
     async init() {
@@ -67,7 +68,12 @@ class TrainingPage {
                 this.handleTrainingMetrics(message);
             });
 
-            console.log('[Training Page] ✅ Connected to RabbitMQ and subscribed to gpu.train.log');
+            // Subscribe to hyperparameter messages (train.hpo routing key)
+            rabbitmqService.subscribe('train.hpo', (message) => {
+                this.handleHyperparameterMessage(message);
+            }, 'exchange', 'jobs.cmd');
+
+            console.log('[Training Page] ✅ Connected to RabbitMQ and subscribed to gpu.train.log and train.hpo');
             showToast('Connected to real-time training updates', 'success');
 
             // Restart periodic refresh with longer interval (now that RabbitMQ is connected)
@@ -76,6 +82,61 @@ class TrainingPage {
         } catch (error) {
             console.error('[Training Page] Failed to connect to RabbitMQ:', error);
             showToast('Failed to connect to real-time updates. Using manual refresh.', 'warning');
+        }
+    }
+
+    handleHyperparameterMessage(message) {
+        /**
+         * Handle hyperparameter message from RabbitMQ
+         * Message format:
+         * {
+         *   job_id: "xxxxxxxxxx",
+         *   hyperparams: {
+         *     model_name: "yolo12n",
+         *     epochs: 5,
+         *     batch: 16,
+         *     ...
+         *   }
+         * }
+         */
+        console.log('[Training Page] 📨 Received hyperparameter message:', message);
+        
+        try {
+            const { job_id, hyperparams } = message;
+            
+            if (!job_id || !hyperparams) {
+                console.warn('[Training Page] Invalid hyperparameter message format:', message);
+                return;
+            }
+            
+            // Store hyperparameters by job_id (as string for consistency)
+            const jobIdStr = String(job_id);
+            this.hyperparameters[jobIdStr] = hyperparams;
+            console.log(`[Training Page] ✅ Stored hyperparameters for job_id: ${jobIdStr}`);
+            console.log(`[Training Page] Current hyperparameters keys:`, Object.keys(this.hyperparameters));
+            
+            // Also try to match with all possible job identifiers
+            // Store by multiple keys for easier matching
+            this.trainingJobs.forEach(job => {
+                const possibleIds = [
+                    String(job.id),
+                    job.external_job_id ? String(job.external_job_id) : null,
+                    job.name
+                ].filter(id => id);
+                
+                // Check if any of the possible IDs match
+                if (possibleIds.includes(jobIdStr)) {
+                    console.log(`[Training Page] Matched job ${job.id} (${job.name}) with job_id ${jobIdStr}`);
+                    // Store also by job.id for easier lookup
+                    this.hyperparameters[String(job.id)] = hyperparams;
+                }
+            });
+            
+            // Update UI to show the button
+            this.updateHyperparameterButton(jobIdStr);
+            
+        } catch (error) {
+            console.error('[Training Page] Error handling hyperparameter message:', error);
         }
     }
 
@@ -301,6 +362,9 @@ class TrainingPage {
 
             this.trainingJobs = jobs;
 
+            // Check if any jobs now have hyperparameters (in case message arrived before job was loaded)
+            this.checkAndUpdateHyperparametersForJobs();
+
             // Update selected job reference
             if (this.selectedJob) {
                 const updated = this.trainingJobs.find(j => j.id === this.selectedJob.id);
@@ -314,6 +378,43 @@ class TrainingPage {
 
         } catch (error) {
             console.error('[Training Page] Error refreshing jobs:', error);
+        }
+    }
+
+    checkAndUpdateHyperparametersForJobs() {
+        /**
+         * Check if any loaded jobs match stored hyperparameters
+         * This handles the case where hyperparameter message arrived before job was loaded
+         */
+        if (Object.keys(this.hyperparameters).length === 0) {
+            return;
+        }
+
+        console.log('[Training Page] Checking hyperparameters for loaded jobs...');
+        let updated = false;
+
+        this.trainingJobs.forEach(job => {
+            const possibleIds = [
+                String(job.id),
+                job.external_job_id ? String(job.external_job_id) : null,
+                job.name
+            ].filter(id => id);
+
+            // Check if any stored hyperparameter key matches this job
+            for (const storedKey of Object.keys(this.hyperparameters)) {
+                if (possibleIds.includes(storedKey)) {
+                    // Also store by job.id for easier lookup
+                    if (!this.hyperparameters[String(job.id)]) {
+                        this.hyperparameters[String(job.id)] = this.hyperparameters[storedKey];
+                        console.log(`[Training Page] Matched hyperparameters for job ${job.id} using key: ${storedKey}`);
+                        updated = true;
+                    }
+                }
+            }
+        });
+
+        if (updated) {
+            console.log('[Training Page] Updated hyperparameters mapping for jobs');
         }
     }
 
@@ -340,6 +441,7 @@ class TrainingPage {
         // Disconnect from RabbitMQ
         if (this.rabbitmqConnected) {
             rabbitmqService.unsubscribe('gpu.train.log');
+            rabbitmqService.unsubscribe('train.hpo');
             console.log('[Training Page] Unsubscribed from RabbitMQ');
         }
 
@@ -385,6 +487,9 @@ class TrainingPage {
                 console.log('[Training Page] Loading S3 metrics for selected job:', this.selectedJob.id, this.selectedJob.name);
                 await this.loadS3MetricsForJob(this.selectedJob);
             }
+
+            // Check if any jobs now have hyperparameters (in case message arrived before job was loaded)
+            this.checkAndUpdateHyperparametersForJobs();
 
             this.trainingJobs.forEach(job => {
                 console.log(`  Job ${job.id}: ${job.name} - Status: ${job.status}, Epoch: ${job.current_epoch + 1 || 0}/${job.total_epochs || 0}`);
@@ -577,9 +682,26 @@ class TrainingPage {
                         </div>
 
                         <div class="mb-3">
-                            <div class="d-flex justify-content-between mb-2">
+                            <div class="d-flex justify-content-between align-items-center mb-2">
                                 <span class="text-muted small">Progress</span>
-                                <span class="fw-medium small">${displayEpoch}/${job.total_epochs || 0} epochs</span>
+                                <div class="d-flex align-items-center gap-2">
+                                    ${(() => {
+                                        const hasHyperparams = this.hasHyperparameters(job);
+                                        const jobIdForHyperparams = this.getJobIdForHyperparams(job);
+                                        console.log(`[Training Page] Rendering job ${job.id}: hasHyperparams=${hasHyperparams}, jobIdForHyperparams=${jobIdForHyperparams}`);
+                                        if (hasHyperparams && jobIdForHyperparams) {
+                                            return `
+                                                <button class="btn btn-sm btn-outline-info" 
+                                                        onclick="event.stopPropagation(); window.trainingPage.showHyperparameterModal('${jobIdForHyperparams}')"
+                                                        title="View Hyperparameters">
+                                                    <i class="bi bi-sliders"></i> Hyperparameters
+                                                </button>
+                                            `;
+                                        }
+                                        return '';
+                                    })()}
+                                    <span class="fw-medium small">${displayEpoch}/${job.total_epochs || 0} epochs</span>
+                                </div>
                             </div>
                             <div class="progress" style="height: 8px;">
                                 <div class="progress-bar ${job.status === 'running' ? 'progress-bar-striped progress-bar-animated' : ''}"
@@ -1219,6 +1341,288 @@ class TrainingPage {
             console.error('[Training Page] Error deleting training job:', error);
             showToast('Failed to delete: ' + error.message, 'error');
         }
+    }
+
+    hasHyperparameters(job) {
+        /**
+         * Check if hyperparameters are available for this job
+         * Try multiple ways to match job_id
+         */
+        if (!job) return false;
+        
+        // Try multiple possible IDs
+        const possibleIds = [
+            String(job.id),
+            job.external_job_id ? String(job.external_job_id) : null,
+            job.name
+        ].filter(id => id);
+        
+        // Check if any of the stored hyperparameters match
+        for (const id of possibleIds) {
+            if (this.hyperparameters[id] !== undefined) {
+                console.log(`[Training Page] Found hyperparameters for job ${job.id} using key: ${id}`);
+                return true;
+            }
+        }
+        
+        // Also check in job.hyperparameters for external_job_id
+        if (job.hyperparameters) {
+            let hyperparams = {};
+            if (typeof job.hyperparameters === 'string') {
+                try {
+                    hyperparams = JSON.parse(job.hyperparameters);
+                } catch (e) {
+                    // Ignore parse errors
+                }
+            } else {
+                hyperparams = job.hyperparameters;
+            }
+            
+            if (hyperparams.external_job_id) {
+                const extId = String(hyperparams.external_job_id);
+                if (this.hyperparameters[extId] !== undefined) {
+                    console.log(`[Training Page] Found hyperparameters for job ${job.id} using external_job_id: ${extId}`);
+                    return true;
+                }
+            }
+        }
+        
+        return false;
+    }
+
+    getJobIdForHyperparams(job) {
+        /**
+         * Get job_id for hyperparameters lookup
+         * Try multiple ways to find matching hyperparameters
+         */
+        if (!job) return null;
+        
+        // Try multiple possible IDs
+        const possibleIds = [
+            String(job.id),
+            job.external_job_id ? String(job.external_job_id) : null,
+            job.name
+        ].filter(id => id);
+        
+        // Find the first matching ID
+        for (const id of possibleIds) {
+            if (this.hyperparameters[id] !== undefined) {
+                return id;
+            }
+        }
+        
+        // Also check in job.hyperparameters for external_job_id
+        if (job.hyperparameters) {
+            let hyperparams = {};
+            if (typeof job.hyperparameters === 'string') {
+                try {
+                    hyperparams = JSON.parse(job.hyperparameters);
+                } catch (e) {
+                    // Ignore parse errors
+                }
+            } else {
+                hyperparams = job.hyperparameters;
+            }
+            
+            if (hyperparams.external_job_id) {
+                const extId = String(hyperparams.external_job_id);
+                if (this.hyperparameters[extId] !== undefined) {
+                    return extId;
+                }
+            }
+        }
+        
+        // Fallback to job.id as string
+        return job.id ? String(job.id) : null;
+    }
+
+    updateHyperparameterButton(jobId) {
+        /**
+         * Update UI to show hyperparameter button for the job
+         */
+        console.log(`[Training Page] Updating hyperparameter button for job_id: ${jobId}`);
+        console.log(`[Training Page] Available jobs:`, this.trainingJobs.map(j => ({ id: j.id, name: j.name })));
+        console.log(`[Training Page] Stored hyperparameters keys:`, Object.keys(this.hyperparameters));
+        
+        // Find all jobs that might match this job_id
+        const matchingJobs = this.trainingJobs.filter(j => {
+            const possibleIds = [
+                String(j.id),
+                j.external_job_id ? String(j.external_job_id) : null,
+                j.name
+            ].filter(id => id);
+            
+            return possibleIds.includes(String(jobId));
+        });
+        
+        console.log(`[Training Page] Found ${matchingJobs.length} matching jobs for job_id ${jobId}`);
+        
+        if (matchingJobs.length > 0) {
+            // Re-render the jobs list to show the button
+            console.log(`[Training Page] Re-rendering jobs list to show hyperparameter button`);
+            this.updateJobsListDisplay();
+        } else {
+            console.warn(`[Training Page] No matching job found for job_id: ${jobId}`);
+            // Still update the display in case the job appears later
+            this.updateJobsListDisplay();
+        }
+    }
+
+    showHyperparameterModal(jobId) {
+        /**
+         * Show modal with hyperparameters
+         */
+        const hyperparams = this.hyperparameters[jobId];
+        
+        if (!hyperparams) {
+            showToast('Hyperparameters not available for this job', 'warning');
+            return;
+        }
+
+        // Find the job for display name
+        const job = this.trainingJobs.find(j => {
+            const id = this.getJobIdForHyperparams(j);
+            return id === jobId;
+        });
+
+        const jobName = job ? job.name : 'Unknown Job';
+
+        // Create modal HTML
+        const modalHTML = `
+            <div class="modal fade" id="hyperparameterModal" tabindex="-1">
+                <div class="modal-dialog modal-lg modal-dialog-scrollable">
+                    <div class="modal-content">
+                        <div class="modal-header">
+                            <h5 class="modal-title">
+                                <i class="bi bi-sliders me-2"></i>Hyperparameters
+                            </h5>
+                            <button type="button" class="btn-close" data-bs-dismiss="modal"></button>
+                        </div>
+                        <div class="modal-body">
+                            <div class="row g-3">
+                                ${this.renderHyperparameterFields(hyperparams)}
+                            </div>
+                        </div>
+                        <div class="modal-footer">
+                            <button type="button" class="btn btn-secondary" data-bs-dismiss="modal">Close</button>
+                        </div>
+                    </div>
+                </div>
+            </div>
+        `;
+
+        // Remove existing modal if any
+        const existingModal = document.getElementById('hyperparameterModal');
+        if (existingModal) {
+            existingModal.remove();
+        }
+
+        // Add modal to body
+        document.body.insertAdjacentHTML('beforeend', modalHTML);
+
+        // Show modal
+        const modal = new bootstrap.Modal(document.getElementById('hyperparameterModal'));
+        modal.show();
+    }
+
+    renderHyperparameterFields(hyperparams) {
+        /**
+         * Render hyperparameter fields in a nice format
+         */
+        const fields = [];
+        
+        // Group hyperparameters by category
+        const categories = {
+            'Model': ['model_name'],
+            'Training': ['epochs', 'batch', 'imgsz', 'workers', 'patience'],
+            'Optimizer': ['optimizer', 'lr0', 'lrf', 'weight_decay', 'momentum'],
+            'Learning Rate Schedule': ['warmup_epochs', 'warmup_bias_lr'],
+            'Augmentation': ['augment', 'mosaic', 'mixup'],
+            'Other': ['amp']
+        };
+
+        // Helper to format value
+        const formatValue = (value) => {
+            if (typeof value === 'boolean') {
+                return value ? '<span class="badge bg-success">Yes</span>' : '<span class="badge bg-secondary">No</span>';
+            }
+            if (typeof value === 'number') {
+                return value.toLocaleString();
+            }
+            return String(value);
+        };
+
+        // Helper to format label
+        const formatLabel = (key) => {
+            const labels = {
+                'model_name': 'Model Name',
+                'epochs': 'Epochs',
+                'batch': 'Batch Size',
+                'imgsz': 'Image Size',
+                'workers': 'Workers',
+                'optimizer': 'Optimizer',
+                'lr0': 'Initial Learning Rate',
+                'lrf': 'Final Learning Rate',
+                'weight_decay': 'Weight Decay',
+                'momentum': 'Momentum',
+                'warmup_epochs': 'Warmup Epochs',
+                'warmup_bias_lr': 'Warmup Bias LR',
+                'augment': 'Augmentation',
+                'mosaic': 'Mosaic',
+                'mixup': 'Mixup',
+                'amp': 'Mixed Precision (AMP)',
+                'patience': 'Early Stopping Patience'
+            };
+            return labels[key] || key.replace(/_/g, ' ').replace(/\b\w/g, l => l.toUpperCase());
+        };
+
+        // Render each category
+        Object.keys(categories).forEach(category => {
+            const keys = categories[category];
+            const hasAny = keys.some(key => hyperparams.hasOwnProperty(key));
+            
+            if (hasAny) {
+                fields.push(`
+                    <div class="col-12">
+                        <h6 class="text-primary border-bottom pb-2 mb-3">${category}</h6>
+                    </div>
+                `);
+                
+                keys.forEach(key => {
+                    if (hyperparams.hasOwnProperty(key)) {
+                        fields.push(`
+                            <div class="col-md-6">
+                                <div class="card border-0 bg-light">
+                                    <div class="card-body p-3">
+                                        <p class="text-muted small mb-1">${formatLabel(key)}</p>
+                                        <p class="fw-bold mb-0">${formatValue(hyperparams[key])}</p>
+                                    </div>
+                                </div>
+                            </div>
+                        `);
+                    }
+                });
+            }
+        });
+
+        // Add any remaining fields not in categories
+        const categorizedKeys = Object.values(categories).flat();
+        Object.keys(hyperparams).forEach(key => {
+            if (!categorizedKeys.includes(key) && key !== 'job_id') {
+                fields.push(`
+                    <div class="col-md-6">
+                        <div class="card border-0 bg-light">
+                            <div class="card-body p-3">
+                                <p class="text-muted small mb-1">${formatLabel(key)}</p>
+                                <p class="fw-bold mb-0">${formatValue(hyperparams[key])}</p>
+                            </div>
+                        </div>
+                    </div>
+                `);
+            }
+        });
+
+        return fields.join('');
     }
 }
 

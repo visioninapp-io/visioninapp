@@ -11,7 +11,8 @@ let llmModalState = {
     jobId: null,        // RabbitMQ 구독을 위한 job_id
     rabbitmqSubscriptions: [],  // 구독 관리
     needsConversion: false,  // 모델 변환 필요 여부
-    conversionType: null  // 'onnx' 또는 'tensorrt'
+    conversionType: null,  // 'onnx' 또는 'tensorrt'
+    hyperparameters: null  // 하이퍼파라미터 정보 (train.hpo 메시지에서 받음)
 };
 
 // Show LLM Modal
@@ -32,7 +33,8 @@ async function showLLMModal() {
         jobId: null,
         rabbitmqSubscriptions: [],
         needsConversion: false,
-        conversionType: null
+        conversionType: null,
+        hyperparameters: null
     };
 
     // Show modal first
@@ -429,7 +431,17 @@ function renderTrainingProgressStep(container) {
             <div class="mb-5">
                 <div class="d-flex justify-content-between align-items-center mb-2">
                     <span class="text-muted small fw-medium">Progress</span>
-                    <span class="fw-bold text-primary" id="training-progress-text" style="font-size: 1.1rem;">0%</span>
+                    <div class="d-flex align-items-center gap-2">
+                        <button class="btn btn-sm" 
+                                id="hyperparameter-btn"
+                                disabled
+                                onclick="showHyperparameterModalFromLLM()"
+                                title="View Hyperparameters"
+                                style="opacity: 0.5; cursor: not-allowed;">
+                            <i class="bi bi-sliders"></i> Hyperparameters
+                        </button>
+                        <span class="fw-bold text-primary" id="training-progress-text" style="font-size: 1.1rem;">0%</span>
+                    </div>
                 </div>
                 <div class="progress mb-3" style="height: 32px; border-radius: 16px; box-shadow: 0 2px 4px rgba(0,0,0,0.1);">
                     <div class="progress-bar progress-bar-striped progress-bar-animated bg-primary" 
@@ -563,7 +575,8 @@ async function startRabbitMQProgress() {
             'train.llm.log',                    // 학습 진행률 업데이트 (epoch별 퍼센트)
             'convert.exchanges',                // 변환 정보 수신
             'job.progress.onnx.done',           // ONNX 변환 완료
-            'job.progress.trt.done'             // TensorRT 변환 완료
+            'job.progress.trt.done',            // TensorRT 변환 완료
+            'train.hpo'                         // 하이퍼파라미터 메시지
         ];
         
         // 에러 이벤트 구독 (job.{job_id}.error 또는 job.#.error)
@@ -587,11 +600,24 @@ async function startRabbitMQProgress() {
         individualKeys.forEach(routingKey => {
             try {
                 // convert.exchanges는 jobs.event exchange를 사용 (LLM convert_dispatcher)
-                const exchangeName = (routingKey === 'convert.exchanges') ? 'jobs.event' : 'jobs.events';
+                // train.hpo는 jobs.cmd exchange를 사용
+                let exchangeName = 'jobs.events';
+                if (routingKey === 'convert.exchanges') {
+                    exchangeName = 'jobs.event';
+                } else if (routingKey === 'train.hpo') {
+                    exchangeName = 'jobs.cmd';
+                }
+                
                 const subscriptionId = rabbitmqService.subscribe(
                     routingKey,
                     (message) => { 
                         console.log(`[LLM Modal] 📨 Progress message received for ${routingKey}:`, message);
+                        
+                        // train.hpo 메시지 처리
+                        if (routingKey === 'train.hpo') {
+                            handleHyperparameterMessage(message);
+                            return; // train.hpo는 여기서 처리 완료
+                        }
                         
                         const messageJobId = String(message.job_id || message.jobId || 'unknown');
                         receivedJobIds.add(messageJobId);
@@ -1545,6 +1571,7 @@ function resetLLMModal() {
     llmModalState.selectedDatasetId = null;
     llmModalState.trainingJob = null;
     llmModalState.jobId = null;
+    llmModalState.hyperparameters = null;
     renderStep(1);
     // Update dataset select after reset
     updateDatasetSelect();
@@ -1561,10 +1588,202 @@ function closeLLMModal() {
     resetLLMModal();
 }
 
+// 하이퍼파라미터 메시지 처리
+function handleHyperparameterMessage(message) {
+    console.log('[LLM Modal] 📨 Received hyperparameter message:', message);
+    
+    try {
+        const { job_id, hyperparams } = message;
+        
+        if (!job_id || !hyperparams) {
+            console.warn('[LLM Modal] Invalid hyperparameter message format:', message);
+            return;
+        }
+        
+        // 하이퍼파라미터 저장
+        llmModalState.hyperparameters = hyperparams;
+        console.log('[LLM Modal] ✅ Stored hyperparameters');
+        
+        // 버튼 활성화
+        const hyperparameterBtn = document.getElementById('hyperparameter-btn');
+        if (hyperparameterBtn) {
+            hyperparameterBtn.disabled = false;
+            hyperparameterBtn.classList.remove('btn-secondary');
+            hyperparameterBtn.classList.add('btn-primary');
+            hyperparameterBtn.style.opacity = '1';
+            hyperparameterBtn.style.cursor = 'pointer';
+            console.log('[LLM Modal] ✅ Hyperparameter button activated');
+        } else {
+            console.warn('[LLM Modal] Hyperparameter button not found');
+        }
+        
+    } catch (error) {
+        console.error('[LLM Modal] Error handling hyperparameter message:', error);
+    }
+}
+
+// 하이퍼파라미터 모달 표시 (LLM 모달에서 호출)
+function showHyperparameterModalFromLLM() {
+    if (!llmModalState.hyperparameters) {
+        showToast('Hyperparameters not available yet', 'warning');
+        return;
+    }
+    
+    // TrainingPage의 showHyperparameterModal 함수 사용
+    if (window.trainingPage && typeof window.trainingPage.showHyperparameterModal === 'function') {
+        // job_id를 사용하여 모달 표시 (llmModalState.jobId 사용)
+        const jobId = llmModalState.jobId || 'llm-training';
+        window.trainingPage.hyperparameters = {};
+        window.trainingPage.hyperparameters[jobId] = llmModalState.hyperparameters;
+        window.trainingPage.showHyperparameterModal(jobId);
+    } else {
+        // TrainingPage가 없으면 직접 모달 생성
+        showHyperparameterModalDirect(llmModalState.hyperparameters);
+    }
+}
+
+// 직접 하이퍼파라미터 모달 표시
+function showHyperparameterModalDirect(hyperparams) {
+    const modalHTML = `
+        <div class="modal fade" id="llmHyperparameterModal" tabindex="-1">
+            <div class="modal-dialog modal-lg modal-dialog-scrollable">
+                <div class="modal-content">
+                    <div class="modal-header">
+                        <h5 class="modal-title">
+                            <i class="bi bi-sliders me-2"></i>Hyperparameters
+                        </h5>
+                        <button type="button" class="btn-close" data-bs-dismiss="modal"></button>
+                    </div>
+                    <div class="modal-body">
+                        <div class="row g-3">
+                            ${renderHyperparameterFields(hyperparams)}
+                        </div>
+                    </div>
+                    <div class="modal-footer">
+                        <button type="button" class="btn btn-secondary" data-bs-dismiss="modal">Close</button>
+                    </div>
+                </div>
+            </div>
+        </div>
+    `;
+
+    // Remove existing modal if any
+    const existingModal = document.getElementById('llmHyperparameterModal');
+    if (existingModal) {
+        existingModal.remove();
+    }
+
+    // Add modal to body
+    document.body.insertAdjacentHTML('beforeend', modalHTML);
+
+    // Show modal
+    const modal = new bootstrap.Modal(document.getElementById('llmHyperparameterModal'));
+    modal.show();
+}
+
+// 하이퍼파라미터 필드 렌더링
+function renderHyperparameterFields(hyperparams) {
+    const fields = [];
+    
+    // Group hyperparameters by category
+    const categories = {
+        'Model': ['model_name'],
+        'Training': ['epochs', 'batch', 'imgsz', 'workers', 'patience'],
+        'Optimizer': ['optimizer', 'lr0', 'lrf', 'weight_decay', 'momentum'],
+        'Learning Rate Schedule': ['warmup_epochs', 'warmup_bias_lr'],
+        'Augmentation': ['augment', 'mosaic', 'mixup'],
+        'Other': ['amp']
+    };
+
+    // Helper to format value
+    const formatValue = (value) => {
+        if (typeof value === 'boolean') {
+            return value ? '<span class="badge bg-success">Yes</span>' : '<span class="badge bg-secondary">No</span>';
+        }
+        if (typeof value === 'number') {
+            return value.toLocaleString();
+        }
+        return String(value);
+    };
+
+    // Helper to format label
+    const formatLabel = (key) => {
+        const labels = {
+            'model_name': 'Model Name',
+            'epochs': 'Epochs',
+            'batch': 'Batch Size',
+            'imgsz': 'Image Size',
+            'workers': 'Workers',
+            'optimizer': 'Optimizer',
+            'lr0': 'Initial Learning Rate',
+            'lrf': 'Final Learning Rate',
+            'weight_decay': 'Weight Decay',
+            'momentum': 'Momentum',
+            'warmup_epochs': 'Warmup Epochs',
+            'warmup_bias_lr': 'Warmup Bias LR',
+            'augment': 'Augmentation',
+            'mosaic': 'Mosaic',
+            'mixup': 'Mixup',
+            'amp': 'Mixed Precision (AMP)',
+            'patience': 'Early Stopping Patience'
+        };
+        return labels[key] || key.replace(/_/g, ' ').replace(/\b\w/g, l => l.toUpperCase());
+    };
+
+    // Render each category
+    Object.keys(categories).forEach(category => {
+        const keys = categories[category];
+        const hasAny = keys.some(key => hyperparams.hasOwnProperty(key));
+        
+        if (hasAny) {
+            fields.push(`
+                <div class="col-12">
+                    <h6 class="text-primary border-bottom pb-2 mb-3">${category}</h6>
+                </div>
+            `);
+            
+            keys.forEach(key => {
+                if (hyperparams.hasOwnProperty(key)) {
+                    fields.push(`
+                        <div class="col-md-6">
+                            <div class="card border-0 bg-light">
+                                <div class="card-body p-3">
+                                    <p class="text-muted small mb-1">${formatLabel(key)}</p>
+                                    <p class="fw-bold mb-0">${formatValue(hyperparams[key])}</p>
+                                </div>
+                            </div>
+                        </div>
+                    `);
+                }
+            });
+        }
+    });
+
+    // Add any remaining fields not in categories
+    const categorizedKeys = Object.values(categories).flat();
+    Object.keys(hyperparams).forEach(key => {
+        if (!categorizedKeys.includes(key) && key !== 'job_id') {
+            fields.push(`
+                <div class="col-md-6">
+                    <div class="card border-0 bg-light">
+                        <div class="card-body p-3">
+                            <p class="text-muted small mb-1">${formatLabel(key)}</p>
+                            <p class="fw-bold mb-0">${formatValue(hyperparams[key])}</p>
+                        </div>
+                    </div>
+                </div>
+            `);
+        }
+    });
+
+    return fields.join('');
+}
+
 // Make functions globally available
 window.showLLMModal = showLLMModal;
 window.closeLLMModal = closeLLMModal;
 window.submitQuery = submitQuery;
 window.resetLLMModal = resetLLMModal;
 window.onDatasetChange = onDatasetChange;
+window.showHyperparameterModalFromLLM = showHyperparameterModalFromLLM;
 

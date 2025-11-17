@@ -378,7 +378,7 @@ async def create_llm_training(
         raise HTTPException(status_code=400, detail="Either dataset_id or dataset_name is required")
     
     # TrainingJob 생성
-    job_name = f"AI-{dataset_name}-{datetime.utcnow().strftime('%Y%m%d%H%M%S')}"
+    job_name = dataset_name
     db_job = TrainingJob(
         name=job_name,
         dataset_id=dataset.id,  # dataset_id를 바로 설정

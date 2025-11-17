@@ -1459,7 +1459,7 @@ async function saveViewerAnnotations() {
 
         // Upload to S3
         const txtFile = viewerState.currentImage.filename.replace(/\.[^/.]+$/, ".txt");
-        await uploadLabelToS3(page.datasetId, txtFile, yoloTxt);
+        await apiService.uploadLabel(page.datasetId, txtFile, yoloTxt);
 
         showToast("Label file updated successfully", "success");
 
@@ -1535,28 +1535,4 @@ function convertToYOLO(normalizedAnnotations, classMap) {
             return `${cls.yolo_index} ${a.x_center} ${a.y_center} ${a.width} ${a.height}`;
         })
         .join("\n");
-}
-
-async function uploadLabelToS3(datasetId, filename, content) {
-    const presigned = await apiService.post("/datasets/presigned-upload-urls", {
-        dataset_id: datasetId,
-        filenames: [filename],
-        prefix: "labels"
-    });
-
-    const uploadUrl =
-        presigned.upload_urls?.[0] ||
-        presigned.upload_url ||
-        presigned.url;
-
-    if (!uploadUrl) {
-        console.error("[S3] Invalid presigned response:", presigned);
-        throw new Error("Failed to get presigned upload URL");
-    }
-
-    await fetch(uploadUrl, {
-        method: "PUT",
-        headers: { "Content-Type": "text/plain" },
-        body: content
-    });
 }

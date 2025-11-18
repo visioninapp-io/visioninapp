@@ -763,8 +763,9 @@ async def auto_annotate_dataset(
     if request.model_id:
         print(f"[AUTO-ANNOTATE] Custom model requested: model_id={request.model_id}")
 
-        # DB에서 모델 정보 조회
-        model = db.query(Model).filter(Model.id == request.model_id).first()
+        # DB에서 모델 정보 조회 (training_job도 함께 로드)
+        from sqlalchemy.orm import joinedload
+        model = db.query(Model).options(joinedload(Model.training_job)).filter(Model.id == request.model_id).first()
         if not model:
             print(f"[AUTO-ANNOTATE] ⚠️ Model {request.model_id} not found in DB")
         elif not model.versions:
@@ -824,6 +825,42 @@ async def auto_annotate_dataset(
     s3_images_path = f"{s3_dataset_prefix}/images"  # "datasets/pothole/images"
     s3_labels_path = f"{s3_dataset_prefix}/labels"  # "datasets/pothole/labels" (GPU가 저장할 경로)
     s3_data_yaml_path = f"{s3_dataset_prefix}/data.yaml"  # "datasets/pothole/data.yaml"
+
+    # ========== data.yaml 복사 (모델 학습 데이터셋 → 타겟 데이터셋) ==========
+    if request.model_id and model:
+        # 모델의 training job에서 학습 데이터셋 찾기
+        if model.training_job and model.training_job.dataset_id:
+            training_dataset_id = model.training_job.dataset_id
+            training_dataset = db.query(Dataset).filter(Dataset.id == training_dataset_id).first()
+
+            if training_dataset:
+                print(f"[AUTO-ANNOTATE] Model was trained on dataset: {training_dataset.name} (id={training_dataset_id})")
+
+                # 학습 데이터셋의 data.yaml 경로
+                source_data_yaml_key = f"datasets/{training_dataset.name}/data.yaml"
+                target_data_yaml_key = s3_data_yaml_path
+
+                try:
+                    # S3에서 source data.yaml 다운로드
+                    yaml_content = file_storage.download_from_s3(source_data_yaml_key)
+                    if yaml_content:
+                        # 타겟 데이터셋 경로에 업로드
+                        file_storage.s3_client.put_object(
+                            Bucket=settings.AWS_BUCKET_NAME,
+                            Key=target_data_yaml_key,
+                            Body=yaml_content,
+                            ContentType='application/x-yaml'
+                        )
+                        print(f"[AUTO-ANNOTATE] ✅ Copied data.yaml: {source_data_yaml_key} → {target_data_yaml_key}")
+                    else:
+                        print(f"[AUTO-ANNOTATE] ⚠️ Source data.yaml not found: {source_data_yaml_key}")
+                except Exception as e:
+                    print(f"[AUTO-ANNOTATE] ⚠️ Failed to copy data.yaml: {str(e)}")
+            else:
+                print(f"[AUTO-ANNOTATE] ⚠️ Training dataset not found: {training_dataset_id}")
+        else:
+            print(f"[AUTO-ANNOTATE] ⚠️ Model has no training_job or dataset_id")
+    # ========================================================================
 
     # Asset 정보 리스트 (S3 key 또는 filename 전달)
     # Use storage_uri if available, otherwise construct from dataset name
@@ -893,205 +930,6 @@ async def auto_annotate_dataset(
             detail=f"Failed to submit auto-annotation job: {str(e)}"
         )
 
-
-@router.post("/auto-annotate-old")
-async def auto_annotate_dataset_old(
-    request: AutoAnnotationRequest,
-    db: Session = Depends(get_db),
-    current_user: dict = Depends(get_current_user)
-):
-    """Old auto-annotation implementation (direct AI service call) - kept for reference"""
-    print(f"[AUTO-ANNOTATE-OLD] Using old sync method")
-
-    from app.services.ai_client import get_ai_client
-    from pathlib import Path
-
-    try:
-        print("[AUTO-ANNOTATE-OLD] Connecting to AI service...")
-        ai_client = get_ai_client()
-        
-        # Check AI service health
-        try:
-            health = await ai_client.health_check()
-            print(f"[AUTO-ANNOTATE] AI service available: {health.get('device_name')}")
-        except Exception as e:
-            print(f"[AUTO-ANNOTATE] AI service unavailable: {e}")
-            raise HTTPException(status_code=503, detail="AI service unavailable")
-
-        # 모델 경로 결정
-        model_path = "AI/models/best.pt"  # Default fallback model
-        
-        if request.model_id:
-            print(f"[AUTO-ANNOTATE] Custom model requested: model_id={request.model_id}")
-            
-            # First, try to find trained model in AI/uploads/models/
-            trained_model_path = Path(f"AI/uploads/models/model_{request.model_id}/weights/best.pt")
-            if trained_model_path.exists():
-                model_path = str(trained_model_path)
-                print(f"[AUTO-ANNOTATE] ✅ Using trained model: {model_path}")
-            else:
-                # Fallback: Try to get model from database
-                print(f"[AUTO-ANNOTATE] Trained model not found, checking database...")
-                from app.models.model import Model
-                model = db.query(Model).filter(Model.id == request.model_id).first()
-                if model and model.file_path:
-                    model_path = model.file_path
-                    print(f"[AUTO-ANNOTATE] ✅ Using DB model path: {model_path}")
-                else:
-                    print(f"[AUTO-ANNOTATE] ⚠️ Model {request.model_id} not found, using default model")
-        else:
-            print(f"[AUTO-ANNOTATE] No model_id specified, using default model")
-
-        print(f"[AUTO-ANNOTATE] Final model path: {model_path}")
-
-        # Confidence threshold
-        conf_threshold = getattr(request, 'confidence_threshold', 0.25)
-        print(f"[AUTO-ANNOTATE] Using confidence threshold: {conf_threshold}")
-
-        # 각 Asset에 대해 자동 어노테이션 실행
-        total_annotations = 0
-        annotated_images_count = 0
-        base_upload_dir = Path("uploads")
-        print(f"[AUTO-ANNOTATE] Base upload directory: {base_upload_dir.absolute()}")
-
-        # DatasetVersion에서 LabelClass 찾기
-        # v0 고정 정책 적용
-        dataset_version = get_or_create_dataset_version(db, request.dataset_id, 'v0')
-        if not dataset_version:
-            raise HTTPException(status_code=400, detail="Dataset version not found")
-        
-        ontology = dataset_version.ontology_version
-        label_classes = db.query(LabelClass).filter(
-            LabelClass.ontology_version_id == ontology.id
-        ).all()
-        label_class_map = {lc.display_name: lc for lc in label_classes}
-
-        for idx, asset in enumerate(assets, 1):
-            # S3 경로 또는 로컬 경로 처리
-            if asset.storage_uri.startswith('datasets/'):
-                img_path = base_upload_dir / asset.storage_uri
-            else:
-                img_path = Path(asset.storage_uri)
-            
-            filename = asset.storage_uri.split('/')[-1] if asset.storage_uri else f"asset_{asset.id}"
-            print(f"[AUTO-ANNOTATE] Processing asset {idx}/{len(assets)}: {filename}")
-            print(f"[AUTO-ANNOTATE] Asset path: {img_path}")
-
-            if not img_path.exists():
-                print(f"[AUTO-ANNOTATE] WARNING: Asset file not found: {img_path}")
-                continue
-
-            # 추론 실행 (AI service를 통해)
-            print(f"[AUTO-ANNOTATE] Running prediction via AI service...")
-            try:
-                result = await ai_client.predict(
-                    model_path=model_path,
-                    image_path=str(img_path),
-                    conf=conf_threshold
-                )
-                predictions = result.get('predictions', [])
-                print(f"[AUTO-ANNOTATE] Found {len(predictions)} predictions")
-            except Exception as e:
-                print(f"[AUTO-ANNOTATE] Prediction failed: {e}")
-                continue
-
-            # overwrite_existing이 True인 경우 기존 어노테이션 삭제
-            if request.overwrite_existing:
-                existing_annotations = db.query(Annotation).filter(Annotation.asset_id == asset.id).all()
-                if existing_annotations:
-                    print(f"[AUTO-ANNOTATE] Overwrite mode: Deleting {len(existing_annotations)} existing annotations for asset {asset.id}")
-                    for existing_ann in existing_annotations:
-                        db.delete(existing_ann)
-                    db.flush()
-                    print(f"[AUTO-ANNOTATE] Existing annotations deleted")
-
-            if predictions:
-                # 어노테이션 저장
-                for pred in predictions:
-                    # AI service returns Detection objects, convert to dict if needed
-                    if isinstance(pred, dict):
-                        bbox = pred['bbox']
-                        class_id = pred['class_id']
-                        class_name = pred['class_name']
-                        confidence = pred['confidence']
-                    else:
-                        # Pydantic model from AI service
-                        bbox = pred.bbox
-                        class_id = pred.class_id
-                        class_name = pred.class_name
-                        confidence = pred.confidence
-                    
-                    # LabelClass 찾기
-                    label_class = label_class_map.get(class_name)
-                    if not label_class:
-                        print(f"[AUTO-ANNOTATE] Warning: Label class '{class_name}' not found in ontology, skipping")
-                        continue
-                    
-                    ensure_yolo_index_for_dataset(db, request.dataset_id, label_class)    
-
-                    # Geometry 데이터 구성
-                    geometry_data = {
-                        "bbox": {
-                            "x_center": bbox['x_center'] if isinstance(bbox, dict) else bbox.get('x_center', 0),
-                            "y_center": bbox['y_center'] if isinstance(bbox, dict) else bbox.get('y_center', 0),
-                            "width": bbox['width'] if isinstance(bbox, dict) else bbox.get('width', 0),
-                            "height": bbox['height'] if isinstance(bbox, dict) else bbox.get('height', 0)
-                        }
-                    }
-                    
-                    from app.models.dataset import GeometryType
-                    
-                    db_annotation = Annotation(
-                        asset_id=asset.id,
-                        label_class_id=label_class.id,
-                        geometry_type=GeometryType.BBOX,
-                        geometry=geometry_data,
-                        is_normalized=True,
-                        source="model",
-                        confidence=confidence,
-                        annotator_name="auto-annotation"
-                    )
-                    db.add(db_annotation)
-                    total_annotations += 1
-
-                annotated_images_count += 1
-                print(f"[AUTO-ANNOTATE] Saved {len(predictions)} annotations for asset {filename}")
-
-        # 커밋
-        print(f"[AUTO-ANNOTATE] Committing {total_annotations} annotations...")
-        db.commit()
-        print("[AUTO-ANNOTATE] Committed successfully")
-
-        # Commit all annotations
-        db.commit()
-        upload_data_yaml_for_dataset(db, request.dataset_id)
-        print(f"[AUTO-ANNOTATE] Successfully created {total_annotations} annotations for {annotated_images_count} images")
-
-        result = {
-            "message": "Auto-annotation completed",
-            "dataset_id": request.dataset_id,
-            "model_id": request.model_id,
-            "status": "completed",
-            "total_images": len(assets),
-            "annotated_images": annotated_images_count,
-            "total_annotations": total_annotations,
-            "confidence_threshold": conf_threshold
-        }
-        print(f"[AUTO-ANNOTATE] SUCCESS: {result}")
-        return result
-
-    except Exception as e:
-        # 에러 발생 시 롤백
-        print(f"[AUTO-ANNOTATE] ERROR: {str(e)}")
-        print(f"[AUTO-ANNOTATE] Error type: {type(e).__name__}")
-        import traceback
-        print(f"[AUTO-ANNOTATE] Traceback:\n{traceback.format_exc()}")
-        db.rollback()
-
-        raise HTTPException(
-            status_code=500,
-            detail=f"Auto-annotation failed: {str(e)}"
-        )
 
 
 @router.get("/{dataset_id}/images/{image_id}/download")

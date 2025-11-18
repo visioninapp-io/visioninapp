@@ -49,8 +49,8 @@ class Progress:
             "message": message,
         }
         # event publish
-        # _safe_publish(self.ch, self.ex, f"job.{self.job_id}.progress.{stage}", body)
-        _safe_publish(self.ch, self.ex, f"job.progress.{stage}", body)
+        _safe_publish(self.ch, self.ex, f"job.{self.job_id}.progress.{stage}", body)
+        # _safe_publish(self.ch, self.ex, f"job.progress.{stage}", body)
 
     def done(self, artifact: dict, metrics: dict | None = None):
         body = {

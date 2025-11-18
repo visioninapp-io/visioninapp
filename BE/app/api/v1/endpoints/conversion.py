@@ -3,6 +3,8 @@ from sqlalchemy.orm import Session
 from typing import Optional, Literal
 from pydantic import BaseModel, Field
 import uuid
+import boto3
+from botocore.exceptions import ClientError
 
 from app.core.database import get_db
 from app.core.auth import get_current_user
@@ -12,6 +14,38 @@ from app.models.model_version import ModelVersion
 from app.rabbitmq.producer import send_onnx_request, send_trt_request
 
 router = APIRouter()
+
+
+@router.get("/next-version")
+async def get_next_conversion_version(
+    base_dir: str,
+    format: str,
+    current_user: dict = Depends(get_current_user)
+):
+    """
+    Conversion 결과의 다음 버전 번호를 반환
+    base_dir: 모델의 기본 디렉토리 (예: models/model_1/artifacts)
+    format: 변환 형식 (예: onnx, tensorrt)
+    """
+    try:
+        s3_client = boto3.client(
+            's3',
+            aws_access_key_id=settings.AWS_ACCESS_KEY_ID,
+            aws_secret_access_key=settings.AWS_SECRET_ACCESS_KEY,
+            region_name=settings.AWS_REGION
+        )
+        
+        version = _get_next_conversion_version(
+            s3_client, 
+            settings.AWS_BUCKET_NAME, 
+            base_dir, 
+            format
+        )
+        
+        return {"version": version}
+    except Exception as e:
+        # 에러 발생 시 v1 반환
+        return {"version": "v1"}
 
 # Pydantic Models for Request Validation
 class ModelInfo(BaseModel):
@@ -56,6 +90,48 @@ def _key_from_s3_uri(s3_uri: str) -> str:
     if len(parts) < 4:
         return ""
     return parts[3]
+
+def _get_next_conversion_version(s3_client, bucket: str, base_dir: str, format: str) -> str:
+    """
+    S3에서 해당 모델의 format 폴더 내 최신 버전을 조회하여 다음 버전 반환
+    base_dir: 모델의 기본 디렉토리 (예: models/model_1/artifacts)
+    format: 변환 형식 (예: onnx, tensorrt)
+    반환: "v1", "v2", "v3"...
+    """
+    try:
+        prefix = f"{base_dir.rstrip('/')}/{format}/"
+        
+        # S3에서 해당 prefix의 폴더 목록 조회
+        response = s3_client.list_objects_v2(
+            Bucket=bucket,
+            Prefix=prefix,
+            Delimiter='/'
+        )
+        
+        # CommonPrefixes에서 버전 폴더들 추출
+        versions = []
+        if 'CommonPrefixes' in response:
+            for obj in response['CommonPrefixes']:
+                folder_name = obj['Prefix'].rstrip('/').split('/')[-1]  # 마지막 폴더명 (예: v1, v2)
+                if folder_name.startswith('v') and folder_name[1:].isdigit():
+                    version_num = int(folder_name[1:])
+                    versions.append(version_num)
+        
+        # 다음 버전 계산
+        if versions:
+            next_version = max(versions) + 1
+        else:
+            next_version = 1
+        
+        return f"v{next_version}"
+        
+    except ClientError as e:
+        # 에러 발생 시 v1 반환
+        return "v1"
+    except Exception as e:
+        # 예외 발생 시 v1 반환
+        return "v1"
+
 
 def _ensure_child_artifact(db: Session, *, src_key: str, out_prefix: str, out_name: str, out_format: str) -> ModelArtifact:
     """

@@ -863,6 +863,11 @@ class APIService {
         return this.post(`/models/${modelId}/predict`, data);
     }
 
+    async getNextConversionVersion(baseDir, format) {
+        console.log('[API] Getting next conversion version...', { baseDir, format });
+        return this.get('/conversion/next-version', { base_dir: baseDir, format: format });
+    }
+
     async convertToOnnx(payload) {
         console.log('[API] Converting model to ONNX...', payload);
         return this.post('/conversion/onnx', payload);
@@ -988,11 +993,12 @@ class APIService {
         }
     }
 
-    async getTrainingResultsFromS3(modelName) {
-        console.log(`[API] Fetching training results from S3 for model ${modelName}...`);
+    async getTrainingResultsFromS3(modelPath) {
+        console.log(`[API] Fetching training results from S3 for path: ${modelPath}...`);
         try {
-            // Fetch result.csv from S3: /{model_name}/results.csv
-            const endpoint = `/training/results/${modelName}/results.csv`;
+            // Fetch results.csv from S3: models/{dataset_name}/{train_type}/{version}/results.csv
+            // Example: modelPath = "pothole/train/v1" -> GET /training/results/pothole/train/v1/results.csv
+            const endpoint = `/training/results/${modelPath}/results.csv`;
             console.log(`[API] Fetching CSV from: ${this.baseURL}${endpoint}`);
 
             // Build headers manually

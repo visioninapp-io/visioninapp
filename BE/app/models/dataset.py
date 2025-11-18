@@ -40,7 +40,7 @@ class Annotation(Base):
     id = Column(Integer, primary_key=True, index=True)
     asset_id = Column(Integer, ForeignKey("asset.id"), nullable=False, index=True, comment="대상에셋ID")
     label_class_id = Column(Integer, ForeignKey("label_class.id"), nullable=False, index=True, comment="라벨 클래스ID")
-    model_version_id = Column(Integer, ForeignKey("model_version.id"), nullable=True, index=True, comment="자동 생성 모델 ID")
+    model_version_id = Column(Integer, ForeignKey("model_version.id", ondelete="SET NULL"), nullable=True, index=True, comment="자동 생성 모델 ID")
     
     geometry_type = Column(Enum(GeometryType), nullable=False, comment="형태")
     geometry = Column(JSON, nullable=False, comment="좌표/포인트 데이터")

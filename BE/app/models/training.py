@@ -22,7 +22,7 @@ class TrainingJob(Base):
     name = Column(String(255), unique=True, index=True)
 
     dataset_id = Column(Integer, ForeignKey("dataset.id"))
-    model_id = Column(Integer, ForeignKey("model.id"), nullable=True)
+    model_id = Column(Integer, ForeignKey("model.id", ondelete="CASCADE"), nullable=True)
 
     status = Column(String(50), default=TrainingStatus.PENDING.value)
 

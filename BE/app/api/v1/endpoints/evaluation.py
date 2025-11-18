@@ -92,15 +92,28 @@ async def get_completed_trainings(
     for job in completed_jobs:
         model = db.query(Model).filter(Model.id == job.model_id).first() if job.model_id else None
         
-        # model_key 추출 (S3 경로에 사용)
-        # training.py와 동일한 방식으로 생성
+        # model_name 추출
         if model:
             model_name = model.name
         else:
             # model이 없으면 job.name을 사용
-            model_name = f"{job.name}_model"
+            model_name = job.name
         
-        model_key = _slugify_model_name(model_name)
+        # S3 경로 구성 (training.py의 sync-completed-status와 동일한 로직)
+        hp = job.hyperparameters or {}
+        dataset_name = hp.get('dataset_name')
+        version = hp.get('version')
+        is_ai = hp.get('ai_mode', False)
+        
+        # 필수 정보가 없으면 이 job은 건너뛰기 (results.csv를 찾을 수 없음)
+        if not dataset_name or not version:
+            logger.warning(f"[Evaluation] Skipping job {job.id} ({job.name}) - missing dataset_name or version in hyperparameters")
+            continue
+        
+        # model_key: S3 경로를 기반으로 생성 (예: "dataset_name/train/v1" 또는 "dataset_name/ai-train/v1")
+        train_type = 'ai-train' if is_ai else 'train'
+        model_path = f"{dataset_name}/{train_type}/{version}"
+        model_key = model_path  # 실제 S3 경로를 model_key로 사용
         
         result.append({
             "id": job.id,
@@ -117,7 +130,7 @@ async def get_completed_trainings(
     return result
 
 
-@router.get("/results/{model_key}")
+@router.get("/results/{model_key:path}")
 async def get_evaluation_results(
     model_key: str,
     current_user: dict = Depends(get_current_user)
@@ -126,6 +139,8 @@ async def get_evaluation_results(
     Get training results CSV from S3 for evaluation
     Returns parsed CSV data as JSON
     Path: s3://bucket/models/{model_key}/results.csv
+    
+    model_key format: "{dataset_name}/{train_type}/{version}" (e.g., "pothole/train/v1")
     """
     try:
         logger.info(f"[Evaluation] Fetching results.csv for model_key: {model_key}")
@@ -139,6 +154,7 @@ async def get_evaluation_results(
         )
 
         # S3 key for results.csv
+        # model_key는 "dataset_name/train/v1" 형식
         s3_key = f"models/{model_key}/results.csv"
 
         logger.info(f"[Evaluation] Downloading from s3://{settings.AWS_BUCKET_NAME}/{s3_key}")
@@ -178,9 +194,22 @@ async def get_evaluation_results(
         error_code = e.response.get('Error', {}).get('Code', 'Unknown')
         if error_code == 'NoSuchKey':
             logger.warning(f"[Evaluation] File not found: s3://{settings.AWS_BUCKET_NAME}/{s3_key}")
+            # S3에 실제로 어떤 파일들이 있는지 확인 (디버깅용)
+            try:
+                prefix = f"models/{model_key}/"
+                list_response = s3_client.list_objects_v2(
+                    Bucket=settings.AWS_BUCKET_NAME,
+                    Prefix=prefix,
+                    MaxKeys=10
+                )
+                existing_files = [obj['Key'] for obj in list_response.get('Contents', [])]
+                logger.info(f"[Evaluation] Files in {prefix}: {existing_files}")
+            except Exception as list_err:
+                logger.debug(f"[Evaluation] Could not list files: {list_err}")
+            
             raise HTTPException(
                 status_code=404,
-                detail=f"Results file not found for model '{model_key}'. The training may not have completed yet."
+                detail=f"Results file not found for model '{model_key}'. Expected: s3://{settings.AWS_BUCKET_NAME}/{s3_key}. The training may not have completed yet or the file may not have been uploaded."
             )
         else:
             logger.error(f"[Evaluation] S3 error: {e}")

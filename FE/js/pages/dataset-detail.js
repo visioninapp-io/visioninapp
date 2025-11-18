@@ -17,6 +17,9 @@ class DatasetDetailPage {
     }
 
     async init() {
+        // Store reference to this page instance globally for modal access
+        window.currentDatasetDetailPage = this;
+        
         await this.loadDataset();
         await this.loadVersions();
         await this.loadLabelClasses();
@@ -112,6 +115,70 @@ class DatasetDetailPage {
         } catch (error) {
             console.error('Error loading images:', error);
             this.images = [];
+        }
+    }
+
+    // Update dataset information in the UI without full page reload
+    async updateDatasetInfo() {
+        try {
+            console.log('[DatasetDetail] Updating dataset info...');
+            // Reload dataset from API
+            await this.loadDataset();
+            
+            // Update the dataset info section in the DOM
+            const totalImagesEl = document.querySelector('.card-body h4');
+            const annotatedEl = document.querySelectorAll('.card-body h4')[1];
+            const progressBar = document.querySelector('.progress-bar.bg-success');
+            
+            if (totalImagesEl) {
+                totalImagesEl.textContent = this.dataset.total_images || 0;
+            }
+            if (annotatedEl) {
+                annotatedEl.textContent = this.dataset.annotated_images || 0;
+            }
+            if (progressBar) {
+                progressBar.style.width = `${this.calculateAnnotationProgress()}%`;
+            }
+            
+            console.log('[DatasetDetail] Dataset info updated:', {
+                total: this.dataset.total_images,
+                annotated: this.dataset.annotated_images
+            });
+
+            // Reload images to update is_annotated status for all images
+            await this.loadImages();
+            
+            // Update image grid to reflect changes
+            this.updateImageGrid();
+            
+            console.log('[DatasetDetail] Image list updated');
+        } catch (error) {
+            console.error('[DatasetDetail] Error updating dataset info:', error);
+        }
+    }
+
+    // Update image grid without full page reload
+    updateImageGrid() {
+        const galleryContainer = document.getElementById('image-gallery');
+        if (!galleryContainer) {
+            console.warn('[DatasetDetail] Image gallery container not found');
+            return;
+        }
+
+        // Re-render the gallery
+        const galleryHTML = this.renderImageGallery();
+        
+        // Find the parent container and update
+        const parentContainer = galleryContainer.parentElement;
+        if (parentContainer) {
+            // Create a temporary div to parse the HTML
+            const tempDiv = document.createElement('div');
+            tempDiv.innerHTML = galleryHTML;
+            
+            // Replace the gallery content
+            galleryContainer.parentElement.innerHTML = galleryHTML;
+            
+            console.log('[DatasetDetail] Image grid updated');
         }
     }
 
@@ -1498,6 +1565,27 @@ async function saveViewerAnnotations() {
 
             // Update image annotation status
             updateImageAnnotationStatus();
+
+            // Update dataset information (total/annotated counts)
+            // Check both dataset-detail page and datasets list page
+            const detailPage = window.currentDatasetDetailPage;
+            const datasetsPage = window.currentDatasetsPage;
+            
+            console.log('[ViewerAnnotation] Checking for page instances...');
+            console.log('[ViewerAnnotation] Dataset detail page:', !!detailPage);
+            console.log('[ViewerAnnotation] Datasets list page:', !!datasetsPage);
+            
+            if (detailPage && detailPage.updateDatasetInfo) {
+                console.log('[ViewerAnnotation] Calling updateDatasetInfo on detail page...');
+                await detailPage.updateDatasetInfo();
+                console.log('[ViewerAnnotation] Detail page update completed');
+            } else if (datasetsPage && datasetsPage.updateDataInfo) {
+                console.log('[ViewerAnnotation] Calling updateDataInfo on datasets page...');
+                await datasetsPage.updateDataInfo();
+                console.log('[ViewerAnnotation] Datasets page update completed');
+            } else {
+                console.warn('[ViewerAnnotation] Cannot update dataset info - no page instance found');
+            }
         }
 
         if (failCount > 0 || deleteFailCount > 0) {

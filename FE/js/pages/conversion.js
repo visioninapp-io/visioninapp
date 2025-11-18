@@ -5,6 +5,7 @@ class ConversionPage {
         this.models = [];
         this.selectedModelId = null;
         this.selectedS3Uri = null;
+        this.selectedS3Key = null;
     }
 
     async init() {
@@ -23,7 +24,7 @@ class ConversionPage {
             this.models = trainedModels.map(m => ({
                 id: m.id || m.model_id || m.model_name,
                 model_id: m.model_id,
-                name: m.model_name,
+                name: m.model_name || '',
                 s3_key: m.s3_key || m.relative_path,
                 s3_uri: m.s3_bucket ? `s3://${m.s3_bucket}/${m.s3_key || m.relative_path}` : null,
                 file_size_mb: m.file_size_mb,
@@ -40,7 +41,7 @@ class ConversionPage {
         }
     }
 
-    selectModel(modelId, s3Uri, hasArtifact) {
+    selectModel(modelId, s3Uri, hasArtifact, s3Key) {
         if (!s3Uri) {
             alert('This model does not have a valid S3 URI. Please ensure the model has been uploaded to S3.');
             return;
@@ -60,6 +61,7 @@ class ConversionPage {
         
         this.selectedModelId = modelId;
         this.selectedS3Uri = s3Uri;
+        this.selectedS3Key = s3Key;
         
         // UI 업데이트 (선택된 모델 하이라이트)
         document.querySelectorAll('.model-card').forEach(card => {
@@ -88,14 +90,31 @@ class ConversionPage {
             
             const format = formatSelect.value;
             const precision = precisionSelect.value;
-            const timestamp = Date.now();
+
+            // 트레이닝된 모델의 원본 경로를 기준으로 conversion 경로 구성
+            // 원본: models/{dataset_name}/train/{version}/best.pt
+            // 결과: models/{dataset_name}/train/{version}/{format}/{version}/model.{ext}
+            if (!this.selectedS3Key) {
+                alert('모델의 S3 경로 정보가 없습니다. 모델을 다시 선택해주세요.');
+                return;
+            }
+
+            // S3 key에서 파일명을 제거하고 디렉토리 경로만 가져오기
+            const s3KeyParts = this.selectedS3Key.split('/');
+            s3KeyParts.pop(); // 마지막 파일명 제거
+            const baseDir = s3KeyParts.join('/');
+
+            // 다음 버전 번호 가져오기
+            const versionResponse = await window.apiService.getNextConversionVersion(baseDir, format);
+            const version = versionResponse.version || 'v1';
+            const prefix = `${baseDir}/${format}/${version}`;
 
             const payload = {
                 model: {
                     s3_uri: this.selectedS3Uri
                 },
                 output: {
-                    prefix: `exports/${format}/${timestamp}`
+                    prefix: prefix
                 }
             };
 
@@ -150,7 +169,7 @@ class ConversionPage {
         modelsContainer.innerHTML = this.models.map(model => `
             <div class="card mb-3 hover-shadow cursor-pointer model-card ${!model.hasArtifact ? 'border-warning' : ''}" 
                  data-model-id="${model.id}"
-                 onclick="window.currentPage.selectModel('${model.id}', '${model.s3_uri || ''}', ${model.hasArtifact})">
+                 onclick="window.currentPage.selectModel('${model.id}', '${model.s3_uri || ''}', ${model.hasArtifact}, '${model.s3_key || ''}')">
                 <div class="card-body">
                     <div class="d-flex justify-content-between align-items-center">
                         <div>

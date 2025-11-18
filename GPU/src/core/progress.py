@@ -91,7 +91,7 @@ class Progress:
             "epoch": int(epoch),
             "metrics": metrics or {},
         }
-        _safe_publish(self.ch, self.ex, "train.log", body)
+        _safe_publish(self.ch, self.ex, f"train.{self.job_id}.log", body)
 
     def train_llm_log(self, epoch: int , total_epochs: int | None = None):
         """
@@ -115,4 +115,4 @@ class Progress:
             "total_epochs": int(total_epochs),
             "percentage": int(percentage)
         }
-        _safe_publish(self.ch, self.ex, "train.llm.log", body)
+        _safe_publish(self.ch, self.ex, f"train.llm.{self.job_id}.log", body)

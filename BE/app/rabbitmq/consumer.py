@@ -25,7 +25,7 @@ def start_inference_consumer(handler: Callable[[dict], None]):
     # Queue 선언
     queue_name = "be.inference.done"
     ch.queue_declare(queue=queue_name, durable=True)
-
+    ch.queue_bind(exchange="jobs.events", queue="be.inference.done", routing_key="inference.done")
     # Binding: jobs.events exchange -> inference_done queue (routing_key: inference.done)
     ch.queue_bind(
         exchange=EXCHANGE_EVENTS,

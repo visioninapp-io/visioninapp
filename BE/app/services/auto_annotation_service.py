@@ -69,6 +69,21 @@ def handle_inference_done(payload: dict):
 
         log.info(f"[INFERENCE-DONE] Using ontology_id={ontology.id} for dataset {dataset_id}")
 
+        # S3에서 data.yaml 읽어서 클래스 이름 가져오기
+        data_yaml_key = f"datasets/{dataset.name}/data.yaml"
+        class_names = {}
+        try:
+            yaml_content = file_storage.download_from_s3(data_yaml_key)
+            if yaml_content:
+                import yaml
+                data_yaml = yaml.safe_load(yaml_content.decode("utf-8"))
+                names = data_yaml.get("names", [])
+                # names를 yolo_index로 매핑 (index 0부터 시작)
+                class_names = {i: name for i, name in enumerate(names)}
+                log.info(f"[INFERENCE-DONE] Loaded {len(class_names)} classes from data.yaml: {class_names}")
+        except Exception as e:
+            log.warning(f"[INFERENCE-DONE] Failed to load data.yaml from S3: {str(e)}")
+
         total_annotations = 0
 
         # S3에서 label 파일 읽기 및 DB 저장
@@ -128,9 +143,29 @@ def handle_inference_done(payload: dict):
                         LabelClass.yolo_index == yolo_class_id
                     ).first()
 
+                    # LabelClass가 없으면 자동 생성 (data.yaml의 names 사용)
                     if not label_class:
                         log.warning(f"[INFERENCE-DONE] LabelClass not found for ontology_id={ontology.id}, yolo_index={yolo_class_id}")
-                        continue
+
+                        # data.yaml에서 클래스 이름 가져오기
+                        class_name = class_names.get(yolo_class_id)
+                        if not class_name:
+                            class_name = f"class_{yolo_class_id}"
+
+                        # 랜덤 색상 생성
+                        import random
+                        color = "#{:06x}".format(random.randint(0, 0xFFFFFF))
+
+                        # LabelClass 생성
+                        label_class = LabelClass(
+                            ontology_version_id=ontology.id,
+                            display_name=class_name,
+                            color=color,
+                            yolo_index=yolo_class_id
+                        )
+                        db.add(label_class)
+                        db.flush()  # ID 생성
+                        log.info(f"[INFERENCE-DONE] Created new LabelClass: {class_name} (yolo_index={yolo_class_id}, id={label_class.id})")
 
                     # Geometry 데이터
                     geometry_data = {

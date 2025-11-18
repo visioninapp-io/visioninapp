@@ -43,6 +43,50 @@ def _slugify_model_name(s: str) -> str:
     return s or "model"
 
 
+def _get_next_version(s3_client, bucket: str, dataset_name: str, train_type: str) -> str:
+    """
+    S3에서 해당 dataset의 train_type 폴더 내 최신 버전을 조회하여 다음 버전 반환
+    train_type: "train" 또는 "ai-train"
+    반환: "v1", "v2", "v3"...
+    """
+    try:
+        prefix = f"models/{dataset_name}/{train_type}/"
+        logger.info(f"[Version] Checking S3 for existing versions: {prefix}")
+        
+        # S3에서 해당 prefix의 폴더 목록 조회
+        response = s3_client.list_objects_v2(
+            Bucket=bucket,
+            Prefix=prefix,
+            Delimiter='/'
+        )
+        
+        # CommonPrefixes에서 버전 폴더들 추출
+        versions = []
+        if 'CommonPrefixes' in response:
+            for obj in response['CommonPrefixes']:
+                folder_name = obj['Prefix'].rstrip('/').split('/')[-1]  # 마지막 폴더명 (예: v1, v2)
+                if folder_name.startswith('v') and folder_name[1:].isdigit():
+                    version_num = int(folder_name[1:])
+                    versions.append(version_num)
+        
+        # 다음 버전 계산
+        if versions:
+            next_version = max(versions) + 1
+            logger.info(f"[Version] Found existing versions: {sorted(versions)}, next: v{next_version}")
+        else:
+            next_version = 1
+            logger.info(f"[Version] No existing versions found, starting with v1")
+        
+        return f"v{next_version}"
+        
+    except ClientError as e:
+        logger.warning(f"[Version] Error checking S3 versions: {e}, defaulting to v1")
+        return "v1"
+    except Exception as e:
+        logger.warning(f"[Version] Unexpected error checking versions: {e}, defaulting to v1")
+        return "v1"
+
+
 def _get_or_create_model(db: Session, *, name: str, project_id: int, task: str | None = None, description: str | None = None) -> Model:
     m = db.query(Model).filter(Model.name == name, Model.project_id == project_id).first()
     if m:
@@ -147,17 +191,25 @@ async def delete_training_job(
                                     logger.warning(f"[Training] Error deleting S3 object {artifact.storage_uri}: {e}")
                                     # Continue even if S3 deletion fails
                     
-                    # Also delete results.csv if exists (based on model_key)
+                    # Also delete results.csv if exists (using new path structure)
                     try:
-                        model_name = model.name
-                        model_key = _slugify_model_name(model_name)
-                        results_csv_key = f"models/{model_key}/results.csv"
+                        # 새 경로 구조: models/{dataset_name}/{train_type}/{version}/results.csv
+                        hp = job.hyperparameters or {}
+                        dataset_name = hp.get('dataset_name')
+                        version = hp.get('version')
+                        is_ai = hp.get('ai_mode', False)
                         
-                        s3_client.delete_object(
-                            Bucket=settings.AWS_BUCKET_NAME,
-                            Key=results_csv_key
-                        )
-                        logger.info(f"[Training] Successfully deleted results.csv from S3: {results_csv_key}")
+                        if dataset_name and version:
+                            train_type = 'ai-train' if is_ai else 'train'
+                            results_csv_key = f"models/{dataset_name}/{train_type}/{version}/results.csv"
+                            
+                            s3_client.delete_object(
+                                Bucket=settings.AWS_BUCKET_NAME,
+                                Key=results_csv_key
+                            )
+                            logger.info(f"[Training] Successfully deleted results.csv from S3: {results_csv_key}")
+                        else:
+                            logger.warning(f"[Training] Cannot determine S3 path for job {job.id} - missing dataset_name or version")
                     except ClientError as e:
                         error_code = e.response.get('Error', {}).get('Code', 'Unknown')
                         if error_code != 'NoSuchKey':
@@ -167,25 +219,39 @@ async def delete_training_job(
                 
                 # Delete model from database (cascade will handle versions and artifacts)
                 db.delete(model)
+                # 모델 삭제를 먼저 commit하여 확실히 삭제
+                db.commit()
                 logger.info(f"[Training] Deleted associated model {job.model_id} for job {job_id}")
             except Exception as e:
+                db.rollback()
                 logger.error(f"[Training] Error deleting model {job.model_id}: {e}", exc_info=True)
-                # Continue with job deletion even if model deletion fails
+                # 모델 삭제 실패 시 job 삭제도 중단
+                raise HTTPException(
+                    status_code=500,
+                    detail=f"Failed to delete associated model: {str(e)}"
+                )
     
-    # Even if model_id is None, try to delete potential S3 files based on job name
+    # Even if model_id is None, try to delete potential S3 files based on hyperparameters
     # This handles cases like LLM training where model might not be created yet
     if not job.model_id and s3_client:
         try:
-            # Try to delete results.csv based on job name (common pattern: {job_name}_model)
-            model_name = f"{job.name}_model"
-            model_key = _slugify_model_name(model_name)
-            results_csv_key = f"models/{model_key}/results.csv"
+            # 새 경로 구조로 삭제 시도
+            hp = job.hyperparameters or {}
+            dataset_name = hp.get('dataset_name')
+            version = hp.get('version')
+            is_ai = hp.get('ai_mode', False)
             
-            s3_client.delete_object(
-                Bucket=settings.AWS_BUCKET_NAME,
-                Key=results_csv_key
-            )
-            logger.info(f"[Training] Successfully deleted results.csv from S3 (no model_id): {results_csv_key}")
+            if dataset_name and version:
+                train_type = 'ai-train' if is_ai else 'train'
+                results_csv_key = f"models/{dataset_name}/{train_type}/{version}/results.csv"
+                
+                s3_client.delete_object(
+                    Bucket=settings.AWS_BUCKET_NAME,
+                    Key=results_csv_key
+                )
+                logger.info(f"[Training] Successfully deleted results.csv from S3 (no model_id): {results_csv_key}")
+            else:
+                logger.warning(f"[Training] Cannot determine S3 path for job {job.id} (no model_id) - missing hyperparameters")
         except ClientError as e:
             error_code = e.response.get('Error', {}).get('Code', 'Unknown')
             if error_code != 'NoSuchKey':
@@ -220,11 +286,24 @@ async def create_training_job(
     dataset_name = dataset.name
     dataset_s3_prefix = f"datasets/{dataset_name}/"
 
+    # S3 client 초기화 (버전 확인용)
+    s3_client = boto3.client(
+        's3',
+        aws_access_key_id=settings.AWS_ACCESS_KEY_ID,
+        aws_secret_access_key=settings.AWS_SECRET_ACCESS_KEY,
+        region_name=settings.AWS_REGION
+    )
+    
+    # 다음 버전 번호 가져오기
+    version = _get_next_version(s3_client, settings.AWS_BUCKET_NAME, dataset_name, "train")
+
     # 2) HP 병합
     hp = {
         **(job.hyperparameters or {}),
         "dataset_name": dataset_name,
-        "dataset_s3_prefix": dataset_s3_prefix
+        "dataset_s3_prefix": dataset_s3_prefix,
+        "version": version,
+        "output_prefix": f"models/{dataset_name}/train/{version}"
     }
     total_epochs = hp.get("epochs", 20)
 
@@ -246,7 +325,7 @@ async def create_training_job(
     # 5) model / v0
     default_project = get_or_create_default_project(db, current_user["uid"])
     model = _get_or_create_model(
-        db, name=f"{job.name}_model", project_id=default_project.id, task=None, description=f"Model for {job.name}"
+        db, name=job.name, project_id=default_project.id, task=None, description=f"Model for {job.name}"
     )
     framework_str = job.architecture
     framework_version_str = getattr(settings, "FRAMEWORK_VERSION", None) or "unknown"
@@ -265,11 +344,9 @@ async def create_training_job(
 
     # 7) 아티팩트(PT) 선점 INSERT (storage_uri만 확정)
     try:
-        model_name = f"{job.name}_model"
-        model_key = _slugify_model_name(model_name)
-
-        # Use best.pt as standard name (not dataset-specific)
-        object_key = f"models/{model_key}/best.pt"  # 버킷 제외 S3 key
+        # 새로운 경로 구조: models/{dataset_name}/train/{version}/best.pt
+        object_key = f"models/{dataset_name}/train/{version}/best.pt"
+        
         # 중복 방지: 같은 v0에서 같은 key가 있으면 재사용
         artifact = db.query(ModelArtifact).filter(
             ModelArtifact.model_version_id == mv.id,
@@ -309,7 +386,7 @@ async def create_training_job(
                 "name": dataset_name
             },
             "output": {
-                "prefix": f"models/{model_key}",  # Each job gets unique output path
+                "prefix": f"models/{dataset_name}/train/{version}",  # 새로운 경로 구조
                 "model_name": "best.pt",
                 "metrics_name": "results.csv"
             },
@@ -377,6 +454,17 @@ async def create_llm_training(
     else:
         raise HTTPException(status_code=400, detail="Either dataset_id or dataset_name is required")
     
+    # S3 client 초기화 (버전 확인용)
+    s3_client = boto3.client(
+        's3',
+        aws_access_key_id=settings.AWS_ACCESS_KEY_ID,
+        aws_secret_access_key=settings.AWS_SECRET_ACCESS_KEY,
+        region_name=settings.AWS_REGION
+    )
+    
+    # 다음 버전 번호 가져오기
+    version = _get_next_version(s3_client, settings.AWS_BUCKET_NAME, dataset_name, "ai-train")
+    
     # TrainingJob 생성
     job_name = dataset_name
     db_job = TrainingJob(
@@ -387,7 +475,9 @@ async def create_llm_training(
             "user_query": user_query,
             "dataset_name": dataset_name,
             "dataset_s3_prefix": dataset_s3_prefix or f"datasets/{dataset_name}/",
-            "ai_mode": True
+            "ai_mode": True,
+            "version": version,
+            "output_prefix": f"models/{dataset_name}/ai-train/{version}"
         },
         status=TrainingStatus.PENDING,
         created_by=current_user["uid"]
@@ -404,7 +494,7 @@ async def create_llm_training(
     
     # Model 생성
     model = _get_or_create_model(
-        db, name=f"{job_name}_model", project_id=default_project.id, task=None, description=f"Model for {job_name}"
+        db, name=job_name, project_id=default_project.id, task=None, description=f"Model for {job_name}"
     )
     
     # ModelVersion 생성
@@ -427,9 +517,8 @@ async def create_llm_training(
     
     # 아티팩트(PT) 선점 INSERT (storage_uri만 확정)
     try:
-        model_name = f"{job_name}_model"
-        model_key = _slugify_model_name(model_name)
-        object_key = f"models/{model_key}/best.pt"
+        # 새로운 경로 구조: models/{dataset_name}/ai-train/{version}/best.pt
+        object_key = f"models/{dataset_name}/ai-train/{version}/best.pt"
         
         # 중복 방지: 같은 v0에서 같은 key가 있으면 재사용
         artifact = db.query(ModelArtifact).filter(
@@ -490,8 +579,12 @@ def run_llm_training_pipeline(job_id: int, user_query: str, dataset_path: str):
         
         logger.info(f"[LLM Training] Generated external_job_id: {external_job_id} for job {job_id}")
         
-        # LLM 기반 학습 파이프라인 실행 (UUID 전달)
-        builder(user_query, dataset_path, external_job_id)
+        # hyperparameters에서 output_prefix 가져오기 (train_trial에서 사용)
+        hp = job.hyperparameters or {}
+        output_prefix = hp.get("output_prefix")
+        
+        # LLM 기반 학습 파이프라인 실행 (UUID와 output_prefix 전달)
+        builder(user_query, dataset_path, external_job_id, output_prefix)
         
         job.status = TrainingStatus.COMPLETED
         job.training_log = "AI training completed successfully"
@@ -588,16 +681,18 @@ async def sync_completed_status(
     
     for job in running_jobs:
         try:
-            # Get model_key from job
-            model = db.query(Model).filter(Model.id == job.model_id).first() if job.model_id else None
+            # 새 경로 구조에서 S3 경로 생성
+            hp = job.hyperparameters or {}
+            dataset_name = hp.get('dataset_name')
+            version = hp.get('version')
+            is_ai = hp.get('ai_mode', False)
             
-            if model:
-                model_name = model.name
-            else:
-                model_name = f"{job.name}_model"
+            if not dataset_name or not version:
+                logger.debug(f"[Training] Skipping job {job.id} - missing dataset_name or version in hyperparameters")
+                continue
             
-            model_key = _slugify_model_name(model_name)
-            s3_key = f"models/{model_key}/results.csv"
+            train_type = 'ai-train' if is_ai else 'train'
+            s3_key = f"models/{dataset_name}/{train_type}/{version}/results.csv"
             
             # Check if results.csv exists in S3
             try:
@@ -611,16 +706,16 @@ async def sync_completed_status(
                     job.status = TrainingStatus.COMPLETED
                     if not job.completed_at:
                         job.completed_at = datetime.utcnow()
-                    job.training_log = (job.training_log or "") + f"\nAuto-detected completion (results.csv found in S3)"
+                    job.training_log = (job.training_log or "") + f"\nAuto-detected completion (results.csv found in S3: {s3_key})"
                     db.commit()
                     
                     updated_count += 1
                     updated_jobs.append({
                         "id": job.id,
                         "name": job.name,
-                        "model_key": model_key
+                        "s3_path": s3_key
                     })
-                    logger.info(f"[Training] Auto-marked job {job.id} ({job.name}) as completed - results.csv found")
+                    logger.info(f"[Training] Auto-marked job {job.id} ({job.name}) as completed - results.csv found at {s3_key}")
                     
             except ClientError as e:
                 if e.response.get('Error', {}).get('Code') == '404':
@@ -640,17 +735,21 @@ async def sync_completed_status(
     }
 
 
-@router.get("/results/{model_name}/results.csv")
+@router.get("/results/{model_path:path}/results.csv")
 async def get_training_results_csv(
-    model_name: str,
+    model_path: str,
     current_user: dict = Depends(get_current_user)
 ):
     """
     Get training results CSV from S3
-    Path: s3://bucket/models/{model_name}/results.csv
+    New path structure: s3://bucket/models/{dataset_name}/{train_type}/{version}/results.csv
+    - train_type: "train" or "ai-train"
+    - version: "v1", "v2", "v3"...
+    
+    Example: model_path = "pothole/train/v1" -> s3://bucket/models/pothole/train/v1/results.csv
     """
     try:
-        logger.info(f"[Training Results] Fetching results.csv for model: {model_name}")
+        logger.info(f"[Training Results] Fetching results.csv for path: {model_path}")
 
         # Initialize S3 client
         s3_client = boto3.client(
@@ -660,8 +759,8 @@ async def get_training_results_csv(
             region_name=settings.AWS_REGION
         )
 
-        # S3 key for results.csv
-        s3_key = f"models/{model_name}/results.csv"
+        # S3 key for results.csv (model_path already contains the full path like "pothole/train/v1")
+        s3_key = f"models/{model_path}/results.csv"
 
         logger.info(f"[Training Results] Downloading from s3://{settings.AWS_BUCKET_NAME}/{s3_key}")
 
@@ -677,11 +776,13 @@ async def get_training_results_csv(
         logger.info(f"[Training Results] Successfully fetched results.csv ({len(csv_content)} bytes)")
 
         # Return as CSV response
+        # Use safe filename (replace slashes with underscores)
+        safe_filename = model_path.replace('/', '_')
         return Response(
             content=csv_content,
             media_type='text/csv',
             headers={
-                'Content-Disposition': f'attachment; filename="{model_name}_results.csv"'
+                'Content-Disposition': f'attachment; filename="{safe_filename}_results.csv"'
             }
         )
 
@@ -689,9 +790,22 @@ async def get_training_results_csv(
         error_code = e.response.get('Error', {}).get('Code', 'Unknown')
         if error_code == 'NoSuchKey':
             logger.warning(f"[Training Results] File not found: s3://{settings.AWS_BUCKET_NAME}/{s3_key}")
+            # S3에 실제로 어떤 파일들이 있는지 확인 (디버깅용)
+            try:
+                prefix = f"models/{model_path}/"
+                list_response = s3_client.list_objects_v2(
+                    Bucket=settings.AWS_BUCKET_NAME,
+                    Prefix=prefix,
+                    MaxKeys=10
+                )
+                existing_files = [obj['Key'] for obj in list_response.get('Contents', [])]
+                logger.info(f"[Training Results] Files in {prefix}: {existing_files}")
+            except Exception as list_err:
+                logger.debug(f"[Training Results] Could not list files: {list_err}")
+            
             raise HTTPException(
                 status_code=404,
-                detail=f"Results file not found for model '{model_name}'"
+                detail=f"Results file not found for path '{model_path}'. Expected: s3://{settings.AWS_BUCKET_NAME}/{s3_key}. The training may not have completed yet or the file may not have been uploaded."
             )
         else:
             logger.error(f"[Training Results] S3 error: {e}")

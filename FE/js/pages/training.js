@@ -759,13 +759,39 @@ class TrainingPage {
     async loadS3MetricsForJob(job) {
         /**
          * Load metrics from S3 results.csv for a job
+         * New path structure: models/{dataset_name}/{train_type}/{version}/results.csv
+         * - train_type: "train" (일반) or "ai-train" (AI 학습)
+         * - version: "v1", "v2", "v3"...
          */
-        if (!job || !job.name) return null;
+        if (!job || !job.hyperparameters?.version || !job.hyperparameters?.dataset_name) {
+            console.warn('[Training Page] Missing required info for S3 path:', {
+                job_id: job?.id,
+                job_name: job?.name,
+                hyperparameters: job?.hyperparameters,
+                version: job?.hyperparameters?.version,
+                dataset_name: job?.hyperparameters?.dataset_name
+            });
+            return null;
+        }
 
         try {
-            const modelName = `${job.name}_model`;
-            console.log(`[Training Page] Loading S3 results for model: ${modelName}`);
-            const s3Metrics = await apiService.getTrainingResultsFromS3(modelName);
+            const datasetName = job.hyperparameters.dataset_name;
+            const version = job.hyperparameters.version;
+            const isAI = job.hyperparameters.ai_mode || false;
+            
+            // 경로 생성
+            const trainType = isAI ? 'ai-train' : 'train';
+            const modelPath = `${datasetName}/${trainType}/${version}`;
+            
+            console.log(`[Training Page] Loading S3 results for job ${job.id} (${job.name}):`, {
+                dataset_name: datasetName,
+                version: version,
+                train_type: trainType,
+                model_path: modelPath,
+                full_s3_path: `models/${modelPath}/results.csv`,
+                hyperparameters: job.hyperparameters
+            });
+            const s3Metrics = await apiService.getTrainingResultsFromS3(modelPath);
 
             if (s3Metrics && s3Metrics.length > 0) {
                 console.log(`[Training Page] Loaded ${s3Metrics.length} metrics from S3 for job ${job.id}`);
@@ -1253,7 +1279,7 @@ class TrainingPage {
             let actualModelId = modelId;
             if (modelId === 'new') {
                 const modelData = {
-                    name: `${name}_model`,
+                    name: name,  // _model 접미사 제거
                     architecture: architecture,
                     description: `Model for ${name}`
                 };
@@ -1268,7 +1294,7 @@ class TrainingPage {
             }
 
             // Start training
-            await apiService.startTraining({
+            const newJob = await apiService.startTraining({
                 name,
                 dataset_id: parseInt(datasetId),
                 architecture,
@@ -1278,8 +1304,17 @@ class TrainingPage {
             bootstrap.Modal.getInstance(document.getElementById('startTrainingModal')).hide();
             showToast('Training started successfully!', 'success');
 
+            console.log('[Training Page] New training job created:', newJob);
+
             // Reload page data
             await this.loadTrainingJobs();
+            
+            // Select the newly created job
+            if (newJob && newJob.id) {
+                this.selectedJob = this.trainingJobs.find(j => j.id === newJob.id) || newJob;
+                console.log('[Training Page] Auto-selected new job:', this.selectedJob?.name);
+            }
+
             const app = document.getElementById('app');
             if (app) {
                 app.innerHTML = this.render();

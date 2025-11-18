@@ -18,7 +18,7 @@ load_dotenv()
 CONFIG_PATH  = "configs/training.yaml"  # 없으면 None로 두세요 (프로젝트 루트의 training.yaml 탐색)
 RUN_NAME     = "devtest"
 
-def builder(user_query: str, dataset_path: str, job_id: str):
+def builder(user_query: str, dataset_path: str, job_id: str, output_prefix: str = None):
     state = TrainState()
     if CONFIG_PATH and Path(CONFIG_PATH).exists():
         state.config_path = CONFIG_PATH
@@ -133,8 +133,17 @@ def builder(user_query: str, dataset_path: str, job_id: str):
 
     train_graph = graph.compile()
 
-    final_state = train_graph.invoke({
+    # 초기 state 구성
+    initial_state = {
         "user_query": user_query,
         "dataset_version": dataset_path,
         "job_id": job_id
-    })
+    }
+    
+    # output_prefix가 제공되면 train_overrides에 추가 (train_trial에서 사용)
+    if output_prefix:
+        initial_state["train_overrides"] = {
+            "output_prefix": output_prefix
+        }
+
+    final_state = train_graph.invoke(initial_state)

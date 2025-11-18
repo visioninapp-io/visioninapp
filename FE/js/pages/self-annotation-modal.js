@@ -940,6 +940,27 @@ async function saveAllAnnotations() {
             // Update current image display
             redrawCanvas();
             updateAnnotationsList();
+
+            // Update dataset information in the parent page
+            // Check both dataset-detail page and datasets list page
+            const detailPage = window.currentDatasetDetailPage;
+            const datasetsPage = window.currentDatasetsPage;
+            
+            console.log('[SelfAnnotation] Checking for page instances...');
+            console.log('[SelfAnnotation] Dataset detail page:', !!detailPage);
+            console.log('[SelfAnnotation] Datasets list page:', !!datasetsPage);
+            
+            if (detailPage && detailPage.updateDatasetInfo) {
+                console.log('[SelfAnnotation] Calling updateDatasetInfo on detail page...');
+                await detailPage.updateDatasetInfo();
+                console.log('[SelfAnnotation] Detail page update completed');
+            } else if (datasetsPage && datasetsPage.updateDataInfo) {
+                console.log('[SelfAnnotation] Calling updateDataInfo on datasets page...');
+                await datasetsPage.updateDataInfo();
+                console.log('[SelfAnnotation] Datasets page update completed');
+            } else {
+                console.warn('[SelfAnnotation] Cannot update dataset info - no page instance found');
+            }
         }
 
         if (failCount > 0) {
@@ -1203,6 +1224,29 @@ async function autoSaveCurrentAnnotations() {
         }
 
         console.log('[SelfAnnotation] Auto-save complete');
+        
+        // Update dataset information if any annotations were saved
+        if (unsavedAnnotations.length > 0) {
+            // Check both dataset-detail page and datasets list page
+            const detailPage = window.currentDatasetDetailPage;
+            const datasetsPage = window.currentDatasetsPage;
+            
+            console.log('[AutoSave] Checking for page instances...');
+            console.log('[AutoSave] Dataset detail page:', !!detailPage);
+            console.log('[AutoSave] Datasets list page:', !!datasetsPage);
+            
+            if (detailPage && detailPage.updateDatasetInfo) {
+                console.log('[AutoSave] Calling updateDatasetInfo on detail page...');
+                await detailPage.updateDatasetInfo();
+                console.log('[AutoSave] Detail page update completed');
+            } else if (datasetsPage && datasetsPage.updateDataInfo) {
+                console.log('[AutoSave] Calling updateDataInfo on datasets page...');
+                await datasetsPage.updateDataInfo();
+                console.log('[AutoSave] Datasets page update completed');
+            } else {
+                console.warn('[AutoSave] Cannot update dataset info - no page instance found');
+            }
+        }
     } catch (error) {
         console.error('[SelfAnnotation] Auto-save error:', error);
     }

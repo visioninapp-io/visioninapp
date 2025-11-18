@@ -23,6 +23,10 @@ class DatasetsPage {
 
     async init() {
         console.log('[DatasetsPage] Starting initialization...');
+        
+        // Store reference to this page instance globally for modal access
+        window.currentDatasetsPage = this;
+        
         this.isLoading = true;
         this.loadError = null;
 
@@ -57,6 +61,57 @@ class DatasetsPage {
                 console.log('[DatasetsPage] Initializing pagination and loading first page images...');
                 this.updateImageGrid();
             }
+        }
+    }
+
+    // Update dataset information after annotation changes
+    async updateDataInfo() {
+        try {
+            console.log('[DatasetsPage] Updating dataset info after annotation changes...');
+            
+            // Reload stats
+            await this.loadStats();
+            
+            // Reload current dataset's label classes and images if one is selected
+            if (this.selectedDataset) {
+                const datasetId = typeof this.selectedDataset === 'object' 
+                    ? this.selectedDataset.id 
+                    : this.datasets.find(d => d.name === this.selectedDataset)?.id;
+                    
+                if (datasetId) {
+                    // Reload label classes for current dataset
+                    const dataset = this.datasets.find(d => d.id === datasetId);
+                    if (dataset) {
+                        try {
+                            console.log(`[DatasetsPage] Reloading label classes for dataset ${datasetId}...`);
+                            dataset.label_classes = await apiService.getDatasetLabelClasses(datasetId);
+                            console.log(`[DatasetsPage] Reloaded ${dataset.label_classes?.length || 0} label classes`);
+                        } catch (error) {
+                            console.error(`[DatasetsPage] Failed to reload label classes:`, error);
+                        }
+                    }
+                    
+                    // Reload images
+                    await this.loadDatasetImages(datasetId);
+                }
+            }
+            
+            // Re-render to update UI with new label classes
+            const app = document.getElementById('app');
+            if (app) {
+                app.innerHTML = this.render();
+                this.attachEventListeners();
+                
+                // Reload images for current page after re-render
+                if (this.datasetImages.length > 0) {
+                    console.log('[DatasetsPage] Reloading image grid after update...');
+                    this.updateImageGrid();
+                }
+            }
+            
+            console.log('[DatasetsPage] Dataset info update completed');
+        } catch (error) {
+            console.error('[DatasetsPage] Error updating dataset info:', error);
         }
     }
 

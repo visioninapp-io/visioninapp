@@ -114,6 +114,8 @@ def _infer_dataset(state: TrainState) -> Dict[str, str]:
 
 def _infer_output(state: TrainState, dataset_name: str) -> Dict[str, str]:
     over = state.train_overrides or {}
+    
+    # 1순위: train_overrides에 output이 명시적으로 있으면 사용
     if isinstance(over.get("output"), dict):
         out = over["output"]
         prefix = str(out.get("prefix") or "").strip()
@@ -121,7 +123,18 @@ def _infer_output(state: TrainState, dataset_name: str) -> Dict[str, str]:
         metrics_name = str(out.get("metrics_name") or "").strip() or "results.csv"
         if prefix and model_name:
             return {"s3_bucket": S3_BUCKET, "prefix": prefix, "model_name": model_name, "metrics_name": metrics_name}
+    
+    # 2순위: train_overrides에서 output_prefix 가져오기 (백엔드에서 설정)
+    output_prefix = str(over.get("output_prefix") or "").strip()
+    if output_prefix:
+        return {
+            "s3_bucket": S3_BUCKET,
+            "prefix": output_prefix,
+            "model_name": "best.pt",
+            "metrics_name": "results.csv"
+        }
 
+    # 3순위: fallback (이 경우는 발생하지 않아야 함)
     return {
         "prefix": f"models/{dataset_name}/train",
         "model_name": f"{dataset_name}.pt",

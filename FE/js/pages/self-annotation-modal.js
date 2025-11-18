@@ -989,8 +989,8 @@ async function uploadLabelsForImage(imageData, annotations) {
             // Normalize to 0-1 range
             return {
                 className: ann.className,
-                x: origX / originalWidth,
-                y: origY / originalHeight,
+                x_center: origX / originalWidth,
+                y_center: origY / originalHeight,
                 width: origWidth / originalWidth,
                 height: origHeight / originalHeight
             };

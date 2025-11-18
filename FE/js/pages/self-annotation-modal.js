@@ -987,12 +987,16 @@ async function uploadLabelsForImage(imageData, annotations) {
             const origHeight = ann.height / scale;
 
             // Normalize to 0-1 range
+            const normalizedWidth = origWidth / originalWidth;
+            const normalizedHeight = origHeight / originalHeight;
+            const normalizedX = origX / originalWidth;
+            const normalizedY = origY / originalHeight;
             return {
                 className: ann.className,
-                x_center: origX / originalWidth,
-                y_center: origY / originalHeight,
-                width: origWidth / originalWidth,
-                height: origHeight / originalHeight
+                x_center: normalizedX + (normalizedWidth / 2),
+                y_center: normalizedY + (normalizedHeight / 2),
+                width: normalizedWidth,
+                height: normalizedHeight
             };
         });
 

@@ -341,7 +341,10 @@ def handle_inference(mq: MQ, exchanges: dict, msg: dict):
         if not model_s3_path:
             logger.info(f"[inference] No model path provided, using default YOLOv8n")
             model_to_load = "yolov8n.pt"
-        elif model_s3_path.startswith("yolov8") or model_s3_path in ["yolov8n.pt", "yolov8s.pt", "yolov8m.pt", "yolov8l.pt", "yolov8x.pt"]:
+        elif (model_s3_path.startswith("yolov8") or model_s3_path.startswith("yolo11") or model_s3_path.startswith("yolo12") or 
+              model_s3_path in ["yolov8n.pt", "yolov8s.pt", "yolov8m.pt", "yolov8l.pt", "yolov8x.pt",
+                                 "yolo11n.pt", "yolo11s.pt", "yolo11m.pt", "yolo11l.pt", "yolo11x.pt",
+                                 "yolo12n.pt", "yolo12s.pt", "yolo12m.pt", "yolo12l.pt", "yolo12x.pt"]):
             logger.info(f"[inference] Using Ultralytics model: {model_s3_path}")
             model_to_load = model_s3_path
         else:

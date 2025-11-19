@@ -35,10 +35,12 @@ def _safe_publish(ch, ex, routing_key, body):
 
 
 class Progress:
-    def __init__(self, ch, events_exchange: str, job_id: str):
+    def __init__(self, ch, events_exchange: str, job_id: str, user_id: str = None, model_id: int = None):
         self.ch = ch
         self.ex = events_exchange
         self.job_id = job_id
+        self.user_id = user_id
+        self.model_id = model_id
 
     def send(self, stage: str, percent: float, message: str = ""):
         body = {
@@ -89,6 +91,9 @@ class Progress:
             "epoch": int(epoch),
             "metrics": metrics or {},
         }
+        # Add user_id and model_id if available
+        if self.user_id: body["user_id"] = self.user_id
+        if self.model_id: body["model_id"] = self.model_id
         _safe_publish(self.ch, self.ex, f"train.{self.job_id}.log", body)
 
     def train_llm_log(self, epoch: int , total_epochs: int | None = None):
@@ -113,4 +118,7 @@ class Progress:
             "total_epochs": int(total_epochs),
             "percentage": int(percentage)
         }
+        # Add user_id and model_id if available
+        if self.user_id: body["user_id"] = self.user_id
+        if self.model_id: body["model_id"] = self.model_id
         _safe_publish(self.ch, self.ex, f"train.llm.{self.job_id}.log", body)

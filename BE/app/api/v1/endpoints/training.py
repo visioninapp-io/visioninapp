@@ -399,7 +399,9 @@ async def create_training_job(
             },
             "split": [0.8, 0.1, 0.1],
             "split_seed": 42,
-            "move_files": False
+            "move_files": False,
+            "user_id": current_user["uid"],  # Add user_id to payload
+            "model_id": db_job.model_id      # Add model_id to payload
         }
         send_train_request(payload)
 

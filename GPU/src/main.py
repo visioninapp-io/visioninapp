@@ -98,7 +98,13 @@ def handle_train(mq: MQ, exchanges: dict, msg: dict):
     logger.info("[trainer] 모델 학습 시작")
     job_id = msg["job_id"]
     conn, pub_ch = mq.channel()
-    progress = Progress(pub_ch, exchanges["events"], job_id)
+    
+    # Extract user_id and model_id from the message
+    user_id = msg.get("user_id")
+    model_id = msg.get("model_id")
+    logger.info(f"[trainer] Received train request for job_id={job_id}, user_id={user_id}, model_id={model_id}")
+    
+    progress = Progress(pub_ch, exchanges["events"], job_id, user_id=user_id, model_id=model_id)
     data_root, models_root = _paths()
 
     try:

@@ -142,21 +142,52 @@ class TrainingPage {
          *     "metrics/precision(B)": 0.0,
          *     "metrics/mAP50(B)": 0.0,
          *     ...
-         *   }
+         *   },
+         *   user_id: "firebase-uuid-string", // This is now included from GPU
+         *   model_id: 123 // This is now included from GPU
          * }
          */
         console.log('[Training Page] Received training metrics:', message);
 
         try {
-            const { job_id: external_job_id, epoch, metrics } = message;
+            const { job_id: external_job_id, epoch, metrics, user_id, model_id } = message; // Extract user_id and model_id
 
-            // Filter: Only process if this message is for the currently selected job
-            if (this.selectedJob && this.selectedJob.external_job_id) {
-                if (this.selectedJob.external_job_id !== external_job_id) {
-                    console.log(`[Training Page] Ignoring metrics for job ${external_job_id} (selected: ${this.selectedJob.external_job_id})`);
-                    return;
-                }
+            // --- UPDATED FILTERING LOGIC ---
+            if (!this.selectedJob) {
+                console.log('[Training Page] No job selected, ignoring metrics.');
+                return;
             }
+
+            // 1. Filter by external_job_id
+            if (this.selectedJob.external_job_id !== external_job_id) {
+                console.log(`[Training Page] Ignoring metrics for job ${external_job_id} (selected external_job_id: ${this.selectedJob.external_job_id})`);
+                return;
+            }
+
+            // 2. Filter by current user's Firebase UUID (now user_id is in message)
+            if (!this.currentUserUid) {
+                console.warn('[Training Page] Current user UID not available. Cannot filter by user for message:', message);
+                return; // Strictly enforce user filtering if UID is missing
+            } else if (user_id && this.currentUserUid !== user_id) {
+                console.log(`[Training Page] Ignoring metrics for job ${external_job_id} (user ID mismatch: message user_id=${user_id}, current user_id=${this.currentUserUid})`);
+                return;
+            } else if (!user_id) {
+                console.warn(`[Training Page] RabbitMQ message for job ${external_job_id} is missing 'user_id'.`);
+                return; // If user_id is missing from message, reject it
+            }
+
+            // 3. Filter by model_id associated with the selected job (now model_id is in message)
+            if (!this.selectedJob.model_id) {
+                console.warn(`[Training Page] Selected job for ${external_job_id} is missing 'model_id'. Cannot filter by model.`);
+                // Do not return here, as job_id and user_id are primary filters.
+            } else if (model_id && this.selectedJob.model_id !== model_id) {
+                console.log(`[Training Page] Ignoring metrics for job ${external_job_id} (model ID mismatch: message model_id=${model_id}, selected model_id=${this.selectedJob.model_id})`);
+                return;
+            } else if (!model_id) {
+                console.warn(`[Training Page] RabbitMQ message for job ${external_job_id} is missing 'model_id'.`);
+                // Do not return here, as job_id and user_id are primary filters.
+            }
+            // --- END UPDATED FILTERING LOGIC ---
 
             // Extract loss and accuracy from metrics object
             const loss = metrics?.loss || metrics?.tloss?.[0] || 0;

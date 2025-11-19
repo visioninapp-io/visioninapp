@@ -332,11 +332,45 @@ class RabbitMQService {
     }
 
     /**
-     * Subscribe to training logs (gpu.train.log queue)
+     * Subscribe to training logs for a specific job
+     * @param {string} jobId - External job ID (optional, if not provided subscribes to all logs)
      * @param {function} callback - Handler for training metrics
+     * @returns {string} Subscription ID
      */
-    subscribeToTrainingLogs(callback) {
-        return this.subscribe('gpu.train.log', callback);
+    subscribeToTrainingLogs(jobId, callback) {
+        // If jobId is actually a callback (backward compatibility)
+        if (typeof jobId === 'function') {
+            console.warn('[RabbitMQ] subscribeToTrainingLogs: jobId not provided, subscribing to all training logs (deprecated)');
+            return this.subscribe('gpu.train.log', jobId);
+        }
+
+        if (!jobId) {
+            throw new Error('[RabbitMQ] jobId is required for training log subscription');
+        }
+
+        // Subscribe to job-specific training logs using exchange routing
+        // Routing key: train.log.{jobId}
+        const routingKey = `train.log.${jobId}`;
+        console.log(`[RabbitMQ] Subscribing to training logs for job: ${jobId}`);
+        return this.subscribe(routingKey, callback, 'exchange', 'jobs.events');
+    }
+
+    /**
+     * Subscribe to LLM training logs for a specific job
+     * @param {string} jobId - External job ID
+     * @param {function} callback - Handler for training metrics
+     * @returns {string} Subscription ID
+     */
+    subscribeToLLMTrainingLogs(jobId, callback) {
+        if (!jobId) {
+            throw new Error('[RabbitMQ] jobId is required for LLM training log subscription');
+        }
+
+        // Subscribe to job-specific LLM training logs using exchange routing
+        // Routing key: train.llm.log.{jobId}
+        const routingKey = `train.llm.log.${jobId}`;
+        console.log(`[RabbitMQ] Subscribing to LLM training logs for job: ${jobId}`);
+        return this.subscribe(routingKey, callback, 'exchange', 'jobs.events');
     }
 }
 

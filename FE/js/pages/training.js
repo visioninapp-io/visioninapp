@@ -9,6 +9,8 @@ class TrainingPage {
         this.metricsData = {}; // Store real-time metrics by job_id
         this.refreshInterval = null; // Auto-refresh interval
         this.hyperparameters = {}; // Store hyperparameters by job_id (from RabbitMQ train.hpo)
+        this.currentSubscription = null; // Current training log subscription
+        this.currentJobId = null; // Currently subscribed job_id
     }
 
     async init() {
@@ -49,32 +51,22 @@ class TrainingPage {
         try {
             console.log('[Training Page] Connecting to RabbitMQ...');
 
-            // Unsubscribe first if already subscribed (prevent duplicate subscriptions)
-            if (this.rabbitmqConnected) {
-                try {
-                    rabbitmqService.unsubscribe('gpu.train.log');
-                    console.log('[Training Page] Unsubscribed from previous subscription');
-                } catch (e) {
-                    console.warn('[Training Page] Error unsubscribing:', e);
-                }
-            }
-
             // Connect to RabbitMQ
             await rabbitmqService.connect();
             this.rabbitmqConnected = true;
-
-            // Subscribe to training logs queue
-            rabbitmqService.subscribeToTrainingLogs((message) => {
-                this.handleTrainingMetrics(message);
-            });
 
             // Subscribe to hyperparameter messages (train.hpo routing key)
             rabbitmqService.subscribe('train.hpo', (message) => {
                 this.handleHyperparameterMessage(message);
             }, 'exchange', 'jobs.cmd');
 
-            console.log('[Training Page] ✅ Connected to RabbitMQ and subscribed to gpu.train.log and train.hpo');
+            console.log('[Training Page] ✅ Connected to RabbitMQ');
             showToast('Connected to real-time training updates', 'success');
+
+            // Subscribe to selected job if any
+            if (this.selectedJob && this.selectedJob.external_job_id) {
+                this.subscribeToJobLogs(this.selectedJob.external_job_id);
+            }
 
             // Restart periodic refresh with longer interval (now that RabbitMQ is connected)
             this.startPeriodicRefresh();
@@ -82,6 +74,40 @@ class TrainingPage {
         } catch (error) {
             console.error('[Training Page] Failed to connect to RabbitMQ:', error);
             showToast('Failed to connect to real-time updates. Using manual refresh.', 'warning');
+        }
+    }
+
+    /**
+     * Subscribe to training logs for a specific job
+     * @param {string} jobId - External job ID
+     */
+    subscribeToJobLogs(jobId) {
+        if (!jobId) {
+            console.warn('[Training Page] Cannot subscribe: jobId is empty');
+            return;
+        }
+
+        // Unsubscribe from previous job if exists
+        if (this.currentSubscription && this.currentJobId) {
+            try {
+                const oldRoutingKey = `train.log.${this.currentJobId}`;
+                rabbitmqService.unsubscribe(oldRoutingKey);
+                console.log(`[Training Page] Unsubscribed from job: ${this.currentJobId}`);
+            } catch (e) {
+                console.warn('[Training Page] Error unsubscribing from previous job:', e);
+            }
+        }
+
+        // Subscribe to new job
+        try {
+            console.log(`[Training Page] Subscribing to training logs for job: ${jobId}`);
+            this.currentSubscription = rabbitmqService.subscribeToTrainingLogs(jobId, (message) => {
+                this.handleTrainingMetrics(message);
+            });
+            this.currentJobId = jobId;
+            console.log(`[Training Page] ✅ Subscribed to job ${jobId} training logs`);
+        } catch (error) {
+            console.error(`[Training Page] Failed to subscribe to job ${jobId}:`, error);
         }
     }
 
@@ -849,6 +875,14 @@ class TrainingPage {
             console.log('[Training Page] Selected job:', job.id, job.name);
             this.selectedJob = job;
 
+            // Subscribe to this job's training logs if RabbitMQ is connected
+            if (this.rabbitmqConnected && job.external_job_id) {
+                console.log(`[Training Page] Switching to job ${job.external_job_id} logs`);
+                this.subscribeToJobLogs(job.external_job_id);
+            } else if (!job.external_job_id) {
+                console.warn('[Training Page] Selected job has no external_job_id');
+            }
+
             // Load S3 metrics for this job
             await this.loadS3MetricsForJob(job);
 
@@ -1308,11 +1342,19 @@ class TrainingPage {
 
             // Reload page data
             await this.loadTrainingJobs();
-            
+
             // Select the newly created job
             if (newJob && newJob.id) {
                 this.selectedJob = this.trainingJobs.find(j => j.id === newJob.id) || newJob;
                 console.log('[Training Page] Auto-selected new job:', this.selectedJob?.name);
+
+                // Subscribe to this job's training logs if RabbitMQ is connected
+                if (this.rabbitmqConnected && newJob.external_job_id) {
+                    console.log(`[Training Page] Subscribing to new job: ${newJob.external_job_id}`);
+                    this.subscribeToJobLogs(newJob.external_job_id);
+                } else if (!newJob.external_job_id) {
+                    console.warn('[Training Page] New job has no external_job_id, cannot subscribe to logs');
+                }
             }
 
             const app = document.getElementById('app');

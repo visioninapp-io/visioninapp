@@ -135,8 +135,11 @@ def handle_train(mq: MQ, exchanges: dict, msg: dict):
         # 하이퍼파라미터에 job_id를 주입(고유 run 폴더 위해)
         hyper = (msg.get("hyperparams") or {}).copy()
         hyper.setdefault("job_id", job_id)
+        
+        # AI 트레이닝 여부 확인 (ai_mode 플래그)
+        is_ai_training = hyper.get("ai_mode", False)
 
-        train_out = train_yolo(local_dir, out_dir, hyper, progress=progress)
+        train_out = train_yolo(local_dir, out_dir, hyper, progress=progress, is_ai_training=is_ai_training)
         # train_out: { "metrics": {...}, "run_dir": "...", "best_pt": "...", "results_csv": "..."|None }
         metrics = train_out.get("metrics", {}) or {}
         best_pt = train_out.get("best_pt")

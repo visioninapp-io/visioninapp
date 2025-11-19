@@ -73,7 +73,7 @@ class Progress:
             # 에러 전송도 실패하면 더 이상 물고 늘어지지 않고 로그만 남기고 넘겨도 됨
             print(f"[progress error] failed to publish error event for {self.job_id}: {message}")
 
-    def train_log(self, epoch: int, metrics: dict | None = None):
+    def train_log(self, epoch: int, total_epochs: int | None = None, metrics: dict | None = None):
         """
         1 epoch마다 학습 로그 전송.
         routing_key: train.{job_id}.log
@@ -81,17 +81,19 @@ class Progress:
         {
           "job_id": ...,
           "epoch": <int>,
+          "total_epochs": <int>,  # 추가: AI 트레이닝과 통일
           "metrics": { ... }   # 모든 메트릭 그대로
         }
         """
         body = {
             "job_id": self.job_id,
             "epoch": int(epoch),
+            "total_epochs": int(total_epochs) if total_epochs else None,
             "metrics": metrics or {},
         }
         _safe_publish(self.ch, self.ex, f"train.{self.job_id}.log", body)
 
-    def train_llm_log(self, epoch: int , total_epochs: int | None = None):
+    def train_llm_log(self, epoch: int , total_epochs: int | None = None, metrics: dict | None = None):
         """
         1 epoch마다 학습 로그 전송.
         routing_key: train.llm.{job_id}.log
@@ -100,7 +102,8 @@ class Progress:
           "job_id": ...,
           "epoch": <int>,
           "total_epochs": <int>,
-          "percentage": <int>
+          "percentage": <int>,
+          "metrics": { ... }  # 추가: 메트릭 포함
         }
         """
         if total_epochs and total_epochs > 0:
@@ -111,6 +114,7 @@ class Progress:
             "job_id": self.job_id,
             "epoch": int(epoch),
             "total_epochs": int(total_epochs),
-            "percentage": int(percentage)
+            "percentage": int(percentage),
+            "metrics": metrics or {}
         }
         _safe_publish(self.ch, self.ex, f"train.llm.{self.job_id}.log", body)

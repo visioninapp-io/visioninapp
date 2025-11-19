@@ -118,7 +118,15 @@ class TrainingPage {
             // Store hyperparameters by job_id (as string for consistency)
             const jobIdStr = String(job_id);
             this.hyperparameters[jobIdStr] = hyperparams;
-            console.log(`[Training Page] ✅ Stored hyperparameters for job_id: ${jobIdStr}`);
+            
+            // localStorage에도 저장 (새로고침 대비)
+            try {
+                localStorage.setItem(`train_hyperparams_${jobIdStr}`, JSON.stringify(hyperparams));
+                console.log(`[Training Page] ✅ Stored hyperparameters for job_id: ${jobIdStr} (memory + localStorage)`);
+            } catch (e) {
+                console.warn('[Training Page] Failed to save hyperparameters to localStorage:', e);
+            }
+            
             console.log(`[Training Page] Current hyperparameters keys:`, Object.keys(this.hyperparameters));
             
             // Also try to match with all possible job identifiers
@@ -135,6 +143,13 @@ class TrainingPage {
                     console.log(`[Training Page] Matched job ${job.id} (${job.name}) with job_id ${jobIdStr}`);
                     // Store also by job.id for easier lookup
                     this.hyperparameters[String(job.id)] = hyperparams;
+                    
+                    // localStorage에도 job.id로 저장
+                    try {
+                        localStorage.setItem(`train_hyperparams_${job.id}`, JSON.stringify(hyperparams));
+                    } catch (e) {
+                        console.warn('[Training Page] Failed to save hyperparameters to localStorage:', e);
+                    }
                 }
             });
             
@@ -388,6 +403,41 @@ class TrainingPage {
         }
     }
 
+    restoreHyperparametersFromLocalStorage() {
+        /**
+         * Restore hyperparameters from localStorage (새로고침 대비)
+         */
+        console.log('[Training Page] Restoring hyperparameters from localStorage...');
+        
+        this.trainingJobs.forEach(job => {
+            const possibleKeys = [
+                `train_hyperparams_${job.id}`,
+                job.external_job_id ? `train_hyperparams_${job.external_job_id}` : null,
+                job.name ? `train_hyperparams_${job.name}` : null
+            ].filter(key => key);
+            
+            // Try to restore from any possible key
+            for (const key of possibleKeys) {
+                try {
+                    const stored = localStorage.getItem(key);
+                    if (stored) {
+                        const hyperparams = JSON.parse(stored);
+                        this.hyperparameters[String(job.id)] = hyperparams;
+                        console.log(`[Training Page] ✅ Restored hyperparameters for job ${job.id} from localStorage (key: ${key})`);
+                        break; // Found it, no need to check other keys
+                    }
+                } catch (e) {
+                    console.warn(`[Training Page] Failed to restore hyperparameters for key ${key}:`, e);
+                }
+            }
+        });
+        
+        const restoredCount = Object.keys(this.hyperparameters).length;
+        if (restoredCount > 0) {
+            console.log(`[Training Page] ✅ Restored ${restoredCount} hyperparameters from localStorage`);
+        }
+    }
+
     checkAndUpdateHyperparametersForJobs() {
         /**
          * Check if any loaded jobs match stored hyperparameters
@@ -494,6 +544,9 @@ class TrainingPage {
                 console.log('[Training Page] Loading S3 metrics for selected job:', this.selectedJob.id, this.selectedJob.name);
                 await this.loadS3MetricsForJob(this.selectedJob);
             }
+
+            // localStorage에서 hyperparameters 복원 (새로고침 대비)
+            this.restoreHyperparametersFromLocalStorage();
 
             // Check if any jobs now have hyperparameters (in case message arrived before job was loaded)
             this.checkAndUpdateHyperparametersForJobs();
@@ -837,13 +890,20 @@ class TrainingPage {
          * - version: "v1", "v2", "v3"...
          */
         if (!job || !job.hyperparameters?.version || !job.hyperparameters?.dataset_name) {
-            console.warn('[Training Page] Missing required info for S3 path:', {
-                job_id: job?.id,
-                job_name: job?.name,
-                hyperparameters: job?.hyperparameters,
-                version: job?.hyperparameters?.version,
-                dataset_name: job?.hyperparameters?.dataset_name
-            });
+            // 조용히 실패 - 초기 job에는 hyperparameters가 아직 없을 수 있음
+            return null;
+        }
+        
+        // Skip loading S3 metrics for jobs that just started (results.csv not yet available)
+        // Only load S3 metrics for running/completed jobs with actual progress
+        if (job.status === 'pending' || job.status === 'starting') {
+            console.log(`[Training Page] Skipping S3 metrics for job ${job.id} (${job.name}) - status: ${job.status}`);
+            return null;
+        }
+        
+        // For running jobs, only load if we have actual epoch progress (epoch > 0 means at least one epoch completed)
+        if (job.status === 'running' && (job.current_epoch === null || job.current_epoch === undefined || job.current_epoch === 0)) {
+            console.log(`[Training Page] Skipping S3 metrics for job ${job.id} (${job.name}) - no epoch completed yet (epoch: ${job.current_epoch})`);
             return null;
         }
 

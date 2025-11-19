@@ -356,6 +356,8 @@ def train_trial(state: TrainState) -> TrainState:
     split_seed = over.get("split_seed")
     move_files = over.get("move_files")
 
+    # payload: GPU 서버로 전송할 전체 학습 요청 정보
+    # - dataset, output, hyperparams 등 GPU 서버가 필요한 모든 정보 포함
     payload = {
         "job_id": job_id,
         "dataset": ds,
@@ -363,6 +365,9 @@ def train_trial(state: TrainState) -> TrainState:
         "hyperparams": merged,     # GPU가 학습 시 사용할 파라미터
     }
 
+    # hpo: 백엔드 DB 업데이트용 하이퍼파라미터 정보
+    # - job_id와 hyperparams만 포함 (백엔드가 필요한 정보만)
+    # - training_hpo_service.py에서 구독하여 DB의 hyperparameters 필드 업데이트
     hpo = {
         "job_id": job_id,
         "hyperparams": merged,
@@ -376,16 +381,27 @@ def train_trial(state: TrainState) -> TrainState:
     if move_files is not None:
         payload["move_files"] = move_files
     logger.info(payload)
-    # 1️⃣ 학습 요청 발행
+    
+    # ============================================================
+    # 메시지 발행 정리:
+    # 1. payload: GPU 서버용 (전체 정보 - dataset, output, hyperparams 등)
+    # 2. hpo: 백엔드 DB용 (하이퍼파라미터만 - job_id, hyperparams)
+    # ============================================================
+    
+    # 1️⃣ GPU 서버로 학습 요청 발행 (train.start)
+    # payload에는 dataset, output, hyperparams 등 GPU 서버가 필요한 모든 정보 포함
     logger.info(f"[train_trial] 학습 요청 발행 시작: job_id={job_id}")
     _publish_to_rabbitmq(payload, RK_START)
     
     # GPU 서버로 hyperparameters 전달 (job_id가 중간에 위치)
-    hpo_routing_key = f"train.{job_id}.hpo"
-    _publish_to_rabbitmq(hpo, hpo_routing_key)
+    # 주석 처리: 이 메시지가 GPU 서버로 가서 중복 요청 발생 (dataset 정보 없어서 실패)
+    # hpo_routing_key = f"train.{job_id}.hpo"
+    # _publish_to_rabbitmq(hpo, hpo_routing_key)
     
     # 2️⃣ 백엔드 DB에 hyperparameters 저장 (UI 표시용)
+    # hpo에는 job_id와 hyperparams만 포함 (백엔드가 필요한 정보만)
     # jobs.events exchange로 train.llm.{job_id}.hpo routing key로 발행
+    # 백엔드 training_hpo_service.py에서 구독하여 DB 업데이트
     llm_hpo_routing_key = f"train.llm.{job_id}.hpo"
     _publish_to_rabbitmq(hpo, llm_hpo_routing_key, exchange=EXCHANGE_EVENTS)
 
@@ -413,7 +429,7 @@ def train_trial(state: TrainState) -> TrainState:
     if event == "done" and status not in ("error", "failed"):
         artifact = result.get("artifact") or {}
         metrics = result.get("metrics") or {}
-        state.model_path = artifact.get("model_path") or artifact.get("s3_path")
+        state.model_path = artifact.get("s3_uri")  # GPU 서버 표준 형식
         state.metrics = metrics
         state.action = "TRAIN_COMPLETED"
         return state

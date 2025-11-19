@@ -26,6 +26,7 @@ def get_channel():
     # Exchanges
     ch.exchange_declare(exchange="jobs.cmd", exchange_type="topic", durable=True)
     ch.exchange_declare(exchange="jobs.events", exchange_type="topic", durable=True)
+    ch.exchange_declare(exchange="jobs.event", exchange_type="topic", durable=True)  # LLM conversion info
 
     # GPU queues (GPU에서 consume)
     ch.queue_declare(queue="gpu.train.q", durable=True)
@@ -35,10 +36,13 @@ def get_channel():
 
     # Training log queue (Frontend Web STOMP에서 consume - 실시간 metrics)
     ch.queue_declare(queue="gpu.train.log", durable=True)
+    ch.queue_declare(queue="gpu.train.llm.hpo", durable=True)  # LLM HPO for frontend
 
     # BE queues (BE에서 consume - inference 결과 처리 및 실시간 로그)
     ch.queue_declare(queue="be.inference.done", durable=True)
+    ch.queue_declare(queue="be.train.done", durable=True)  # Training completion events
     ch.queue_declare(queue="be.train.log", durable=True)  # 실시간 training progress 업데이트
+    ch.queue_declare(queue="be.train.llm.hpo", durable=True)  # LLM HPO (hyperparameter optimization)
 
     # Bindings for cmd exchange (commands to GPU workers)
     ch.queue_bind(exchange="jobs.cmd", queue="gpu.train.q", routing_key="train.start")
@@ -53,6 +57,8 @@ def get_channel():
     ch.queue_bind(exchange="jobs.events", queue="gpu.train.log", routing_key="train.*.log")  # 프론트엔드용 (job_id 중간)
     ch.queue_bind(exchange="jobs.events", queue="be.train.log", routing_key="train.*.log")  # BE 일반 트레이닝용 (job_id 중간)
     ch.queue_bind(exchange="jobs.events", queue="be.train.log", routing_key="train.llm.*.log")  # BE LLM 트레이닝용 (job_id 중간)
+    ch.queue_bind(exchange="jobs.events", queue="be.train.llm.hpo", routing_key="train.llm.*.hpo")  # BE LLM HPO (job_id 중간)
+    ch.queue_bind(exchange="jobs.events", queue="gpu.train.llm.hpo", routing_key="train.llm.*.hpo")  # Frontend LLM HPO (job_id 중간)
 
     ch.confirm_delivery()
     ch.basic_qos(prefetch_count=10)

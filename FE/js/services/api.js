@@ -991,11 +991,28 @@ class APIService {
     async getTrainingMetrics(id) {
         console.log(`[API] Fetching training metrics for job ${id}...`);
         try {
-            // Backend uses /training/{job_id}/progress for metrics
-            const data = await this.get(`/training/${id}/progress`);
+            // Use direct fetch to avoid automatic error toast on 404
+            const token = this.getAuthToken();
+            const headers = {};
+            if (token) {
+                headers['Authorization'] = `Bearer ${token}`;
+            }
+            
+            const response = await fetch(`${this.baseURL}/training/${id}/progress`, {
+                method: 'GET',
+                headers: headers
+            });
+            
+            if (!response.ok) {
+                // Silently fail - progress may not be available yet
+                console.log(`[API] Training progress not available yet for job ${id} (${response.status})`);
+                return [];
+            }
+            
+            const data = await response.json();
             return data;
         } catch (error) {
-            console.error(`[API] Failed to fetch training metrics for job ${id}:`, error);
+            console.log(`[API] Failed to fetch training metrics for job ${id}:`, error.message);
             return [];
         }
     }

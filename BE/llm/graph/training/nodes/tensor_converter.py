@@ -278,6 +278,35 @@ def tensor_converter(state: TrainState) -> TrainState:
         "output": output_cfg,
     }
 
+    # 프론트엔드에 변환 정보 알림 (convert.exchanges)
+    try:
+        import pika
+        import json
+        params = pika.URLParameters(RABBITMQ_URL)
+        conn = pika.BlockingConnection(params)
+        ch = conn.channel()
+        ch.exchange_declare(exchange="jobs.event", exchange_type="topic", durable=True)
+        
+        conversion_info = {
+            "job_id": base_job,  # 원본 job_id 사용 (프론트엔드가 추적 중인 job_id)
+            "onnx": "false",
+            "tensorrt": "true"
+        }
+        body = json.dumps(conversion_info, ensure_ascii=False).encode("utf-8")
+        ch.basic_publish(
+            exchange="jobs.event",
+            routing_key="convert.exchanges",
+            body=body,
+            properties=pika.BasicProperties(
+                delivery_mode=2,
+                content_type="application/json",
+            ),
+        )
+        conn.close()
+        print(f"[tensor_converter] Sent conversion info to frontend: {conversion_info}")
+    except Exception as e:
+        print(f"[tensor_converter] Failed to send conversion info: {e}")
+
     _publish_cmd(msg, RK_TRT)
 
     wait_sec = int(os.getenv("TRT_WAIT_TIMEOUT_SEC", "3600"))

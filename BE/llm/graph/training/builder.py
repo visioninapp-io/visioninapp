@@ -18,7 +18,7 @@ load_dotenv()
 CONFIG_PATH  = "configs/training.yaml"  # 없으면 None로 두세요 (프로젝트 루트의 training.yaml 탐색)
 RUN_NAME     = "devtest"
 
-def builder(user_query: str, dataset_path: str, job_id: str, output_prefix: str = None):
+def builder(user_query: str, dataset_path: str, job_id: str, output_prefix: str = None, ai_mode: bool = True):
     state = TrainState()
     if CONFIG_PATH and Path(CONFIG_PATH).exists():
         state.config_path = CONFIG_PATH
@@ -50,9 +50,9 @@ def builder(user_query: str, dataset_path: str, job_id: str, output_prefix: str 
     graph.add_node("select_best", NODE_REGISTRY["select_best"])
     graph.add_node("train_trial", NODE_REGISTRY["train_trial"])
     graph.add_node("evaluate_trial", NODE_REGISTRY["evaluate_trial"])
-    graph.add_node("regression_gate", NODE_REGISTRY["regression_gate"])
+    # graph.add_node("regression_gate", NODE_REGISTRY["regression_gate"])  # 제거: 로컬 테스트용
     # graph.add_node("human_review", NODE_REGISTRY["human_review"])
-    graph.add_node("registry_publish", NODE_REGISTRY["registry_publish"])
+    # graph.add_node("registry_publish", NODE_REGISTRY["registry_publish"])  # 제거: 로컬 테스트용
     graph.add_node("onnx_converter", NODE_REGISTRY["onnx_converter"])
     graph.add_node("tensor_converter", NODE_REGISTRY["tensor_converter"])
     # graph.add_node("evaluate_convert_model", NODE_REGISTRY["evaluate_convert_model"])
@@ -96,8 +96,10 @@ def builder(user_query: str, dataset_path: str, job_id: str, output_prefix: str 
             "timeout": END,
         }
     )
-    graph.add_edge("evaluate_trial", "regression_gate")
-    graph.add_edge("regression_gate", "registry_publish")
+    # graph.add_edge("evaluate_trial", "regression_gate")  # 제거: regression_gate 불필요
+    
+    # registry_publish, regression_gate 제거: 로컬 테스트용으로 불필요 (GPU 서버가 이미 S3에 업로드)
+    # graph.add_edge("regression_gate", "registry_publish")
     # graph.add_conditional_edges(
     #     "regression_gate",
     #     route_gate,
@@ -117,8 +119,9 @@ def builder(user_query: str, dataset_path: str, job_id: str, output_prefix: str 
     #     }
     # )
 
+    # evaluate_trial 이후 바로 변환 단계로 진행
     graph.add_conditional_edges(
-        "registry_publish",
+        "evaluate_trial",
         route_onnx_or_tensor,
         {
             "onnx": "onnx_converter",
@@ -140,10 +143,22 @@ def builder(user_query: str, dataset_path: str, job_id: str, output_prefix: str 
         "job_id": job_id
     }
     
-    # output_prefix가 제공되면 train_overrides에 추가 (train_trial에서 사용)
+    # dataset_path에서 dataset 이름 추출 (예: /data/datasets/lcy-test4 -> lcy-test4)
+    dataset_name = Path(dataset_path).name if dataset_path else "dataset"
+    
+    # train_overrides 구성 (train_trial에서 사용)
+    train_overrides = {
+        "dataset": {
+            "name": dataset_name,
+            "s3_prefix": f"datasets/{dataset_name}/"
+        },
+        "ai_mode": ai_mode  # AI 트레이닝 플래그 추가
+    }
+    
+    # output_prefix가 제공되면 추가
     if output_prefix:
-        initial_state["train_overrides"] = {
-            "output_prefix": output_prefix
-        }
+        train_overrides["output_prefix"] = output_prefix
+    
+    initial_state["train_overrides"] = train_overrides
 
     final_state = train_graph.invoke(initial_state)

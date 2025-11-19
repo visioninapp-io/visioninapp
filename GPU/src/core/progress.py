@@ -78,7 +78,7 @@ class Progress:
     def train_log(self, epoch: int, metrics: dict | None = None):
         """
         1 epoch마다 학습 로그 전송.
-        routing_key: train.log.{job_id} (job별로 분리)
+        routing_key: train.log
         body:
         {
           "job_id": ...,
@@ -91,14 +91,12 @@ class Progress:
             "epoch": int(epoch),
             "metrics": metrics or {},
         }
-        # job_id를 routing key에 포함시켜 각 클라이언트가 자신의 job만 구독 가능
-        routing_key = f"train.log.{self.job_id}"
-        _safe_publish(self.ch, self.ex, routing_key, body)
+        _safe_publish(self.ch, self.ex, "train.log", body)
 
     def train_llm_log(self, epoch: int , total_epochs: int | None = None):
         """
         1 epoch마다 학습 로그 전송.
-        routing_key: train.llm.log.{job_id} (job별로 분리)
+        routing_key: train.llm.log
         body:
         {
           "job_id": ...,
@@ -117,6 +115,4 @@ class Progress:
             "total_epochs": int(total_epochs),
             "percentage": int(percentage)
         }
-        # job_id를 routing key에 포함시켜 각 클라이언트가 자신의 job만 구독 가능
-        routing_key = f"train.llm.log.{self.job_id}"
-        _safe_publish(self.ch, self.ex, routing_key, body)
+        _safe_publish(self.ch, self.ex, "train.llm.log", body)

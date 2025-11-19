@@ -9,8 +9,6 @@ class TrainingPage {
         this.metricsData = {}; // Store real-time metrics by job_id
         this.refreshInterval = null; // Auto-refresh interval
         this.hyperparameters = {}; // Store hyperparameters by job_id (from RabbitMQ train.hpo)
-        this.currentSubscription = null; // Current training log subscription
-        this.currentJobId = null; // Currently subscribed job_id
     }
 
     async init() {
@@ -55,18 +53,18 @@ class TrainingPage {
             await rabbitmqService.connect();
             this.rabbitmqConnected = true;
 
+            // Subscribe to all training logs (filtering will be done in handleTrainingMetrics)
+            rabbitmqService.subscribeToTrainingLogs((message) => {
+                this.handleTrainingMetrics(message);
+            });
+
             // Subscribe to hyperparameter messages (train.hpo routing key)
             rabbitmqService.subscribe('train.hpo', (message) => {
                 this.handleHyperparameterMessage(message);
             }, 'exchange', 'jobs.cmd');
 
-            console.log('[Training Page] ✅ Connected to RabbitMQ');
+            console.log('[Training Page] ✅ Connected to RabbitMQ and subscribed to training logs');
             showToast('Connected to real-time training updates', 'success');
-
-            // Subscribe to selected job if any
-            if (this.selectedJob && this.selectedJob.external_job_id) {
-                this.subscribeToJobLogs(this.selectedJob.external_job_id);
-            }
 
             // Restart periodic refresh with longer interval (now that RabbitMQ is connected)
             this.startPeriodicRefresh();
@@ -74,40 +72,6 @@ class TrainingPage {
         } catch (error) {
             console.error('[Training Page] Failed to connect to RabbitMQ:', error);
             showToast('Failed to connect to real-time updates. Using manual refresh.', 'warning');
-        }
-    }
-
-    /**
-     * Subscribe to training logs for a specific job
-     * @param {string} jobId - External job ID
-     */
-    subscribeToJobLogs(jobId) {
-        if (!jobId) {
-            console.warn('[Training Page] Cannot subscribe: jobId is empty');
-            return;
-        }
-
-        // Unsubscribe from previous job if exists
-        if (this.currentSubscription && this.currentJobId) {
-            try {
-                const oldRoutingKey = `train.log.${this.currentJobId}`;
-                rabbitmqService.unsubscribe(oldRoutingKey);
-                console.log(`[Training Page] Unsubscribed from job: ${this.currentJobId}`);
-            } catch (e) {
-                console.warn('[Training Page] Error unsubscribing from previous job:', e);
-            }
-        }
-
-        // Subscribe to new job
-        try {
-            console.log(`[Training Page] Subscribing to training logs for job: ${jobId}`);
-            this.currentSubscription = rabbitmqService.subscribeToTrainingLogs(jobId, (message) => {
-                this.handleTrainingMetrics(message);
-            });
-            this.currentJobId = jobId;
-            console.log(`[Training Page] ✅ Subscribed to job ${jobId} training logs`);
-        } catch (error) {
-            console.error(`[Training Page] Failed to subscribe to job ${jobId}:`, error);
         }
     }
 
@@ -186,54 +150,25 @@ class TrainingPage {
         try {
             const { job_id: external_job_id, epoch, metrics } = message;
 
+            // Filter: Only process if this message is for the currently selected job
+            if (this.selectedJob && this.selectedJob.external_job_id) {
+                if (this.selectedJob.external_job_id !== external_job_id) {
+                    console.log(`[Training Page] Ignoring metrics for job ${external_job_id} (selected: ${this.selectedJob.external_job_id})`);
+                    return;
+                }
+            }
+
             // Extract loss and accuracy from metrics object
             const loss = metrics?.loss || metrics?.tloss?.[0] || 0;
             const accuracy = metrics?.['metrics/mAP50(B)'] || metrics?.['metrics/precision(B)'] || 0;
 
-            console.log(`[Training Page] Metrics: epoch=${epoch}, loss=${loss}, accuracy=${accuracy}`);
+            console.log(`[Training Page] Processing metrics for selected job: epoch=${epoch}, loss=${loss}, accuracy=${accuracy}`);
 
             // GPU sends 0-based epoch, convert to 1-based for display
             const displayEpoch = epoch + 1;
 
-            // Just update the display with received metrics (no job matching)
+            // Update the display with received metrics
             this.updateMetricsDisplay({ epoch: displayEpoch, loss, accuracy: accuracy * 100 });
-
-            // // TODO: Enable job matching when external_job_id mapping is ready
-            // // Find job by external_job_id (UUID stored in hyperparameters)
-            // const job = this.trainingJobs.find(j =>
-            //     j.hyperparameters?.external_job_id === external_job_id
-            // );
-            //
-            // if (!job) {
-            //     console.warn('[Training Page] No job found for external_job_id:', external_job_id);
-            //     return;
-            // }
-            //
-            // console.log(`[Training Page] Matched job ${job.id} (${job.name}) with metrics:`, { epoch, loss, accuracy });
-            //
-            // // Store metrics by internal job ID
-            // if (!this.metricsData[job.id]) {
-            //     this.metricsData[job.id] = [];
-            // }
-            // this.metricsData[job.id].push({
-            //     epoch,
-            //     loss,
-            //     accuracy: accuracy * 100, // Convert to percentage
-            //     timestamp: new Date()
-            // });
-            //
-            // // Update job metrics
-            // job.current_epoch = epoch;
-            // job.current_loss = loss;
-            // job.current_accuracy = accuracy * 100;
-            //
-            // // Update UI if this is the selected job
-            // if (this.selectedJob && this.selectedJob.id === job.id) {
-            //     this.updateMetricsDisplay({ epoch, loss, accuracy: accuracy * 100 });
-            // }
-            //
-            // // Update stats display
-            // this.updateStatsDisplay();
 
         } catch (error) {
             console.error('[Training Page] Error handling training metrics:', error);
@@ -872,16 +807,8 @@ class TrainingPage {
         const job = this.trainingJobs.find(j => j.id === id);
 
         if (job) {
-            console.log('[Training Page] Selected job:', job.id, job.name);
+            console.log('[Training Page] Selected job:', job.id, job.name, 'external_job_id:', job.external_job_id);
             this.selectedJob = job;
-
-            // Subscribe to this job's training logs if RabbitMQ is connected
-            if (this.rabbitmqConnected && job.external_job_id) {
-                console.log(`[Training Page] Switching to job ${job.external_job_id} logs`);
-                this.subscribeToJobLogs(job.external_job_id);
-            } else if (!job.external_job_id) {
-                console.warn('[Training Page] Selected job has no external_job_id');
-            }
 
             // Load S3 metrics for this job
             await this.loadS3MetricsForJob(job);
@@ -1346,15 +1273,7 @@ class TrainingPage {
             // Select the newly created job
             if (newJob && newJob.id) {
                 this.selectedJob = this.trainingJobs.find(j => j.id === newJob.id) || newJob;
-                console.log('[Training Page] Auto-selected new job:', this.selectedJob?.name);
-
-                // Subscribe to this job's training logs if RabbitMQ is connected
-                if (this.rabbitmqConnected && newJob.external_job_id) {
-                    console.log(`[Training Page] Subscribing to new job: ${newJob.external_job_id}`);
-                    this.subscribeToJobLogs(newJob.external_job_id);
-                } else if (!newJob.external_job_id) {
-                    console.warn('[Training Page] New job has no external_job_id, cannot subscribe to logs');
-                }
+                console.log('[Training Page] Auto-selected new job:', this.selectedJob?.name, 'external_job_id:', newJob.external_job_id);
             }
 
             const app = document.getElementById('app');

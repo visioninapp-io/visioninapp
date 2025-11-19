@@ -332,45 +332,28 @@ class RabbitMQService {
     }
 
     /**
-     * Subscribe to training logs for a specific job
-     * @param {string} jobId - External job ID (optional, if not provided subscribes to all logs)
+     * Subscribe to training logs (all jobs)
+     * Uses exchange subscription so each browser gets its own temporary queue
+     * This ensures all connected browsers receive all training messages
      * @param {function} callback - Handler for training metrics
      * @returns {string} Subscription ID
      */
-    subscribeToTrainingLogs(jobId, callback) {
-        // If jobId is actually a callback (backward compatibility)
-        if (typeof jobId === 'function') {
-            console.warn('[RabbitMQ] subscribeToTrainingLogs: jobId not provided, subscribing to all training logs (deprecated)');
-            return this.subscribe('gpu.train.log', jobId);
-        }
-
-        if (!jobId) {
-            throw new Error('[RabbitMQ] jobId is required for training log subscription');
-        }
-
-        // Subscribe to job-specific training logs using exchange routing
-        // Routing key: train.log.{jobId}
-        const routingKey = `train.log.${jobId}`;
-        console.log(`[RabbitMQ] Subscribing to training logs for job: ${jobId}`);
-        return this.subscribe(routingKey, callback, 'exchange', 'jobs.events');
+    subscribeToTrainingLogs(callback) {
+        console.log('[RabbitMQ] Subscribing to training logs via exchange (jobs.events/train.log)');
+        // Use exchange subscription instead of queue to get a dedicated temporary queue per browser
+        return this.subscribe('train.log', callback, 'exchange', 'jobs.events');
     }
 
     /**
-     * Subscribe to LLM training logs for a specific job
-     * @param {string} jobId - External job ID
+     * Subscribe to LLM training logs (all jobs)
+     * Uses exchange subscription so each browser gets its own temporary queue
      * @param {function} callback - Handler for training metrics
      * @returns {string} Subscription ID
      */
-    subscribeToLLMTrainingLogs(jobId, callback) {
-        if (!jobId) {
-            throw new Error('[RabbitMQ] jobId is required for LLM training log subscription');
-        }
-
-        // Subscribe to job-specific LLM training logs using exchange routing
-        // Routing key: train.llm.log.{jobId}
-        const routingKey = `train.llm.log.${jobId}`;
-        console.log(`[RabbitMQ] Subscribing to LLM training logs for job: ${jobId}`);
-        return this.subscribe(routingKey, callback, 'exchange', 'jobs.events');
+    subscribeToLLMTrainingLogs(callback) {
+        console.log('[RabbitMQ] Subscribing to LLM training logs via exchange (jobs.events/train.llm.log)');
+        // Use exchange subscription instead of queue to get a dedicated temporary queue per browser
+        return this.subscribe('train.llm.log', callback, 'exchange', 'jobs.events');
     }
 }
 

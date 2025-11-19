@@ -41,18 +41,16 @@ class ConversionPage {
         }
     }
 
-    selectModel(modelId, s3Uri, hasArtifact, s3Key) {
+    async selectModel(modelId, s3Uri, hasArtifact, s3Key) {
         if (!s3Uri) {
-            alert('This model does not have a valid S3 URI. Please ensure the model has been uploaded to S3.');
+            this.showConversionErrorModal('This model does not have a valid S3 URI. Please ensure the model has been uploaded to S3.');
             return;
         }
         
         if (!hasArtifact) {
-            const proceed = confirm(
-                'Warning: This model may not have an artifact record in the database.\n\n' +
-                'Conversion requires the model to have a ModelArtifact record.\n' +
-                'If conversion fails, the model may need to be re-uploaded or the artifact record created.\n\n' +
-                'Do you want to proceed anyway?'
+            const proceed = await this.showWarningModal(
+                'Warning: This model may not have an artifact record in the database.',
+                'Conversion requires the model to have a ModelArtifact record.\n\nIf conversion fails, the model may need to be re-uploaded or the artifact record created.\n\nDo you want to proceed anyway?'
             );
             if (!proceed) {
                 return;
@@ -75,7 +73,7 @@ class ConversionPage {
 
     async startConversion() {
         if (!this.selectedS3Uri) {
-            alert('Please select a model first');
+            this.showConversionErrorModal('Please select a model first');
             return;
         }
 
@@ -84,7 +82,7 @@ class ConversionPage {
             const precisionSelect = document.getElementById('precision-select');
             
             if (!formatSelect || !precisionSelect) {
-                alert('Please wait for the page to fully load');
+                this.showConversionErrorModal('Please wait for the page to fully load');
                 return;
             }
             
@@ -95,7 +93,7 @@ class ConversionPage {
             // 원본: models/{dataset_name}/train/{version}/best.pt
             // 결과: models/{dataset_name}/train/{version}/{format}/{version}/model.{ext}
             if (!this.selectedS3Key) {
-                alert('모델의 S3 경로 정보가 없습니다. 모델을 다시 선택해주세요.');
+                this.showConversionErrorModal('Model S3 path information is missing. Please select the model again.');
                 return;
             }
 
@@ -151,14 +149,14 @@ class ConversionPage {
                 result = await window.apiService.convertToTensorRT(payload);
                 console.log('TensorRT conversion started:', result);
             } else {
-                alert('Unsupported format. Please select ONNX or TensorRT.');
+                this.showConversionErrorModal('Unsupported format. Please select ONNX or TensorRT.');
                 return;
             }
 
-            alert(`${format.toUpperCase()} conversion started!\nJob ID: ${result.job_id || 'N/A'}`);
+            this.showConversionSuccessModal(format.toUpperCase(), result.job_id || 'N/A');
         } catch (error) {
             console.error('Conversion failed:', error);
-            alert('Conversion failed: ' + (error.message || 'Unknown error'));
+            this.showConversionErrorModal(error.message || 'Unknown error');
         }
     }
 
@@ -321,6 +319,142 @@ class ConversionPage {
                     </div>
                 </div>
             </div>
+
+            <!-- Conversion Success Modal -->
+            <div class="modal fade" id="conversionSuccessModal" tabindex="-1" aria-labelledby="conversionSuccessModalLabel" aria-hidden="true">
+                <div class="modal-dialog modal-dialog-centered">
+                    <div class="modal-content">
+                        <div class="modal-header bg-success text-white">
+                            <h5 class="modal-title" id="conversionSuccessModalLabel">
+                                <i class="bi bi-check-circle-fill me-2"></i>Conversion Started
+                            </h5>
+                            <button type="button" class="btn-close btn-close-white" data-bs-dismiss="modal" aria-label="Close"></button>
+                        </div>
+                        <div class="modal-body">
+                            <p class="mb-0" id="conversionSuccessMessage"></p>
+                        </div>
+                        <div class="modal-footer">
+                            <button type="button" class="btn btn-success" data-bs-dismiss="modal">
+                                <i class="bi bi-check me-1"></i>확인
+                            </button>
+                        </div>
+                    </div>
+                </div>
+            </div>
+
+            <!-- Conversion Error Modal -->
+            <div class="modal fade" id="conversionErrorModal" tabindex="-1" aria-labelledby="conversionErrorModalLabel" aria-hidden="true">
+                <div class="modal-dialog modal-dialog-centered">
+                    <div class="modal-content">
+                        <div class="modal-header bg-danger text-white">
+                            <h5 class="modal-title" id="conversionErrorModalLabel">
+                                <i class="bi bi-exclamation-triangle-fill me-2"></i>Conversion Failed
+                            </h5>
+                            <button type="button" class="btn-close btn-close-white" data-bs-dismiss="modal" aria-label="Close"></button>
+                        </div>
+                        <div class="modal-body">
+                            <p id="conversionErrorMessage" class="mb-0"></p>
+                        </div>
+                        <div class="modal-footer">
+                            <button type="button" class="btn btn-danger" data-bs-dismiss="modal">
+                                <i class="bi bi-x me-1"></i>확인
+                            </button>
+                        </div>
+                    </div>
+                </div>
+            </div>
         `;
+    }
+
+    showConversionSuccessModal(format, jobId) {
+        const modal = document.getElementById('conversionSuccessModal');
+        const messageEl = document.getElementById('conversionSuccessMessage');
+        
+        if (messageEl) {
+            messageEl.textContent = `${format} conversion started!`;
+        }
+        
+        const bsModal = new bootstrap.Modal(modal);
+        bsModal.show();
+    }
+
+    showConversionErrorModal(errorMessage) {
+        const modal = document.getElementById('conversionErrorModal');
+        const messageEl = document.getElementById('conversionErrorMessage');
+        
+        if (messageEl) {
+            messageEl.textContent = errorMessage.startsWith('Conversion failed:') ? errorMessage : errorMessage;
+        }
+        
+        const bsModal = new bootstrap.Modal(modal);
+        bsModal.show();
+    }
+
+    showWarningModal(title, message) {
+        return new Promise((resolve) => {
+            const modalId = 'warningModal';
+            let modalEl = document.getElementById(modalId);
+            
+            // Create modal if it doesn't exist
+            if (!modalEl) {
+                modalEl = document.createElement('div');
+                modalEl.id = modalId;
+                modalEl.className = 'modal fade';
+                modalEl.setAttribute('tabindex', '-1');
+                modalEl.innerHTML = `
+                    <div class="modal-dialog modal-dialog-centered">
+                        <div class="modal-content">
+                            <div class="modal-header bg-warning">
+                                <h5 class="modal-title">
+                                    <i class="bi bi-exclamation-triangle-fill me-2"></i>${title}
+                                </h5>
+                                <button type="button" class="btn-close" data-bs-dismiss="modal" aria-label="Close"></button>
+                            </div>
+                            <div class="modal-body">
+                                <p style="white-space: pre-line;">${message}</p>
+                            </div>
+                            <div class="modal-footer">
+                                <button type="button" class="btn btn-secondary" data-bs-dismiss="modal">Cancel</button>
+                                <button type="button" class="btn btn-warning" id="confirmWarningBtn">
+                                    <i class="bi bi-check me-1"></i>Proceed
+                                </button>
+                            </div>
+                        </div>
+                    </div>
+                `;
+                document.body.appendChild(modalEl);
+            }
+
+            // Update content
+            const titleEl = modalEl.querySelector('.modal-title');
+            const messageEl = modalEl.querySelector('.modal-body p');
+            if (titleEl) titleEl.innerHTML = `<i class="bi bi-exclamation-triangle-fill me-2"></i>${title}`;
+            if (messageEl) messageEl.textContent = message;
+
+            // Set up event listeners
+            const confirmBtn = modalEl.querySelector('#confirmWarningBtn');
+            const bsModal = new bootstrap.Modal(modalEl);
+            
+            const handleConfirm = () => {
+                bsModal.hide();
+                resolve(true);
+            };
+            
+            const handleCancel = () => {
+                bsModal.hide();
+                resolve(false);
+            };
+
+            // Remove old listeners and add new ones
+            confirmBtn.replaceWith(confirmBtn.cloneNode(true));
+            const newConfirmBtn = modalEl.querySelector('#confirmWarningBtn');
+            newConfirmBtn.addEventListener('click', handleConfirm);
+            
+            modalEl.addEventListener('hidden.bs.modal', () => {
+                resolve(false);
+            }, { once: true });
+
+            bsModal.show();
+        });
     }
 }

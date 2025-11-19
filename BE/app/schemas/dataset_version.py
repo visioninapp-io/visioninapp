@@ -99,6 +99,7 @@ class DatasetVersionResponse(BaseModel):
 class ExportJobCreate(BaseModel):
     """Create export job"""
     dataset_id: Optional[int] = None
+    model_id: Optional[int] = None
     version_id: Optional[int] = None
     include_images: bool = True
 
@@ -107,6 +108,7 @@ class ExportJobResponse(BaseModel):
     """Export job response"""
     id: int
     dataset_id: Optional[int]
+    model_id: Optional[int]
     version_id: Optional[int]
     include_images: bool
 

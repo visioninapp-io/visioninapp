@@ -1,5 +1,5 @@
 from fastapi import APIRouter, Depends, HTTPException, status, BackgroundTasks
-from fastapi.responses import FileResponse
+from fastapi.responses import FileResponse, Response
 from sqlalchemy.orm import Session
 from typing import List
 from app.core.database import get_db
@@ -7,6 +7,7 @@ from app.core.auth import get_current_user
 from app.models.dataset import Dataset, DatasetVersion, ExportJob
 from app.schemas.dataset_version import ExportJobCreate, ExportJobResponse
 from pathlib import Path
+import urllib.parse
 
 router = APIRouter()
 
@@ -31,8 +32,8 @@ async def create_export_job(
     db: Session = Depends(get_db),
     current_user: dict = Depends(get_current_user)
 ):
-    """Create a new export job"""
-    # Verify dataset or version exists
+    """Create a new export job for dataset or model"""
+    # Verify dataset, version, or model exists
     if export_request.dataset_id:
         dataset = db.query(Dataset).filter(Dataset.id == export_request.dataset_id).first()
         if not dataset:
@@ -41,13 +42,19 @@ async def create_export_job(
         version = db.query(DatasetVersion).filter(DatasetVersion.id == export_request.version_id).first()
         if not version:
             raise HTTPException(status_code=404, detail="Version not found")
+    elif export_request.model_id:
+        from app.models.model import Model
+        model = db.query(Model).filter(Model.id == export_request.model_id).first()
+        if not model:
+            raise HTTPException(status_code=404, detail="Model not found")
     else:
-        raise HTTPException(status_code=400, detail="Either dataset_id or version_id must be provided")
+        raise HTTPException(status_code=400, detail="Either dataset_id, version_id, or model_id must be provided")
 
     # Create export job
     export_job = ExportJob(
         dataset_id=export_request.dataset_id,
         version_id=export_request.version_id,
+        model_id=export_request.model_id,
         export_format="zip",
         include_images=int(export_request.include_images),
         status="pending",
@@ -84,7 +91,7 @@ async def download_export(
     db: Session = Depends(get_db),
     current_user: dict = Depends(get_current_user)
 ):
-    """Download exported dataset"""
+    """Download exported dataset or model"""
     job = db.query(ExportJob).filter(ExportJob.id == export_id).first()
     if not job:
         raise HTTPException(status_code=404, detail="Export job not found")
@@ -95,9 +102,78 @@ async def download_export(
     if not job.file_path or not Path(job.file_path).exists():
         raise HTTPException(status_code=404, detail="Export file not found")
 
+    # Get dataset or model name for better filename
+    filename = Path(job.file_path).name  # Default to existing filename
+    
+    # Debug: Log the actual file path
+    print(f"[Export Download] Export ID: {export_id}")
+    print(f"[Export Download] File path: {job.file_path}")
+    print(f"[Export Download] Filename from path: {filename}")
+    print(f"[Export Download] Dataset ID: {job.dataset_id}, Model ID: {job.model_id}, Version ID: {job.version_id}")
+    
+    # If filename is in export_{id}.zip format, reconstruct it with dataset/model name
+    # Also check if filename matches export_{id}.zip pattern (with numbers)
+    import re
+    export_pattern = re.match(r'^export_(\d+)\.zip$', filename)
+    if export_pattern or (filename.startswith('export_') and filename.endswith('.zip')):
+        # Extract timestamp from job creation or completion time
+        from datetime import datetime
+        if job.completed_at:
+            timestamp = job.completed_at.strftime("%Y%m%d_%H%M%S")
+        elif job.created_at:
+            timestamp = job.created_at.strftime("%Y%m%d_%H%M%S")
+        else:
+            timestamp = datetime.now().strftime("%Y%m%d_%H%M%S")
+        
+        # Try to get model name first
+        if job.model_id:
+            from app.models.model import Model
+            model = db.query(Model).filter(Model.id == job.model_id).first()
+            if model and model.name:
+                # Sanitize model name for filename
+                safe_name = "".join(c for c in model.name if c.isalnum() or c in (' ', '-', '_')).strip()
+                safe_name = safe_name.replace(' ', '_')
+                filename = f"model_{safe_name}_{timestamp}.zip"
+                print(f"[Export Download] Reconstructed filename from model: {filename}")
+        # Try dataset_id
+        elif job.dataset_id:
+            dataset = db.query(Dataset).filter(Dataset.id == job.dataset_id).first()
+            if dataset and dataset.name:
+                # Sanitize dataset name for filename
+                safe_name = "".join(c for c in dataset.name if c.isalnum() or c in (' ', '-', '_')).strip()
+                safe_name = safe_name.replace(' ', '_')
+                filename = f"dataset_{safe_name}_{timestamp}.zip"
+                print(f"[Export Download] Reconstructed filename from dataset: {filename}")
+        # Try version_id (which can lead to dataset)
+        elif job.version_id:
+            version = db.query(DatasetVersion).filter(DatasetVersion.id == job.version_id).first()
+            if version and version.dataset_id:
+                dataset = db.query(Dataset).filter(Dataset.id == version.dataset_id).first()
+                if dataset and dataset.name:
+                    # Sanitize dataset name for filename
+                    safe_name = "".join(c for c in dataset.name if c.isalnum() or c in (' ', '-', '_')).strip()
+                    safe_name = safe_name.replace(' ', '_')
+                    filename = f"dataset_{safe_name}_{timestamp}.zip"
+                    print(f"[Export Download] Reconstructed filename from version->dataset: {filename}")
+        
+        # Debug logging
+        print(f"[Export Download] Export ID: {export_id}, Dataset ID: {job.dataset_id}, Model ID: {job.model_id}, Version ID: {job.version_id}")
+        print(f"[Export Download] Original filename: {Path(job.file_path).name}, New filename: {filename}")
+    
+    # Set Content-Disposition header with proper filename
+    # URL encode the filename for safe transmission
+    encoded_filename = urllib.parse.quote(filename.encode('utf-8'))
+    
+    headers = {
+        'Content-Disposition': f'attachment; filename="{filename}"; filename*=UTF-8\'\'{encoded_filename}',
+        'Content-Type': 'application/zip'
+    }
+    
+    # Use FileResponse for better memory efficiency (streaming for large files)
     return FileResponse(
         path=job.file_path,
-        filename=Path(job.file_path).name,
+        filename=filename,
+        headers=headers,
         media_type="application/zip"
     )
 
@@ -140,14 +216,23 @@ def process_export_job(export_id: int):
         # Get export service
         export_service = ExportService()
 
-        # Process export
-        result = export_service.export_dataset(
-            export_id=job.id,
-            dataset_id=job.dataset_id,
-            version_id=job.version_id,
-            include_images=bool(job.include_images),
-            db=db
-        )
+        # Process export based on job type
+        if job.model_id:
+            # Export model
+            result = export_service.export_model(
+                export_id=job.id,
+                model_id=job.model_id,
+                db=db
+            )
+        else:
+            # Export dataset
+            result = export_service.export_dataset(
+                export_id=job.id,
+                dataset_id=job.dataset_id,
+                version_id=job.version_id,
+                include_images=bool(job.include_images),
+                db=db
+            )
 
         # Update job with results
         job.file_path = result['file_path']

@@ -1260,15 +1260,41 @@ class APIService {
                 throw new Error(errorMsg);
             }
 
-            const blob = await response.blob();
-
-            let filename = `export_${exportId}.zip`;
+            // Get Content-Disposition header BEFORE reading blob (blob() consumes the response)
             const disposition = response.headers.get('Content-Disposition');
-            if (disposition && disposition.includes('filename=')) {
-                let tmp = disposition.split('filename=')[1].trim();
-                tmp = tmp.replace(/^["']|["']$/g, '');
-                if (tmp) filename = tmp;
+            console.log('[API] Content-Disposition header:', disposition);
+            
+            let filename = `export_${exportId}.zip`;
+            
+            if (disposition) {
+                // Try to extract filename from Content-Disposition header
+                // Format: attachment; filename="filename.zip"; filename*=UTF-8''encoded
+                
+                // First try UTF-8 encoded filename (filename*=UTF-8''encoded) - more reliable
+                const utf8Match = disposition.match(/filename\*=UTF-8''([^;\s]*)/i);
+                if (utf8Match) {
+                    try {
+                        filename = decodeURIComponent(utf8Match[1]);
+                        console.log('[API] Extracted filename from UTF-8 encoding:', filename);
+                    } catch (e) {
+                        console.warn('[API] Failed to decode UTF-8 filename:', e);
+                    }
+                } else {
+                    // Fallback to regular filename parameter
+                    const filenameMatch = disposition.match(/filename[^;=\n]*=((['"]).*?\2|[^;\n]*)/);
+                    if (filenameMatch) {
+                        let extractedFilename = filenameMatch[1];
+                        // Remove quotes if present
+                        extractedFilename = extractedFilename.replace(/^["']|["']$/g, '');
+                        if (extractedFilename && extractedFilename !== '') {
+                            filename = extractedFilename;
+                            console.log('[API] Extracted filename from regular parameter:', filename);
+                        }
+                    }
+                }
             }
+            
+            const blob = await response.blob();
 
             const downloadUrl = window.URL.createObjectURL(blob);
             const a = document.createElement('a');

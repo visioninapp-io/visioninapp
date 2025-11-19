@@ -109,34 +109,45 @@ class ConversionPage {
             const version = versionResponse.version || 'v1';
             const prefix = `${baseDir}/${format}/${version}`;
 
-            const payload = {
-                model: {
-                    s3_uri: this.selectedS3Uri
-                },
-                output: {
-                    prefix: prefix
-                }
-            };
-
+            let payload;
             let result;
+            
             if (format === 'onnx') {
-                payload.output.model_name = 'model.onnx';
-                payload.ops = {
-                    dynamic: true,
-                    simplify: true,
-                    opset: 13,
-                    imgsz: 640,
-                    precision: precision  // fp32, fp16, int8
+                payload = {
+                    model: {
+                        s3_uri: this.selectedS3Uri
+                    },
+                    output: {
+                        prefix: prefix,
+                        model_name: 'model.onnx'
+                    },
+                    ops: {
+                        dynamic: true,
+                        simplify: true,
+                        opset: 13,
+                        imgsz: 640,
+                        precision: precision  // fp32, fp16, int8
+                    }
                 };
+                console.log('[Conversion] ONNX payload:', JSON.stringify(payload, null, 2));
                 result = await window.apiService.convertToOnnx(payload);
                 console.log('ONNX conversion started:', result);
             } else if (format === 'tensorrt') {
-                payload.output.model_name = 'model.engine';
-                payload.trt = {
-                    precision: precision,
-                    imgsz: 640,
-                    dynamic: true
+                payload = {
+                    model: {
+                        s3_uri: this.selectedS3Uri
+                    },
+                    output: {
+                        prefix: prefix,
+                        model_name: 'model.engine'
+                    },
+                    trt: {
+                        precision: precision,
+                        imgsz: 640,
+                        dynamic: true
+                    }
                 };
+                console.log('[Conversion] TensorRT payload:', JSON.stringify(payload, null, 2));
                 result = await window.apiService.convertToTensorRT(payload);
                 console.log('TensorRT conversion started:', result);
             } else {
@@ -209,12 +220,14 @@ class ConversionPage {
                                     <h5 class="mb-1 fw-bold">Select Model</h5>
                                     <p class="text-muted mb-0 small">Choose a trained model to convert</p>
                                 </div>
-                                <div class="card-body" id="models-list">
-                                    <div class="text-center py-5">
-                                        <div class="spinner-border text-primary" role="status">
-                                            <span class="visually-hidden">Loading...</span>
+                                <div class="card-body p-0">
+                                    <div id="models-list" style="max-height: 60vh; overflow-y: auto; overflow-x: hidden; padding: 1rem; scroll-behavior: smooth;">
+                                        <div class="text-center py-5">
+                                            <div class="spinner-border text-primary" role="status">
+                                                <span class="visually-hidden">Loading...</span>
+                                            </div>
+                                            <p class="text-muted mt-3">Loading models...</p>
                                         </div>
-                                        <p class="text-muted mt-3">Loading models...</p>
                                     </div>
                                 </div>
                             </div>

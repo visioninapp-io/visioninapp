@@ -5,6 +5,7 @@ class EvaluationPage {
         this.evaluations = [];
         this.completedTrainings = [];
         this.selectedTrainingResults = null;
+        this.jobsListVisible = true; // Track visibility of completed jobs list
     }
 
     async init() {
@@ -129,9 +130,14 @@ class EvaluationPage {
 
         container.innerHTML = `
             <div class="card border-0 shadow-sm mb-4">
-                <div class="card-header bg-white">
-                    <h5 class="mb-1 fw-bold">Training Results: ${model_key}</h5>
-                    <p class="text-muted mb-0 small">Epoch-by-epoch metrics from training</p>
+                <div class="card-header bg-white d-flex justify-content-between align-items-center">
+                    <div>
+                        <h5 class="mb-1 fw-bold">Training Results: ${model_key}</h5>
+                        <p class="text-muted mb-0 small">Epoch-by-epoch metrics from training</p>
+                    </div>
+                    <button class="btn btn-outline-primary btn-sm" onclick="evaluationPage.openLargerView('${model_key}')">
+                        <i class="bi bi-arrows-fullscreen me-1"></i>Larger View
+                    </button>
                 </div>
                 <div class="card-body">
                     <!-- 탭 네비게이션 -->
@@ -181,7 +187,7 @@ class EvaluationPage {
                                     `).join('')}
                                 </div>
                             </div>
-                            <div style="height: 400px;">
+                            <div style="height: 400px; width: 100%; position: relative;">
                                 <canvas id="metricsChart"></canvas>
                             </div>
                         </div>
@@ -202,7 +208,7 @@ class EvaluationPage {
                                     `).join('')}
                                 </div>
                             </div>
-                            <div style="height: 400px;">
+                            <div style="height: 400px; width: 100%; position: relative;">
                                 <canvas id="lossChart"></canvas>
                             </div>
                         </div>
@@ -224,7 +230,7 @@ class EvaluationPage {
                                     `).join('')}
                                 </div>
                             </div>
-                            <div style="height: 400px;">
+                            <div style="height: 400px; width: 100%; position: relative;">
                                 <canvas id="lrChart"></canvas>
                             </div>
                         </div>
@@ -247,17 +253,17 @@ class EvaluationPage {
                                     `).join('')}
                                 </div>
                             </div>
-                            <div style="height: 400px;">
-                                <canvas id="otherChart"></canvas>
-                            </div>
+                                    <div style="height: 400px; width: 100%; position: relative;">
+                                        <canvas id="otherChart"></canvas>
+                                    </div>
                         </div>
                         ` : ''}
                     </div>
                     
                     <!-- 테이블 -->
-                    <div class="table-responsive mt-4">
-                        <table class="table table-sm table-hover">
-                            <thead>
+                    <div class="table-responsive mt-4" style="max-height: 500px; overflow-y: auto; overflow-x: auto;">
+                        <table class="table table-sm table-hover" style="table-layout: auto; width: 100%;">
+                            <thead class="table-light" style="position: sticky; top: 0; z-index: 8; background-color: #f8f9fa;">
                                 <tr>
                                     ${columns.map(col => {
                                         // 컬럼 헤더를 깔끔하게 포맷팅
@@ -266,7 +272,7 @@ class EvaluationPage {
                                             .replace('(B)', '')
                                             .replace('train/', '')
                                             .replace('val/', '');
-                                        return `<th>${header}</th>`;
+                                        return `<th style="max-width: 120px; overflow: hidden; text-overflow: ellipsis; white-space: nowrap;" title="${header}">${header}</th>`;
                                     }).join('')}
                                 </tr>
                             </thead>
@@ -275,9 +281,9 @@ class EvaluationPage {
                                     <tr>
                                         ${columns.map(col => {
                                             if (col === epochCol) {
-                                                return `<td>${Math.round(row[col])}</td>`;
+                                                return `<td style="max-width: 80px; overflow: hidden; text-overflow: ellipsis; white-space: nowrap;">${Math.round(row[col])}</td>`;
                                             }
-                                            return `<td>${typeof row[col] === 'number' ? row[col].toFixed(4) : row[col]}</td>`;
+                                            return `<td style="max-width: 120px; overflow: hidden; text-overflow: ellipsis; white-space: nowrap;" title="${typeof row[col] === 'number' ? row[col].toFixed(4) : row[col]}">${typeof row[col] === 'number' ? row[col].toFixed(4) : row[col]}</td>`;
                                         }).join('')}
                                     </tr>
                                 `).join('')}
@@ -297,6 +303,390 @@ class EvaluationPage {
                 otherMetrics
             });
         }, 100);
+    }
+
+    openLargerView(modelKey) {
+        // Store current results data for modal
+        if (!this.selectedTrainingResults) {
+            showToast('No training results to display', 'warning');
+            return;
+        }
+
+        const { rows, columns } = this.selectedTrainingResults;
+        const epochCol = columns.find(c => c.toLowerCase().includes('epoch')) || columns[0];
+        
+        // 메트릭 컬럼들 분류
+        const metricCols = columns.filter(col => {
+            return col !== epochCol && typeof rows[0][col] === 'number';
+        });
+        const lossMetrics = metricCols.filter(col => col.toLowerCase().includes('loss'));
+        const evalMetrics = metricCols.filter(col => 
+            col.toLowerCase().includes('precision') || 
+            col.toLowerCase().includes('recall') || 
+            col.toLowerCase().includes('map') ||
+            col.toLowerCase().includes('metrics/')
+        );
+        const lrMetrics = metricCols.filter(col => col.toLowerCase().includes('lr'));
+        const otherMetrics = metricCols.filter(col => 
+            !lossMetrics.includes(col) && 
+            !evalMetrics.includes(col) && 
+            !lrMetrics.includes(col) &&
+            !col.toLowerCase().includes('time')
+        );
+
+        // Create modal HTML
+        const modalHTML = `
+            <div class="modal fade" id="trainingResultsModal" tabindex="-1" aria-labelledby="trainingResultsModalLabel" aria-hidden="true">
+                <div class="modal-dialog modal-fullscreen">
+                    <div class="modal-content">
+                        <div class="modal-header">
+                            <h5 class="modal-title fw-bold" id="trainingResultsModalLabel">
+                                <i class="bi bi-graph-up me-2"></i>Training Results: ${modelKey}
+                            </h5>
+                            <button type="button" class="btn-close" data-bs-dismiss="modal" aria-label="Close"></button>
+                        </div>
+                        <div class="modal-body" style="overflow-y: auto; max-height: calc(100vh - 120px);">
+                            <!-- 탭 네비게이션 -->
+                            <ul class="nav nav-tabs mb-3" id="modalMetricsTabs" role="tablist">
+                                <li class="nav-item" role="presentation">
+                                    <button class="nav-link active" id="modal-metrics-tab" data-bs-toggle="tab" data-bs-target="#modal-metrics-pane" type="button" role="tab">
+                                        Evaluation Metrics
+                                    </button>
+                                </li>
+                                <li class="nav-item" role="presentation">
+                                    <button class="nav-link" id="modal-loss-tab" data-bs-toggle="tab" data-bs-target="#modal-loss-pane" type="button" role="tab">
+                                        Loss
+                                    </button>
+                                </li>
+                                ${lrMetrics.length > 0 ? `
+                                <li class="nav-item" role="presentation">
+                                    <button class="nav-link" id="modal-lr-tab" data-bs-toggle="tab" data-bs-target="#modal-lr-pane" type="button" role="tab">
+                                        Learning Rate
+                                    </button>
+                                </li>
+                                ` : ''}
+                                ${otherMetrics.length > 0 ? `
+                                <li class="nav-item" role="presentation">
+                                    <button class="nav-link" id="modal-other-tab" data-bs-toggle="tab" data-bs-target="#modal-other-pane" type="button" role="tab">
+                                        Other
+                                    </button>
+                                </li>
+                                ` : ''}
+                            </ul>
+
+                            <!-- 탭 컨텐츠 -->
+                            <div class="tab-content" id="modalMetricsTabContent">
+                                <!-- Evaluation Metrics 탭 -->
+                                <div class="tab-pane fade show active" id="modal-metrics-pane" role="tabpanel">
+                                    <div class="mb-3">
+                                        <small class="text-muted">Select metrics to display:</small>
+                                        <div class="mt-2 d-flex flex-wrap gap-2" id="modal-metrics-checkboxes">
+                                            ${evalMetrics.map(col => `
+                                                <div class="form-check form-check-inline">
+                                                    <input class="form-check-input modal-metric-checkbox" type="checkbox" 
+                                                        value="${col}" id="modal-check-${col}" 
+                                                        ${['metrics/precision(B)', 'metrics/recall(B)', 'metrics/mAP50(B)', 'metrics/mAP50-95(B)'].includes(col) ? 'checked' : ''}>
+                                                    <label class="form-check-label small" for="modal-check-${col}">
+                                                        ${col.replace('metrics/', '').replace('(B)', '')}
+                                                    </label>
+                                                </div>
+                                            `).join('')}
+                                        </div>
+                                    </div>
+                                    <div style="height: 600px;">
+                                        <canvas id="modalMetricsChart"></canvas>
+                                    </div>
+                                </div>
+
+                                <!-- Loss 탭 -->
+                                <div class="tab-pane fade" id="modal-loss-pane" role="tabpanel">
+                                    <div class="mb-3">
+                                        <small class="text-muted">Select loss metrics to display:</small>
+                                        <div class="mt-2 d-flex flex-wrap gap-2" id="modal-loss-checkboxes">
+                                            ${lossMetrics.map(col => `
+                                                <div class="form-check form-check-inline">
+                                                    <input class="form-check-input modal-loss-checkbox" type="checkbox" 
+                                                        value="${col}" id="modal-check-${col}" checked>
+                                                    <label class="form-check-label small" for="modal-check-${col}">
+                                                        ${col}
+                                                    </label>
+                                                </div>
+                                            `).join('')}
+                                        </div>
+                                    </div>
+                                    <div style="height: 600px;">
+                                        <canvas id="modalLossChart"></canvas>
+                                    </div>
+                                </div>
+
+                                ${lrMetrics.length > 0 ? `
+                                <!-- Learning Rate 탭 -->
+                                <div class="tab-pane fade" id="modal-lr-pane" role="tabpanel">
+                                    <div class="mb-3">
+                                        <small class="text-muted">Select learning rate metrics to display:</small>
+                                        <div class="mt-2 d-flex flex-wrap gap-2" id="modal-lr-checkboxes">
+                                            ${lrMetrics.map(col => `
+                                                <div class="form-check form-check-inline">
+                                                    <input class="form-check-input modal-lr-checkbox" type="checkbox" 
+                                                        value="${col}" id="modal-check-${col}" checked>
+                                                    <label class="form-check-label small" for="modal-check-${col}">
+                                                        ${col}
+                                                    </label>
+                                                </div>
+                                            `).join('')}
+                                        </div>
+                                    </div>
+                                    <div style="height: 600px;">
+                                        <canvas id="modalLrChart"></canvas>
+                                    </div>
+                                </div>
+                                ` : ''}
+
+                                ${otherMetrics.length > 0 ? `
+                                <!-- Other 탭 -->
+                                <div class="tab-pane fade" id="modal-other-pane" role="tabpanel">
+                                    <div class="mb-3">
+                                        <small class="text-muted">Select metrics to display:</small>
+                                        <div class="mt-2 d-flex flex-wrap gap-2" id="modal-other-checkboxes">
+                                            ${otherMetrics.map(col => `
+                                                <div class="form-check form-check-inline">
+                                                    <input class="form-check-input modal-other-checkbox" type="checkbox" 
+                                                        value="${col}" id="modal-check-${col}" checked>
+                                                    <label class="form-check-label small" for="modal-check-${col}">
+                                                        ${col}
+                                                    </label>
+                                                </div>
+                                            `).join('')}
+                                        </div>
+                                    </div>
+                                    <div style="height: 600px;">
+                                        <canvas id="modalOtherChart"></canvas>
+                                    </div>
+                                </div>
+                                ` : ''}
+                            </div>
+                            
+                            <!-- 테이블 -->
+                            <div class="table-responsive mt-4" style="max-height: 600px; overflow-y: auto; overflow-x: auto;">
+                                <table class="table table-sm table-hover">
+                                    <thead class="table-light sticky-top">
+                                        <tr>
+                                            ${columns.map(col => {
+                                                let header = col
+                                                    .replace('metrics/', '')
+                                                    .replace('(B)', '')
+                                                    .replace('train/', '')
+                                                    .replace('val/', '');
+                                                return `<th>${header}</th>`;
+                                            }).join('')}
+                                        </tr>
+                                    </thead>
+                                    <tbody>
+                                        ${rows.map(row => `
+                                            <tr>
+                                                ${columns.map(col => {
+                                                    if (col === epochCol) {
+                                                        return `<td>${Math.round(row[col])}</td>`;
+                                                    }
+                                                    return `<td>${typeof row[col] === 'number' ? row[col].toFixed(4) : row[col]}</td>`;
+                                                }).join('')}
+                                            </tr>
+                                        `).join('')}
+                                    </tbody>
+                                </table>
+                            </div>
+                        </div>
+                        <div class="modal-footer">
+                            <button type="button" class="btn btn-secondary" data-bs-dismiss="modal">Close</button>
+                        </div>
+                    </div>
+                </div>
+            </div>
+        `;
+
+        // Remove existing modal if any
+        const existingModal = document.getElementById('trainingResultsModal');
+        if (existingModal) {
+            existingModal.remove();
+        }
+
+        // Add modal to body
+        document.body.insertAdjacentHTML('beforeend', modalHTML);
+
+        // Show modal
+        const modal = new bootstrap.Modal(document.getElementById('trainingResultsModal'));
+        modal.show();
+
+        // Render charts after modal is shown
+        setTimeout(() => {
+            this.renderModalCharts(rows, columns, epochCol, {
+                evalMetrics,
+                lossMetrics,
+                lrMetrics,
+                otherMetrics
+            });
+        }, 300);
+
+        // Cleanup on modal close
+        document.getElementById('trainingResultsModal').addEventListener('hidden.bs.modal', function() {
+            this.remove();
+        });
+    }
+
+    renderModalCharts(rows, columns, epochCol, metricCategories) {
+        const epochs = rows.map(row => row[epochCol]);
+        const colors = [
+            'rgb(99, 102, 241)', 'rgb(16, 185, 129)', 'rgb(59, 130, 246)', 'rgb(245, 158, 11)',
+            'rgb(239, 68, 68)', 'rgb(168, 85, 247)', 'rgb(236, 72, 153)', 'rgb(14, 165, 233)',
+            'rgb(34, 197, 94)', 'rgb(251, 146, 60)'
+        ];
+
+        // Render each chart category
+        this.renderModalCategoryChart('modalMetricsChart', epochs, rows, metricCategories.evalMetrics, colors, 'Evaluation Metrics');
+        this.renderModalCategoryChart('modalLossChart', epochs, rows, metricCategories.lossMetrics, colors, 'Loss Metrics');
+        
+        if (metricCategories.lrMetrics.length > 0) {
+            this.renderModalCategoryChart('modalLrChart', epochs, rows, metricCategories.lrMetrics, colors, 'Learning Rate');
+        }
+        
+        if (metricCategories.otherMetrics.length > 0) {
+            this.renderModalCategoryChart('modalOtherChart', epochs, rows, metricCategories.otherMetrics, colors, 'Other Metrics');
+        }
+
+        // Setup checkboxes
+        this.setupModalChartCheckboxes(rows, epochs, metricCategories);
+    }
+
+    renderModalCategoryChart(canvasId, epochs, rows, metricCols, colors, title) {
+        const ctx = document.getElementById(canvasId);
+        if (!ctx) return;
+
+        const defaultMetrics = metricCols.filter(col => {
+            const checkbox = document.getElementById(`modal-check-${col}`);
+            return checkbox && checkbox.checked;
+        });
+
+        if (defaultMetrics.length === 0 && metricCols.length > 0) {
+            defaultMetrics.push(metricCols[0]);
+            const checkbox = document.getElementById(`modal-check-${metricCols[0]}`);
+            if (checkbox) checkbox.checked = true;
+        }
+
+        const datasets = defaultMetrics.map((col, idx) => ({
+            label: col.replace('metrics/', '').replace('(B)', ''),
+            data: rows.map(row => row[col]),
+            borderColor: colors[idx % colors.length],
+            backgroundColor: colors[idx % colors.length] + '20',
+            tension: 0.3,
+            fill: false,
+            pointRadius: 2,
+            pointHoverRadius: 4
+        }));
+
+        if (window[`${canvasId}Instance`]) {
+            window[`${canvasId}Instance`].destroy();
+        }
+
+        window[`${canvasId}Instance`] = new Chart(ctx, {
+            type: 'line',
+            data: {
+                labels: epochs,
+                datasets: datasets
+            },
+            options: {
+                responsive: true,
+                maintainAspectRatio: false,
+                interaction: {
+                    mode: 'index',
+                    intersect: false
+                },
+                plugins: {
+                    legend: {
+                        position: 'top',
+                        labels: {
+                            boxWidth: 12,
+                            padding: 8,
+                            font: { size: 11 }
+                        }
+                    },
+                    tooltip: {
+                        mode: 'index',
+                        intersect: false
+                    }
+                },
+                scales: {
+                    x: {
+                        title: {
+                            display: true,
+                            text: 'Epoch'
+                        }
+                    },
+                    y: {
+                        beginAtZero: true,
+                        title: {
+                            display: true,
+                            text: title.includes('Rate') ? 'Learning Rate' : title.includes('Loss') ? 'Loss' : 'Value'
+                        }
+                    }
+                }
+            }
+        });
+    }
+
+    setupModalChartCheckboxes(rows, epochs, metricCategories) {
+        document.querySelectorAll('.modal-metric-checkbox').forEach(checkbox => {
+            checkbox.addEventListener('change', () => {
+                this.updateModalChart('modalMetricsChart', rows, epochs, metricCategories.evalMetrics);
+            });
+        });
+
+        document.querySelectorAll('.modal-loss-checkbox').forEach(checkbox => {
+            checkbox.addEventListener('change', () => {
+                this.updateModalChart('modalLossChart', rows, epochs, metricCategories.lossMetrics);
+            });
+        });
+
+        document.querySelectorAll('.modal-lr-checkbox').forEach(checkbox => {
+            checkbox.addEventListener('change', () => {
+                this.updateModalChart('modalLrChart', rows, epochs, metricCategories.lrMetrics);
+            });
+        });
+
+        document.querySelectorAll('.modal-other-checkbox').forEach(checkbox => {
+            checkbox.addEventListener('change', () => {
+                this.updateModalChart('modalOtherChart', rows, epochs, metricCategories.otherMetrics);
+            });
+        });
+    }
+
+    updateModalChart(canvasId, rows, epochs, metricCols) {
+        const colors = [
+            'rgb(99, 102, 241)', 'rgb(16, 185, 129)', 'rgb(59, 130, 246)', 'rgb(245, 158, 11)',
+            'rgb(239, 68, 68)', 'rgb(168, 85, 247)', 'rgb(236, 72, 153)', 'rgb(14, 165, 233)',
+            'rgb(34, 197, 94)', 'rgb(251, 146, 60)'
+        ];
+
+        const selectedMetrics = metricCols.filter(col => {
+            const checkbox = document.getElementById(`modal-check-${col}`);
+            return checkbox && checkbox.checked;
+        });
+
+        const ctx = document.getElementById(canvasId);
+        if (!ctx || !window[`${canvasId}Instance`]) return;
+
+        const datasets = selectedMetrics.map((col, idx) => ({
+            label: col.replace('metrics/', '').replace('(B)', ''),
+            data: rows.map(row => row[col]),
+            borderColor: colors[idx % colors.length],
+            backgroundColor: colors[idx % colors.length] + '20',
+            tension: 0.3,
+            fill: false,
+            pointRadius: 2,
+            pointHoverRadius: 4
+        }));
+
+        window[`${canvasId}Instance`].data.datasets = datasets;
+        window[`${canvasId}Instance`].update();
     }
 
     renderResultsCharts(rows, columns, epochCol, metricCategories) {
@@ -378,6 +768,7 @@ class EvaluationPage {
             options: {
                 responsive: true,
                 maintainAspectRatio: false,
+                resizeDelay: 0,
                 interaction: {
                     mode: 'index',
                     intersect: false
@@ -488,17 +879,23 @@ class EvaluationPage {
         const container = document.getElementById('evaluations-content');
         if (!container) return;
 
-        // 완료된 학습 목록 섹션
+        // 완료된 학습 목록 섹션 (side-by-side layout with toggle)
         const completedTrainingsSection = `
-            <div class="row mb-4">
-                <div class="col-12">
-                    <div class="card border-0 shadow-sm">
-                        <div class="card-header bg-white">
-                            <h5 class="mb-1 fw-bold">Completed Training Jobs</h5>
-                            <p class="text-muted mb-0 small">Select a training to view detailed results from S3</p>
+            <div class="row g-4 mb-4">
+                <!-- Left: Completed Training Jobs (toggleable) -->
+                <div class="${this.jobsListVisible ? 'col-lg-4' : 'col-lg-0'} d-${this.jobsListVisible ? 'block' : 'none'}" id="jobs-list-column" style="transition: all 0.3s ease;">
+                    <div class="card border-0 shadow-sm h-100">
+                        <div class="card-header bg-white d-flex justify-content-between align-items-center">
+                            <div>
+                                <h5 class="mb-1 fw-bold">Completed Training Jobs</h5>
+                                <p class="text-muted mb-0 small">Select a training to view results</p>
+                            </div>
+                            <button class="btn btn-sm btn-outline-secondary" onclick="evaluationPage.toggleJobsList()" title="Hide jobs list">
+                                <i class="bi bi-chevron-left"></i>
+                            </button>
                         </div>
-                        <div class="card-body">
-                            <div id="completed-trainings-list">
+                        <div class="card-body p-0">
+                            <div id="completed-trainings-list" style="max-height: 70vh; overflow-y: auto; overflow-x: hidden; padding: 1rem; scroll-behavior: smooth;">
                                 <div class="text-center py-3">
                                     <div class="spinner-border spinner-border-sm text-primary" role="status">
                                         <span class="visually-hidden">Loading...</span>
@@ -508,36 +905,57 @@ class EvaluationPage {
                         </div>
                     </div>
                 </div>
-            </div>
-            
-            <div id="training-results-container"></div>
-        `;
-
-        if (this.evaluations.length === 0) {
-            // 완료된 트레이닝이 있으면 선택 안내 메시지 표시
-            if (this.completedTrainings.length > 0) {
-                container.innerHTML = completedTrainingsSection + `
-                    <div class="alert alert-info border-0 shadow-sm">
-                        <div class="d-flex align-items-center">
-                            <i class="bi bi-info-circle me-3" style="font-size: 1.5rem;"></i>
-                            <div>
-                                <h6 class="mb-1 fw-bold">View Training Results</h6>
-                                <p class="mb-0 small">Select one of the completed trainings above to view detailed training results and metrics stored in S3.</p>
+                
+                <!-- Right: Training Results -->
+                <div class="${this.jobsListVisible ? 'col-lg-8' : 'col-lg-12'}" id="results-column" style="transition: all 0.3s ease;">
+                    <div id="training-results-container">
+                        <div class="card border-0 shadow-sm h-100">
+                            <div class="card-body d-flex align-items-center justify-content-center" style="min-height: 400px;">
+                                <div class="text-center text-muted">
+                                    ${this.jobsListVisible ? `
+                                        <i class="bi bi-arrow-left-circle" style="font-size: 3rem; opacity: 0.3;"></i>
+                                        <p class="mt-3 mb-0">Select a training job from the left to view detailed results</p>
+                                    ` : `
+                                        <button class="btn btn-outline-primary mb-3" onclick="evaluationPage.toggleJobsList()">
+                                            <i class="bi bi-list-ul me-2"></i>Show Training Jobs List
+                                        </button>
+                                        <p class="text-muted mb-0">Or select a training job to view results</p>
+                                    `}
+                                </div>
                             </div>
                         </div>
                     </div>
-                `;
+                </div>
+                ${!this.jobsListVisible ? `
+                <!-- Toggle button when list is hidden -->
+                <div class="position-fixed" style="left: 20px; top: 50%; transform: translateY(-50%); z-index: 1000;">
+                    <button class="btn btn-primary btn-lg rounded-circle shadow-lg" onclick="evaluationPage.toggleJobsList()" title="Show Training Jobs List" style="width: 50px; height: 50px; padding: 0;">
+                        <i class="bi bi-chevron-right"></i>
+                    </button>
+                </div>
+                ` : ''}
+            </div>
+        `;
+
+        if (this.evaluations.length === 0) {
+            // 완료된 트레이닝이 있으면 side-by-side 레이아웃 표시
+            if (this.completedTrainings.length > 0) {
+                container.innerHTML = completedTrainingsSection;
                 setTimeout(() => this.renderCompletedTrainings(), 100);
                 return;
             }
             
             // 완료된 트레이닝도 없으면 안내 메시지 표시
             container.innerHTML = completedTrainingsSection + `
-                <div class="text-center py-5">
-                    <i class="bi bi-clipboard-data text-muted" style="font-size: 3rem;"></i>
-                    <p class="text-muted mt-3">No evaluation data available</p>
-                    <p class="text-muted small">Train and evaluate a model to see metrics here</p>
-                    <a href="#/training" class="btn btn-primary mt-2">Start Training</a>
+                <div class="col-lg-8">
+                    <div class="card border-0 shadow-sm">
+                        <div class="card-body text-center py-5">
+                            <i class="bi bi-clipboard-data text-muted" style="font-size: 3rem;"></i>
+                            <p class="text-muted mt-3">No evaluation data available</p>
+                            <p class="text-muted small">Train and evaluate a model to see metrics here</p>
+                            <a href="#/training" class="btn btn-primary mt-2">Start Training</a>
+                        </div>
+                    </div>
                 </div>
             `;
             // 완료된 학습 목록 렌더링
@@ -635,8 +1053,8 @@ class EvaluationPage {
                         <h5 class="mb-1 fw-bold">Per-Class Performance</h5>
                         <p class="text-muted mb-0 small">Detailed metrics for each class</p>
                     </div>
-                    <div class="card-body">
-                        <div class="table-responsive">
+                    <div class="card-body p-0">
+                        <div class="table-responsive" style="max-height: 400px; overflow-y: auto; overflow-x: auto; padding: 1rem;">
                             <table class="table table-hover">
                                 <thead>
                                     <tr>
@@ -743,6 +1161,32 @@ class EvaluationPage {
         `;
     }
 
+    toggleJobsList() {
+        this.jobsListVisible = !this.jobsListVisible;
+        this.renderEvaluationsContent();
+        // Re-render training results if they exist
+        if (this.selectedTrainingResults) {
+            setTimeout(() => {
+                this.renderTrainingResults();
+                // Trigger chart resize after layout change
+                setTimeout(() => {
+                    this.resizeAllCharts();
+                }, 200);
+            }, 100);
+        }
+    }
+
+    resizeAllCharts() {
+        // Resize all chart instances
+        const chartIds = ['metricsChart', 'lossChart', 'lrChart', 'otherChart'];
+        chartIds.forEach(chartId => {
+            const chartInstance = window[`${chartId}Instance`];
+            if (chartInstance) {
+                chartInstance.resize();
+            }
+        });
+    }
+
     initCharts(evaluation) {
         // Metrics Chart
         const metricsCtx = document.getElementById('metricsChart');
@@ -769,7 +1213,8 @@ class EvaluationPage {
                 },
                 options: {
                     responsive: true,
-                    maintainAspectRatio: false,
+                    maintainAspectRatio: true,
+                    resizeDelay: 0,
                     scales: {
                         y: {
                             beginAtZero: true,
@@ -785,3 +1230,4 @@ class EvaluationPage {
         }
     }
 }
+

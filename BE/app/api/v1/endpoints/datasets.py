@@ -1853,7 +1853,12 @@ async def upload_yolo_labels(
             
             # Upload data.yaml to S3
             s3_data_yaml_key = f"datasets/{dataset.name}/data.yaml"
-            file_storage.upload_to_s3(yaml_content, s3_data_yaml_key)
+            file_storage.s3_client.put_object(
+                Bucket=settings.AWS_BUCKET_NAME,
+                Key=s3_data_yaml_key,
+                Body=yaml_content,
+                ContentType='application/x-yaml'
+            )
             log.info(f"[UPLOAD-YOLO] Uploaded data.yaml to S3: {s3_data_yaml_key}")
         except Exception as e:
             log.error(f"[UPLOAD-YOLO] Failed to parse data.yaml: {e}", exc_info=True)
@@ -1865,6 +1870,7 @@ async def upload_yolo_labels(
     successful_files = 0
     failed_files = 0
     processed_assets = set()
+    uploaded_to_s3 = []  # Track files uploaded to S3
     
     for label_file in label_files:
         try:
@@ -1875,22 +1881,33 @@ async def upload_yolo_labels(
                 failed_files += 1
                 continue
             
+            # Read label file content FIRST (before matching asset)
+            label_content = await label_file.read()
+            
+            # Upload to S3 FIRST (always upload, even if no matching asset)
+            s3_label_key = f"{s3_labels_prefix}/{label_filename}"
+            try:
+                file_storage.s3_client.put_object(
+                    Bucket=settings.AWS_BUCKET_NAME,
+                    Key=s3_label_key,
+                    Body=label_content,
+                    ContentType='text/plain'
+                )
+                uploaded_to_s3.append(s3_label_key)
+                log.info(f"[UPLOAD-YOLO] ✅ Uploaded label file to S3: {s3_label_key}")
+            except Exception as s3_error:
+                log.error(f"[UPLOAD-YOLO] ❌ Failed to upload {label_filename} to S3: {s3_error}")
+                failed_files += 1
+                continue
+            
             # Extract base name to match with asset
             base_name = os.path.splitext(label_filename)[0]
             asset = asset_map.get(base_name) or asset_map.get(label_filename)
             
             if not asset:
-                log.warning(f"[UPLOAD-YOLO] No matching asset found for label file: {label_filename}")
-                failed_files += 1
+                log.warning(f"[UPLOAD-YOLO] ⚠️ No matching asset found for label file: {label_filename} (but file uploaded to S3)")
+                successful_files += 1  # Still count as successful since S3 upload worked
                 continue
-            
-            # Read label file content
-            label_content = await label_file.read()
-            
-            # Upload to S3
-            s3_label_key = f"{s3_labels_prefix}/{label_filename}"
-            file_storage.upload_to_s3(label_content, s3_label_key)
-            log.info(f"[UPLOAD-YOLO] Uploaded label file to S3: {s3_label_key}")
             
             # Parse YOLO format
             lines = label_content.decode("utf-8").strip().split("\n")
@@ -1991,26 +2008,38 @@ async def upload_yolo_labels(
             failed_files += 1
             continue
     
-    # Commit all annotations
+    # Always ensure data.yaml exists in S3 (upload or generate)
+    s3_data_yaml_key = f"datasets/{dataset.name}/data.yaml"
+    if not data_yaml:
+        # Generate and upload data.yaml based on created LabelClasses
+        try:
+            upload_data_yaml_for_dataset(db, dataset_id)
+            log.info(f"[UPLOAD-YOLO] ✅ Generated and uploaded data.yaml for dataset {dataset_id}")
+        except Exception as e:
+            log.warning(f"[UPLOAD-YOLO] ⚠️ Failed to generate data.yaml: {e}")
+    
+    # Commit all annotations (even if 0, we still uploaded files to S3)
     if total_annotations > 0:
         db.commit()
         log.info(f"[UPLOAD-YOLO] ✅ Committed {total_annotations} annotations to database")
-        
-        # Update data.yaml if it wasn't provided
-        if not data_yaml:
-            upload_data_yaml_for_dataset(db, dataset_id)
-            log.info(f"[UPLOAD-YOLO] Updated data.yaml for dataset {dataset_id}")
     else:
-        db.rollback()
-        log.warning(f"[UPLOAD-YOLO] No annotations to save")
+        # Even if no annotations, commit any LabelClasses that were created
+        try:
+            db.commit()
+            log.info(f"[UPLOAD-YOLO] ✅ Committed LabelClasses (no annotations created)")
+        except Exception as e:
+            log.warning(f"[UPLOAD-YOLO] ⚠️ No changes to commit: {e}")
+            db.rollback()
     
     return {
         "success": True,
-        "message": f"Uploaded {successful_files} label files, created {total_annotations} annotations",
+        "message": f"Uploaded {successful_files} label files to S3, created {total_annotations} annotations",
         "dataset_id": dataset_id,
         "total_files": len(label_files),
         "successful_files": successful_files,
         "failed_files": failed_files,
         "total_annotations": total_annotations,
-        "processed_assets": len(processed_assets)
+        "processed_assets": len(processed_assets),
+        "files_uploaded_to_s3": len(uploaded_to_s3),
+        "s3_keys": uploaded_to_s3
     }

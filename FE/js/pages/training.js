@@ -26,7 +26,7 @@ class TrainingPage {
 
             this.attachEventListeners();
 
-            // Start periodic refresh (every 10 seconds)
+            // Start periodic refresh (every 5 seconds for smooth progress updates)
             this.startPeriodicRefresh();
 
             console.log('[Training Page] Initialized successfully');
@@ -315,18 +315,17 @@ class TrainingPage {
     startPeriodicRefresh() {
         /**
          * Start periodic refresh of training jobs
-         * Uses longer interval when RabbitMQ is connected (real-time updates)
-         * Uses shorter interval as fallback when RabbitMQ is disconnected
+         * Backend consumer now updates DB in real-time via train.log messages
+         * So we poll frequently (5s) to reflect the latest progress
          */
         // Clear existing interval if any
         if (this.refreshInterval) {
             clearInterval(this.refreshInterval);
         }
 
-        // Use longer interval if RabbitMQ is connected (60s vs 10s)
-        // RabbitMQ provides real-time metrics, so we only need periodic refresh for job status
-        const interval = this.rabbitmqConnected ? 60000 : 10000;
-        console.log(`[Training Page] Starting periodic refresh (${interval/1000}s interval, RabbitMQ: ${this.rabbitmqConnected ? 'ON' : 'OFF'})`);
+        // Fixed 5 second interval for smooth progress updates
+        const interval = 5000;
+        console.log(`[Training Page] Starting periodic refresh (${interval/1000}s interval)`);
 
         // Refresh periodically
         this.refreshInterval = setInterval(async () => {

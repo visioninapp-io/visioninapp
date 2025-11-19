@@ -16,7 +16,8 @@ class App {
         // Dynamic routes (with parameters)
         this.dynamicRoutes = [
             { pattern: /^\/auto-annotate\/(\d+)$/, handler: (id) => new AutoAnnotatePage(id) },
-            { pattern: /^\/dataset-detail\/(\d+)$/, handler: (id) => new DatasetDetailPage(id) }
+            { pattern: /^\/dataset-detail\/(\d+)$/, handler: (id) => new DatasetDetailPage(id) },
+            { pattern: /^\/upload-labels\/(\d+)$/, handler: (id) => new UploadLabelsPage(id) }
         ];
 
         this.init();

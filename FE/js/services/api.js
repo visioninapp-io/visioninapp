@@ -1,7 +1,7 @@
 // API Service Layer - Handles all backend communications
 // Enhanced with robust error handling and debugging
 
-const API_BASE_URL = '/api/v1';
+const API_BASE_URL = 'api/v1';
 
 class APIService {
     constructor() {
@@ -1278,10 +1278,36 @@ class APIService {
         console.log(`[API] Deleting export job ${exportId}...`);
         return this.delete(`/export/${exportId}`);
     }
+
+    // ========== YOLO LABELS UPLOAD ==========
+    async uploadYoloLabels(datasetId, formData) {
+        console.log(`[API] Uploading YOLO labels for dataset ${datasetId}...`);
+        try {
+            const response = await fetch(`${this.baseURL}/datasets/${datasetId}/upload-yolo-labels`, {
+                method: 'POST',
+                body: formData,
+                headers: {
+                    'Authorization': this.getAuthToken() ? `Bearer ${this.getAuthToken()}` : ''
+                }
+            });
+
+            if (!response.ok) {
+                const error = await response.json();
+                throw new Error(error.detail || 'Upload failed');
+            }
+
+            const data = await response.json();
+            console.log(`[API] ✅ Upload successful:`, data);
+            return data;
+        } catch (error) {
+            console.error(`[API] ❌ Upload failed:`, error);
+            throw error;
+        }
+    }
 }
 
 // Create singleton instance and make it globally accessible
-const apiService = new APIService();
-window.apiService = apiService;
-
-console.log('[API Service] Service ready and globally accessible');
+if (!window.apiService) {
+    window.apiService = new APIService();
+    console.log('[API Service] Service ready and globally accessible');
+}

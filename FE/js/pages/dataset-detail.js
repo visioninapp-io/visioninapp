@@ -152,6 +152,9 @@ class DatasetDetailPage {
                                 <button class="btn btn-outline-primary" onclick="window.location.hash='#/auto-annotate/${this.datasetId}'">
                                     <i class="bi bi-sparkles me-1"></i> Auto-Annotate
                                 </button>
+                                <button class="btn btn-outline-success" onclick="window.location.hash='#/upload-labels/${this.datasetId}'">
+                                    <i class="bi bi-upload me-1"></i> Upload Labels
+                                </button>
                                 <button class="btn btn-danger" onclick="confirmDeleteDataset(${this.datasetId})">
                                     <i class="bi bi-trash me-1"></i> Delete
                                 </button>

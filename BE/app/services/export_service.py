@@ -83,7 +83,141 @@ class ExportService:
         # 3) Create temp export directory
         # -------------------------------------------------
         timestamp = datetime.now().strftime("%Y%m%d_%H%M%S")
-        export_name = f"{dataset.name}_{timestamp}"
+        export_name = f"dataset_{dataset.name}_{timestamp}"
+
+        temp_dir = self.export_dir / export_name
+        temp_dir.mkdir(parents=True, exist_ok=True)
+
+        # -------------------------------------------------
+        # 4) Download entire S3 prefix → local
+        # -------------------------------------------------
+        paginator = s3.get_paginator("list_objects_v2")
+
+        for page in paginator.paginate(Bucket=bucket, Prefix=prefix):
+            for obj in page.get("Contents", []):
+                key = obj["Key"]
+                if key.endswith("/"):
+                    continue
+
+                # Remove prefix to create relative path structure
+                rel_path = key[len(prefix):]
+                
+                # If include_images is False, skip image files
+                # YOLO format: images/ contains image files, labels/ contains .txt files
+                if not include_images:
+                    # Skip files in images/ directory
+                    if rel_path.startswith("images/"):
+                        continue
+                    # Also skip common image file extensions at root level
+                    image_extensions = {".jpg", ".jpeg", ".png", ".bmp", ".gif", ".tiff", ".webp"}
+                    if any(rel_path.lower().endswith(ext) for ext in image_extensions):
+                        # But allow data.yaml and other config files
+                        if not rel_path.endswith(".yaml") and not rel_path.endswith(".yml"):
+                            continue
+
+                local_path = temp_dir / rel_path
+                local_path.parent.mkdir(parents=True, exist_ok=True)
+                s3.download_file(bucket, key, str(local_path))
+
+        # -------------------------------------------------
+        # 5) ZIP creation
+        # -------------------------------------------------
+        zip_path = self.export_dir / f"{export_name}.zip"
+        self._create_zip(temp_dir, zip_path)
+
+        # temp directory 삭제
+        shutil.rmtree(temp_dir)
+
+        return {
+            "file_path": str(zip_path),
+            "file_size": zip_path.stat().st_size
+        }
+
+    def export_model(
+        self,
+        export_id: int,
+        model_id: int,
+        db: Session
+    ) -> Dict[str, Any]:
+        """
+        Export model by zipping the entire S3 model directory.
+        """
+        from app.models.model import Model
+        from app.models.model_artifact import ModelArtifact
+        from app.models.model_version import ModelVersion
+        from app.core.config import settings
+
+        s3 = boto3.client(
+            "s3",
+            aws_access_key_id=settings.AWS_ACCESS_KEY_ID,
+            aws_secret_access_key=settings.AWS_SECRET_ACCESS_KEY,
+            region_name=settings.AWS_REGION
+        )
+        bucket = settings.AWS_BUCKET_NAME
+
+        # -------------------------------------------------
+        # 1) Get model from database
+        # -------------------------------------------------
+        model = db.query(Model).filter(Model.id == model_id).first()
+        if not model:
+            raise ValueError(f"Model {model_id} not found")
+
+        # -------------------------------------------------
+        # 2) Get model artifacts to determine S3 prefix
+        # -------------------------------------------------
+        model_versions = db.query(ModelVersion).filter(
+            ModelVersion.model_id == model_id
+        ).all()
+
+        if not model_versions:
+            raise ValueError(f"No model versions found for model {model_id}")
+
+        # Get all storage URIs from artifacts
+        storage_uris = []
+        for version in model_versions:
+            artifacts = db.query(ModelArtifact).filter(
+                ModelArtifact.model_version_id == version.id
+            ).all()
+            storage_uris.extend([a.storage_uri for a in artifacts if a.storage_uri])
+
+        if not storage_uris:
+            raise ValueError(f"No artifacts found for model {model_id}")
+
+        # Get common prefix from storage URIs (e.g., "models/model_1/")
+        # Assume all artifacts share a common base path
+        first_uri = storage_uris[0]
+        prefix_parts = first_uri.split('/')
+        
+        # Try to find common prefix (usually models/model_name/ or models/model_id/)
+        # Get up to the model directory level
+        if len(prefix_parts) >= 2:
+            prefix = '/'.join(prefix_parts[:2]) + '/'  # e.g., "models/model_name/"
+        else:
+            prefix = prefix_parts[0] + '/' if prefix_parts else ''
+
+        def prefix_exists(prefix: str) -> bool:
+            resp = s3.list_objects_v2(
+                Bucket=bucket,
+                Prefix=prefix,
+                MaxKeys=1
+            )
+            return "Contents" in resp
+
+        if not prefix_exists(prefix):
+            # Try alternative: use model name
+            alt_prefix = f"models/{model.name}/"
+            if prefix_exists(alt_prefix):
+                prefix = alt_prefix
+            else:
+                raise ValueError(
+                    f"S3 prefix not found for model: {prefix} or {alt_prefix}"
+                )
+
+        # -------------------------------------------------
+        # 3) Create temp export directory
+        # -------------------------------------------------
+        timestamp = datetime.now().strftime("%Y%m%d_%H%M%S")
+        export_name = f"model_{model.name}_{timestamp}"
 
         temp_dir = self.export_dir / export_name
         temp_dir.mkdir(parents=True, exist_ok=True)

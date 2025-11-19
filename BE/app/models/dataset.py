@@ -75,11 +75,12 @@ class DatasetVersion(Base):
 
 
 class ExportJob(Base):
-    """Track dataset export jobs"""
+    """Track dataset and model export jobs"""
     __tablename__ = "export_job"
 
     id = Column(Integer, primary_key=True, index=True)
     dataset_id = Column(Integer, ForeignKey("dataset.id"), nullable=True)
+    model_id = Column(Integer, ForeignKey("model.id"), nullable=True)
     version_id = Column(Integer, ForeignKey("dataset_version.id"), nullable=True)
 
     export_format = Column(String(50))  # yolov8, yolov5, coco, pascal_voc, etc.

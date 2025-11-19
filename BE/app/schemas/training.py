@@ -1,4 +1,4 @@
-from pydantic import BaseModel, Field, model_validator
+from pydantic import BaseModel, Field, model_validator, ConfigDict
 from typing import Optional, Dict, Any
 from datetime import datetime
 from app.models.training import TrainingStatus
@@ -23,7 +23,7 @@ class TrainingJobResponse(BaseModel):
     model_id: Optional[int] = None
     dataset_id: Optional[int] = None
 
-    hyperparameters: Dict[str, Any]
+    hyperparameters: Dict[str, Any] = Field(default_factory=dict)
     status: TrainingStatus
     total_epochs: Optional[int] = None
     current_epoch: Optional[int] = None
@@ -36,13 +36,14 @@ class TrainingJobResponse(BaseModel):
     completed_at: Optional[datetime] = None
     error_message: Optional[str] = None
 
+    model_config = ConfigDict(
+        from_attributes=True,
+        protected_namespaces=()
+    )
+
     @model_validator(mode='after')
     def extract_external_job_id(self):
-        """Extract external_job_id from hyperparameters if not already set"""
+        """Extract external_job_id from hyperparameters."""
         if not self.external_job_id and self.hyperparameters:
             self.external_job_id = self.hyperparameters.get("external_job_id")
         return self
-
-    class Config:
-        from_attributes = True
-        protected_namespaces = ()

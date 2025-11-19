@@ -338,10 +338,21 @@ class RabbitMQService {
      * @param {function} callback - Handler for training metrics
      * @returns {string} Subscription ID
      */
-    subscribeToTrainingLogs(callback) {
-        console.log('[RabbitMQ] Subscribing to training logs via exchange (jobs.events/train.*.log)');
-        // Use wildcard to match train.{job_id}.log pattern
-        return this.subscribe('train.*.log', callback, 'exchange', 'jobs.events');
+    subscribeTrainingLogForJob(jobExtId, callback) {
+        if (!jobExtId) {
+            console.warn('[RabbitMQ] Cannot subscribe: no external_job_id provided');
+            return;
+        }
+
+        const routingKey = `train.${jobExtId}.log`;
+        console.log('[RabbitMQ] Subscribing to training logs:', routingKey);
+
+        return this.subscribe(
+            routingKey,
+            callback,
+            'exchange',
+            'jobs.events'
+        );
     }
 
     /**

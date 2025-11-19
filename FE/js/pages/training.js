@@ -49,29 +49,45 @@ class TrainingPage {
         try {
             console.log('[Training Page] Connecting to RabbitMQ...');
 
-            // Connect to RabbitMQ
             await rabbitmqService.connect();
             this.rabbitmqConnected = true;
 
-            // Subscribe to all training logs (filtering will be done in handleTrainingMetrics)
-            rabbitmqService.subscribeToTrainingLogs((message) => {
-                this.handleTrainingMetrics(message);
-            });
+            // =============================
+            // ❶ train.{external_job_id}.log 구독
+            // =============================
+            // if (this.selectedJob) {
+            //     const extId =
+            //         this.selectedJob.external_job_id ||
+            //         this.selectedJob.hyperparameters?.external_job_id;
 
-            // Subscribe to hyperparameter messages (train.*.hpo routing key with wildcard)
-            rabbitmqService.subscribe('train.*.hpo', (message) => {
-                this.handleHyperparameterMessage(message);
-            }, 'exchange', 'jobs.cmd');
+            //     if (extId) {
+            //         console.log('[Training Page] Subscribing via rabbitmqService.subscribeTrainingLogForJob:', extId);
 
-            console.log('[Training Page] ✅ Connected to RabbitMQ and subscribed to training logs');
-            showToast('Connected to real-time training updates', 'success');
+            //         this.prevLogSubKey = rabbitmqService.subscribeTrainingLogForJob(
+            //             extId,
+            //             (msg) => this.handleTrainingMetrics(msg)
+            //         );
+            //     } else {
+            //         console.warn('[Training Page] No external_job_id found. Cannot subscribe.');
+            //     }
+            // }
 
-            // Restart periodic refresh with longer interval (now that RabbitMQ is connected)
+            // =============================
+            // ❷ train.llm.{external_job_id}.hpo 구독
+            // =============================
+            rabbitmqService.subscribe(
+                'train.llm.*.hpo',
+                (msg) => this.handleHyperparameterMessage(msg),
+                'exchange',
+                'jobs.events'
+            );
+
+            console.log('[Training Page] RabbitMQ subscriptions complete');
             this.startPeriodicRefresh();
 
         } catch (error) {
-            console.error('[Training Page] Failed to connect to RabbitMQ:', error);
-            showToast('Failed to connect to real-time updates. Using manual refresh.', 'warning');
+            console.error('[Training Page] Failed to connect RabbitMQ:', error);
+            showToast('Real-time updates unavailable', 'warning');
         }
     }
 
@@ -148,27 +164,58 @@ class TrainingPage {
         console.log('[Training Page] Received training metrics:', message);
 
         try {
-            const { job_id: external_job_id, epoch, metrics } = message;
+            const { job_id: incomingExtId, epoch, metrics } = message;
 
-            // Filter: Only process if this message is for the currently selected job
-            if (this.selectedJob && this.selectedJob.external_job_id) {
-                if (this.selectedJob.external_job_id !== external_job_id) {
-                    console.log(`[Training Page] Ignoring metrics for job ${external_job_id} (selected: ${this.selectedJob.external_job_id})`);
-                    return;
-                }
+            // =============================
+            // 🔥 selectedJob의 external_job_id 가져오기
+            // =============================
+            const selectedExtId =
+                this.selectedJob?.external_job_id ||
+                this.selectedJob?.hyperparameters?.external_job_id;
+
+            if (!selectedExtId) {
+                console.warn('[Training Page] No external_job_id found for selected job');
+                return;
             }
 
-            // Extract loss and accuracy from metrics object
-            const loss = metrics?.loss || metrics?.tloss?.[0] || 0;
-            const accuracy = metrics?.['metrics/mAP50(B)'] || metrics?.['metrics/precision(B)'] || 0;
+            // =============================
+            // 🔥 다른 job 메시지는 무시
+            // =============================
+            if (selectedExtId !== incomingExtId) {
+                console.log(
+                    `[Training Page] Ignoring metrics for job ${incomingExtId} (selected: ${selectedExtId})`
+                );
+                return;
+            }
 
-            console.log(`[Training Page] Processing metrics for selected job: epoch=${epoch}, loss=${loss}, accuracy=${accuracy}`);
+            // =============================
+            // 🔥 loss & accuracy 추출
+            // =============================
+            const loss =
+                metrics?.loss ||
+                metrics?.tloss?.[0] ||
+                0;
 
-            // GPU sends 0-based epoch, convert to 1-based for display
-            const displayEpoch = epoch + 1;
+            const accuracy =
+                metrics?.['metrics/mAP50(B)'] ||
+                metrics?.['metrics/precision(B)'] ||
+                0;
 
-            // Update the display with received metrics
-            this.updateMetricsDisplay({ epoch: displayEpoch, loss, accuracy: accuracy * 100 });
+            console.log(
+                `[Training Page] Processing metrics: epoch=${epoch}, loss=${loss}, accuracy=${accuracy}`
+            );
+
+            // GPU는 epoch 0부터 보내므로 UI용으로 +1
+            const displayEpoch = (epoch || 0) + 1;
+
+            // =============================
+            // 🔥 UI 업데이트
+            // =============================
+            this.updateMetricsDisplay({
+                epoch: displayEpoch,
+                loss,
+                accuracy: accuracy * 100
+            });
 
         } catch (error) {
             console.error('[Training Page] Error handling training metrics:', error);
@@ -872,17 +919,59 @@ class TrainingPage {
         const job = this.trainingJobs.find(j => j.id === id);
 
         if (job) {
-            console.log('[Training Page] Selected job:', job.id, job.name, 'external_job_id:', job.external_job_id);
+            console.log('[Training Page] Selected job:', job.id, job.name);
+
+            // 🔥 기존 구독 해제
+            if (this.prevLogSubKey) {
+                rabbitmqService.unsubscribe(this.prevLogSubKey);
+                this.prevLogSubKey = null;
+            }
+            if (this.prevHpoSubKey) {
+                rabbitmqService.unsubscribe(this.prevHpoSubKey);
+                this.prevHpoSubKey = null;
+            }
+
             this.selectedJob = job;
 
-            // Load S3 metrics for this job
+            // ===========================================
+            // 🔥 external_job_id 보강 (hyperparameters에서 끌어올림)
+            // ===========================================
+            const extId =
+                job.external_job_id ||
+                job.hyperparameters?.external_job_id;
+
+            if (extId) {
+                this.selectedJob.external_job_id = extId;
+                console.log('[Training Page] external_job_id loaded for selected job:', extId);
+            } else {
+                console.warn('[Training Page] No external_job_id found for job:', job.id);
+            }
+
+            // S3 metrics 로드
             await this.loadS3MetricsForJob(job);
 
-            // Re-render the page
+            // UI 업데이트
             const app = document.getElementById('app');
             if (app) {
                 app.innerHTML = this.render();
                 await this.afterRender();
+            }
+        }
+
+        if (this.selectedJob) {
+            const extId =
+                this.selectedJob.external_job_id ||
+                this.selectedJob.hyperparameters?.external_job_id;
+
+            if (extId) {
+                console.log('[Training Page] Re-subscribing for new job:', extId);
+
+                this.prevLogSubKey = rabbitmqService.subscribeTrainingLogForJob(
+                    extId,
+                    (msg) => this.handleTrainingMetrics(msg)
+                );
+            } else {
+                console.warn('[Training Page] Cannot re-subscribe, no external_job_id');
             }
         }
     }
@@ -1341,7 +1430,10 @@ class TrainingPage {
             // Select the newly created job
             if (newJob && newJob.id) {
                 this.selectedJob = this.trainingJobs.find(j => j.id === newJob.id) || newJob;
-                console.log('[Training Page] Auto-selected new job:', this.selectedJob?.name, 'external_job_id:', newJob.external_job_id);
+                console.log('[Training Page] Auto-selected new job:', this.selectedJob?.name);
+
+                // 바로 MQ 구독 시작
+                this.selectJob(this.selectedJob.id);
             }
 
             const app = document.getElementById('app');

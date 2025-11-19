@@ -1,4 +1,4 @@
-from fastapi import APIRouter, Depends, HTTPException, status, Body
+from fastapi import APIRouter, Depends, HTTPException, status, Body, UploadFile, File, Form
 from fastapi.responses import StreamingResponse, Response, RedirectResponse
 from sqlalchemy.orm import Session
 from sqlalchemy import func
@@ -8,10 +8,13 @@ import io
 import zipfile
 import base64
 import re
+import yaml
+import tempfile
+import os
 from datetime import datetime
 from app.core.database import get_db
 from app.core.auth import get_current_user
-from app.models.dataset import Dataset, Annotation, DatasetVersion
+from app.models.dataset import Dataset, Annotation, DatasetVersion, GeometryType
 from app.models.label_class import LabelClass
 from app.models.label_ontology_version import LabelOntologyVersion
 from app.models.model import Model
@@ -1766,3 +1769,248 @@ async def regenerate_data_yaml_for_dataset(
     except Exception as e:
         print(f"[ERROR] Failed to regenerate data.yaml for dataset {dataset_id}: {str(e)}")
         raise HTTPException(status_code=500, detail=f"Failed to regenerate data.yaml: {str(e)}")
+
+
+@router.post("/{dataset_id}/upload-yolo-labels")
+async def upload_yolo_labels(
+    dataset_id: int,
+    label_files: List[UploadFile] = File(...),
+    data_yaml: Optional[UploadFile] = File(None),
+    overwrite_existing: bool = Form(False),
+    db: Session = Depends(get_db),
+    current_user: dict = Depends(get_current_user)
+):
+    """
+    Upload YOLO format label files (.txt) and optionally data.yaml
+    
+    Process:
+    1. Upload label files and data.yaml to S3
+    2. Parse data.yaml to get class names
+    3. Match label files to assets by filename
+    4. Parse YOLO format annotations (class_id x_center y_center width height)
+    5. Create LabelClasses if they don't exist
+    6. Save annotations to database
+    
+    Args:
+        dataset_id: Dataset ID
+        label_files: List of .txt label files (one per image)
+        data_yaml: Optional data.yaml file with class definitions
+        overwrite_existing: If True, delete existing annotations before adding new ones
+    """
+    import logging
+    log = logging.getLogger(__name__)
+    
+    log.info(f"[UPLOAD-YOLO] Starting upload for dataset_id={dataset_id}")
+    log.info(f"[UPLOAD-YOLO] Received {len(label_files)} label files")
+    log.info(f"[UPLOAD-YOLO] data_yaml provided: {data_yaml is not None}")
+    log.info(f"[UPLOAD-YOLO] overwrite_existing: {overwrite_existing}")
+    
+    # Get dataset
+    dataset = db.query(Dataset).filter(Dataset.id == dataset_id).first()
+    if not dataset:
+        raise HTTPException(status_code=404, detail="Dataset not found")
+    
+    # Get dataset version and ontology
+    dataset_version = get_or_create_dataset_version(db, dataset_id, 'v0')
+    if not dataset_version:
+        raise HTTPException(status_code=400, detail="Failed to get or create dataset version")
+    
+    ontology = dataset_version.ontology_version
+    if not ontology:
+        ontology = get_or_create_label_ontology_for_dataset_version(db, dataset_version.id, "v1.0")
+        dataset_version.ontology_version_id = ontology.id
+        db.flush()
+        log.info(f"[UPLOAD-YOLO] Created ontology_id={ontology.id}")
+    
+    # Get all assets for matching
+    assets, _ = get_assets_from_dataset(
+        db=db,
+        dataset_id=dataset_id,
+        asset_type=AssetType.IMAGE,
+        limit=100000
+    )
+    
+    # Create asset map by filename (without extension)
+    asset_map = {}
+    for asset in assets:
+        # Extract base filename without extension
+        base_name = os.path.splitext(asset.name)[0]
+        asset_map[base_name] = asset
+        # Also try with full name
+        asset_map[asset.name] = asset
+    
+    log.info(f"[UPLOAD-YOLO] Found {len(assets)} assets in dataset")
+    
+    # Parse data.yaml if provided
+    class_names = {}  # yolo_index -> class_name
+    if data_yaml:
+        try:
+            yaml_content = await data_yaml.read()
+            data_yaml_dict = yaml.safe_load(yaml_content.decode("utf-8"))
+            names = data_yaml_dict.get("names", [])
+            class_names = {i: name for i, name in enumerate(names)}
+            log.info(f"[UPLOAD-YOLO] Loaded {len(class_names)} classes from data.yaml: {list(class_names.values())}")
+            
+            # Upload data.yaml to S3
+            s3_data_yaml_key = f"datasets/{dataset.name}/data.yaml"
+            file_storage.upload_to_s3(yaml_content, s3_data_yaml_key)
+            log.info(f"[UPLOAD-YOLO] Uploaded data.yaml to S3: {s3_data_yaml_key}")
+        except Exception as e:
+            log.error(f"[UPLOAD-YOLO] Failed to parse data.yaml: {e}", exc_info=True)
+            raise HTTPException(status_code=400, detail=f"Failed to parse data.yaml: {str(e)}")
+    
+    # Process label files
+    s3_labels_prefix = f"datasets/{dataset.name}/labels"
+    total_annotations = 0
+    successful_files = 0
+    failed_files = 0
+    processed_assets = set()
+    
+    for label_file in label_files:
+        try:
+            # Get filename
+            label_filename = label_file.filename
+            if not label_filename.endswith('.txt'):
+                log.warning(f"[UPLOAD-YOLO] Skipping non-.txt file: {label_filename}")
+                failed_files += 1
+                continue
+            
+            # Extract base name to match with asset
+            base_name = os.path.splitext(label_filename)[0]
+            asset = asset_map.get(base_name) or asset_map.get(label_filename)
+            
+            if not asset:
+                log.warning(f"[UPLOAD-YOLO] No matching asset found for label file: {label_filename}")
+                failed_files += 1
+                continue
+            
+            # Read label file content
+            label_content = await label_file.read()
+            
+            # Upload to S3
+            s3_label_key = f"{s3_labels_prefix}/{label_filename}"
+            file_storage.upload_to_s3(label_content, s3_label_key)
+            log.info(f"[UPLOAD-YOLO] Uploaded label file to S3: {s3_label_key}")
+            
+            # Parse YOLO format
+            lines = label_content.decode("utf-8").strip().split("\n")
+            lines = [line.strip() for line in lines if line.strip()]
+            
+            if not lines:
+                log.info(f"[UPLOAD-YOLO] Empty label file: {label_filename}")
+                successful_files += 1
+                continue
+            
+            # Delete existing annotations if overwrite_existing
+            if overwrite_existing:
+                existing_annotations = db.query(Annotation).filter(Annotation.asset_id == asset.id).all()
+                if existing_annotations:
+                    log.info(f"[UPLOAD-YOLO] Deleting {len(existing_annotations)} existing annotations for asset {asset.id}")
+                    for ann in existing_annotations:
+                        db.delete(ann)
+                    db.flush()
+            
+            # Process each annotation line
+            annotations_created = 0
+            for line in lines:
+                parts = line.strip().split()
+                if len(parts) != 5:
+                    log.warning(f"[UPLOAD-YOLO] Invalid line format (expected 5 parts): {line}")
+                    continue
+                
+                try:
+                    yolo_class_id = int(parts[0])
+                    x_center = float(parts[1])
+                    y_center = float(parts[2])
+                    width = float(parts[3])
+                    height = float(parts[4])
+                except (ValueError, IndexError) as e:
+                    log.warning(f"[UPLOAD-YOLO] Failed to parse line: {line}, error: {e}")
+                    continue
+                
+                # Find or create LabelClass
+                label_class = db.query(LabelClass).filter(
+                    LabelClass.ontology_version_id == ontology.id,
+                    LabelClass.yolo_index == yolo_class_id
+                ).first()
+                
+                if not label_class:
+                    # Create new LabelClass
+                    class_name = class_names.get(yolo_class_id, f"class_{yolo_class_id}")
+                    
+                    # Generate color
+                    import colorsys
+                    hue = (yolo_class_id * 137.508) % 360 / 360.0
+                    rgb = colorsys.hsv_to_rgb(hue, 0.7, 0.9)
+                    color = f"#{int(rgb[0]*255):02x}{int(rgb[1]*255):02x}{int(rgb[2]*255):02x}"
+                    
+                    label_class = LabelClass(
+                        ontology_version_id=ontology.id,
+                        display_name=class_name,
+                        yolo_index=yolo_class_id,
+                        color=color,
+                        shape_type="bbox"
+                    )
+                    db.add(label_class)
+                    db.flush()
+                    log.info(f"[UPLOAD-YOLO] Created LabelClass: {class_name} (yolo_index={yolo_class_id})")
+                
+                # Create annotation
+                geometry_data = {
+                    "bbox": {
+                        "x_center": x_center,
+                        "y_center": y_center,
+                        "width": width,
+                        "height": height
+                    }
+                }
+                
+                annotation = Annotation(
+                    asset_id=asset.id,
+                    label_class_id=label_class.id,
+                    geometry_type=GeometryType.BBOX,
+                    geometry=geometry_data,
+                    is_normalized=True,
+                    source="upload",
+                    confidence=1.0,
+                    annotator_name=current_user.get("name") or current_user.get("email") or "user"
+                )
+                db.add(annotation)
+                annotations_created += 1
+                total_annotations += 1
+            
+            if annotations_created > 0:
+                processed_assets.add(asset.id)
+                successful_files += 1
+                log.info(f"[UPLOAD-YOLO] Created {annotations_created} annotations for asset {asset.id} ({label_filename})")
+            else:
+                successful_files += 1  # File processed successfully, just no annotations
+                
+        except Exception as e:
+            log.error(f"[UPLOAD-YOLO] Error processing label file {label_file.filename}: {e}", exc_info=True)
+            failed_files += 1
+            continue
+    
+    # Commit all annotations
+    if total_annotations > 0:
+        db.commit()
+        log.info(f"[UPLOAD-YOLO] ✅ Committed {total_annotations} annotations to database")
+        
+        # Update data.yaml if it wasn't provided
+        if not data_yaml:
+            upload_data_yaml_for_dataset(db, dataset_id)
+            log.info(f"[UPLOAD-YOLO] Updated data.yaml for dataset {dataset_id}")
+    else:
+        db.rollback()
+        log.warning(f"[UPLOAD-YOLO] No annotations to save")
+    
+    return {
+        "success": True,
+        "message": f"Uploaded {successful_files} label files, created {total_annotations} annotations",
+        "dataset_id": dataset_id,
+        "total_files": len(label_files),
+        "successful_files": successful_files,
+        "failed_files": failed_files,
+        "total_annotations": total_annotations,
+        "processed_assets": len(processed_assets)
+    }

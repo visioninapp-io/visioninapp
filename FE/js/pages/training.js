@@ -155,59 +155,103 @@ class TrainingPage {
          *   }
          * }
          */
-        console.log('[Training Page] Received training metrics:', message);
+        console.log('[Training Page] ========== Received Training Metrics ==========');
+        console.log('[Training Page] Full message:', JSON.stringify(message, null, 2));
+        console.log('[Training Page] Message keys:', Object.keys(message));
 
         try {
             const { job_id: external_job_id, epoch, metrics } = message;
+
+            console.log('[Training Page] Extracted data:');
+            console.log('  - external_job_id (job_id):', external_job_id);
+            console.log('  - epoch:', epoch);
+            console.log('  - metrics:', metrics);
 
             // Extract loss and accuracy from metrics object
             const loss = metrics?.loss || metrics?.tloss?.[0] || 0;
             const accuracy = metrics?.['metrics/mAP50(B)'] || metrics?.['metrics/precision(B)'] || 0;
 
-            console.log(`[Training Page] Metrics: epoch=${epoch}, loss=${loss}, accuracy=${accuracy}`);
+            console.log(`[Training Page] Parsed metrics: epoch=${epoch}, loss=${loss}, accuracy=${accuracy}`);
 
             // GPU sends 0-based epoch, convert to 1-based for display
             const displayEpoch = epoch + 1;
 
-            // Just update the display with received metrics (no job matching)
-            this.updateMetricsDisplay({ epoch: displayEpoch, loss, accuracy: accuracy * 100 });
+            // Find job by external_job_id (UUID stored in hyperparameters or external_job_id field)
+            console.log('[Training Page] Searching for job with external_job_id:', external_job_id);
+            console.log('[Training Page] Total jobs loaded:', this.trainingJobs.length);
+            
+            // First, try to find job by external_job_id
+            let job = this.trainingJobs.find(j => {
+                // Check both hyperparameters.external_job_id and external_job_id field
+                const jobExternalId = j.hyperparameters?.external_job_id || j.external_job_id;
+                if (jobExternalId) {
+                    const matches = jobExternalId === external_job_id;
+                    if (matches) {
+                        console.log(`[Training Page] ✅ Match found by external_job_id! Job ID: ${j.id}, Name: ${j.name}`);
+                    }
+                    return matches;
+                }
+                return false;
+            });
 
-            // // TODO: Enable job matching when external_job_id mapping is ready
-            // // Find job by external_job_id (UUID stored in hyperparameters)
-            // const job = this.trainingJobs.find(j =>
-            //     j.hyperparameters?.external_job_id === external_job_id
-            // );
-            //
-            // if (!job) {
-            //     console.warn('[Training Page] No job found for external_job_id:', external_job_id);
-            //     return;
-            // }
-            //
-            // console.log(`[Training Page] Matched job ${job.id} (${job.name}) with metrics:`, { epoch, loss, accuracy });
-            //
-            // // Store metrics by internal job ID
-            // if (!this.metricsData[job.id]) {
-            //     this.metricsData[job.id] = [];
-            // }
-            // this.metricsData[job.id].push({
-            //     epoch,
-            //     loss,
-            //     accuracy: accuracy * 100, // Convert to percentage
-            //     timestamp: new Date()
-            // });
-            //
-            // // Update job metrics
-            // job.current_epoch = epoch;
-            // job.current_loss = loss;
-            // job.current_accuracy = accuracy * 100;
-            //
-            // // Update UI if this is the selected job
-            // if (this.selectedJob && this.selectedJob.id === job.id) {
-            //     this.updateMetricsDisplay({ epoch, loss, accuracy: accuracy * 100 });
-            // }
-            //
-            // // Update stats display
-            // this.updateStatsDisplay();
+            // If no match found, log detailed info for debugging
+            if (!job) {
+                console.warn('[Training Page] ⚠️ No job found for external_job_id:', external_job_id);
+                console.log('[Training Page] This might be because:');
+                console.log('  1. Job was created before external_job_id was implemented');
+                console.log('  2. Job hasn\'t been loaded yet');
+                console.log('  3. external_job_id mismatch between GPU server and database');
+                console.log('[Training Page] Available jobs with their IDs:');
+                this.trainingJobs.forEach((j, index) => {
+                    const hasExternalId = !!(j.hyperparameters?.external_job_id || j.external_job_id);
+                    console.log(`  [${index}] Job ID: ${j.id}, Name: ${j.name}, Status: ${j.status}`);
+                    console.log(`      - Has external_job_id: ${hasExternalId ? 'YES' : 'NO (old job)'}`);
+                    if (hasExternalId) {
+                        console.log(`      - external_job_id field: ${j.external_job_id || '(none)'}`);
+                        console.log(`      - hyperparameters.external_job_id: ${j.hyperparameters?.external_job_id || '(none)'}`);
+                    } else {
+                        console.log(`      - ⚠️ This is an old job without external_job_id - metrics won't match`);
+                    }
+                });
+                // Still update display with received metrics (might be for a job not yet loaded)
+                this.updateMetricsDisplay({ epoch: displayEpoch, loss, accuracy: accuracy * 100 });
+                return;
+            }
+
+            console.log(`[Training Page] ✅ Matched job ${job.id} (${job.name}) with metrics:`, { 
+                epoch: displayEpoch, 
+                loss, 
+                accuracy: accuracy * 100 
+            });
+
+            // Store metrics by internal job ID
+            if (!this.metricsData[job.id]) {
+                this.metricsData[job.id] = [];
+            }
+            this.metricsData[job.id].push({
+                epoch: displayEpoch,
+                loss,
+                accuracy: accuracy * 100, // Convert to percentage
+                timestamp: new Date()
+            });
+
+            // Keep only last 100 data points per job
+            if (this.metricsData[job.id].length > 100) {
+                this.metricsData[job.id] = this.metricsData[job.id].slice(-100);
+            }
+
+            // Update job metrics
+            job.current_epoch = displayEpoch - 1; // Store as 0-based for consistency
+            job.current_loss = loss;
+            job.current_accuracy = accuracy * 100;
+
+            // Update UI if this is the selected job
+            if (this.selectedJob && this.selectedJob.id === job.id) {
+                this.updateMetricsDisplay({ epoch: displayEpoch, loss, accuracy: accuracy * 100 });
+            }
+
+            // Update stats display
+            this.updateStatsDisplay();
 
         } catch (error) {
             console.error('[Training Page] Error handling training metrics:', error);
@@ -754,6 +798,72 @@ class TrainingPage {
 
     attachEventListeners() {
         // Event listeners are handled via onclick in HTML
+        this.attachYoloDropdownListeners();
+    }
+
+    attachYoloDropdownListeners() {
+        // YOLO version and size dropdowns
+        const versionSelect = document.getElementById('yolo-version-select');
+        const sizeSelect = document.getElementById('yolo-size-select');
+        const architectureHidden = document.getElementById('architecture-select');
+        
+        if (!versionSelect || !sizeSelect || !architectureHidden) {
+            return; // Elements not found (modal might not be rendered yet)
+        }
+        
+        // Remove existing listeners to avoid duplicates
+        const newVersionSelect = versionSelect.cloneNode(true);
+        versionSelect.parentNode.replaceChild(newVersionSelect, versionSelect);
+        const newSizeSelect = sizeSelect.cloneNode(true);
+        sizeSelect.parentNode.replaceChild(newSizeSelect, sizeSelect);
+        
+        // Attach version select listener
+        newVersionSelect.addEventListener('change', (e) => {
+            const version = e.target.value;
+            const sizes = [
+                { value: 'n', label: 'Nano (Fastest, Smallest)' },
+                { value: 's', label: 'Small' },
+                { value: 'm', label: 'Medium' },
+                { value: 'l', label: 'Large' },
+                { value: 'x', label: 'XLarge (Most Accurate)' }
+            ];
+            
+            if (version) {
+                // Populate size dropdown
+                newSizeSelect.innerHTML = '<option value="">-- Select Size --</option>';
+                sizes.forEach(size => {
+                    const option = document.createElement('option');
+                    option.value = size.value;
+                    option.textContent = size.label;
+                    newSizeSelect.appendChild(option);
+                });
+                newSizeSelect.disabled = false;
+                newSizeSelect.required = true;
+                
+                // Clear architecture when version changes
+                architectureHidden.value = '';
+            } else {
+                newSizeSelect.innerHTML = '<option value="">-- Select Version First --</option>';
+                newSizeSelect.disabled = true;
+                newSizeSelect.required = false;
+                architectureHidden.value = '';
+            }
+        });
+        
+        // Attach size select listener
+        newSizeSelect.addEventListener('change', (e) => {
+            const version = newVersionSelect.value;
+            const size = e.target.value;
+            
+            if (version && size) {
+                // Combine version + size into architecture (e.g., "yolov8" + "n" = "yolov8n")
+                const architecture = `${version}${size}`;
+                architectureHidden.value = architecture;
+                console.log('[Training Page] Architecture selected:', architecture);
+            } else {
+                architectureHidden.value = '';
+            }
+        });
     }
 
     async loadS3MetricsForJob(job) {
@@ -1152,25 +1262,25 @@ class TrainingPage {
                                     </select>
                                     <small class="text-muted">Choose an existing model or create a new one</small>
                                 </div>
-                                <div class="mb-3">
-                                    <label class="form-label">Model Architecture *</label>
-                                    <select class="form-select" id="architecture-select" required>
-                                        <option value="">-- Select Architecture --</option>
-                                        <optgroup label="Object Detection (YOLO)">
-                                            <option value="yolov8n">YOLOv8 Nano (Fastest, Smallest)</option>
-                                            <option value="yolov8s">YOLOv8 Small</option>
-                                            <option value="yolov8m">YOLOv8 Medium</option>
-                                            <option value="yolov8l">YOLOv8 Large</option>
-                                            <option value="yolov8x">YOLOv8 XLarge (Most Accurate)</option>
-                                        </optgroup>
-                                        <optgroup label="Image Classification (Not Yet Supported)">
-                                            <option value="resnet18" disabled>ResNet18 (Coming Soon)</option>
-                                            <option value="resnet50" disabled>ResNet50 (Coming Soon)</option>
-                                            <option value="mobilenet_v2" disabled>MobileNet V2 (Coming Soon)</option>
-                                        </optgroup>
-                                    </select>
-                                    <small class="text-muted">YOLO for object detection, ResNet/MobileNet for classification</small>
+                                <div class="row">
+                                    <div class="col-md-6 mb-3">
+                                        <label class="form-label">YOLO Version *</label>
+                                        <select class="form-select" id="yolo-version-select" required>
+                                            <option value="">-- Select Version --</option>
+                                            <option value="yolov8">YOLOv8</option>
+                                            <option value="yolo11">YOLO11</option>
+                                            <option value="yolo12">YOLO12</option>
+                                        </select>
+                                    </div>
+                                    <div class="col-md-6 mb-3">
+                                        <label class="form-label">Model Size *</label>
+                                        <select class="form-select" id="yolo-size-select" required disabled>
+                                            <option value="">-- Select Version First --</option>
+                                        </select>
+                                    </div>
                                 </div>
+                                <input type="hidden" id="architecture-select" />
+                                <small class="text-muted">YOLO for object detection, ResNet/MobileNet for classification</small>
                                 <div class="row">
                                     <div class="col-md-3">
                                         <label class="form-label">Epochs</label>
@@ -1215,6 +1325,9 @@ class TrainingPage {
 
         // Handle form submission
         document.getElementById('start-training-btn').addEventListener('click', () => this.handleStartTraining());
+
+        // Attach YOLO dropdown listeners when modal is shown
+        this.attachYoloDropdownListeners();
 
         modal.show();
     }

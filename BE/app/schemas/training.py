@@ -1,4 +1,4 @@
-from pydantic import BaseModel, Field
+from pydantic import BaseModel, Field, model_validator
 from typing import Optional, Dict, Any
 from datetime import datetime
 from app.models.training import TrainingStatus
@@ -35,6 +35,13 @@ class TrainingJobResponse(BaseModel):
     created_by: str
     completed_at: Optional[datetime] = None
     error_message: Optional[str] = None
+
+    @model_validator(mode='after')
+    def extract_external_job_id(self):
+        """Extract external_job_id from hyperparameters if not already set"""
+        if not self.external_job_id and self.hyperparameters:
+            self.external_job_id = self.hyperparameters.get("external_job_id")
+        return self
 
     class Config:
         from_attributes = True

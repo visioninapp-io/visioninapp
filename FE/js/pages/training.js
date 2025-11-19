@@ -49,21 +49,11 @@ class TrainingPage {
         try {
             console.log('[Training Page] Connecting to RabbitMQ...');
 
-            // Unsubscribe first if already subscribed (prevent duplicate subscriptions)
-            if (this.rabbitmqConnected) {
-                try {
-                    rabbitmqService.unsubscribe('gpu.train.log');
-                    console.log('[Training Page] Unsubscribed from previous subscription');
-                } catch (e) {
-                    console.warn('[Training Page] Error unsubscribing:', e);
-                }
-            }
-
             // Connect to RabbitMQ
             await rabbitmqService.connect();
             this.rabbitmqConnected = true;
 
-            // Subscribe to training logs queue
+            // Subscribe to all training logs (filtering will be done in handleTrainingMetrics)
             rabbitmqService.subscribeToTrainingLogs((message) => {
                 this.handleTrainingMetrics(message);
             });
@@ -73,7 +63,7 @@ class TrainingPage {
                 this.handleHyperparameterMessage(message);
             }, 'exchange', 'jobs.cmd');
 
-            console.log('[Training Page] ✅ Connected to RabbitMQ and subscribed to gpu.train.log and train.hpo');
+            console.log('[Training Page] ✅ Connected to RabbitMQ and subscribed to training logs');
             showToast('Connected to real-time training updates', 'success');
 
             // Restart periodic refresh with longer interval (now that RabbitMQ is connected)
@@ -160,54 +150,25 @@ class TrainingPage {
         try {
             const { job_id: external_job_id, epoch, metrics } = message;
 
+            // Filter: Only process if this message is for the currently selected job
+            if (this.selectedJob && this.selectedJob.external_job_id) {
+                if (this.selectedJob.external_job_id !== external_job_id) {
+                    console.log(`[Training Page] Ignoring metrics for job ${external_job_id} (selected: ${this.selectedJob.external_job_id})`);
+                    return;
+                }
+            }
+
             // Extract loss and accuracy from metrics object
             const loss = metrics?.loss || metrics?.tloss?.[0] || 0;
             const accuracy = metrics?.['metrics/mAP50(B)'] || metrics?.['metrics/precision(B)'] || 0;
 
-            console.log(`[Training Page] Metrics: epoch=${epoch}, loss=${loss}, accuracy=${accuracy}`);
+            console.log(`[Training Page] Processing metrics for selected job: epoch=${epoch}, loss=${loss}, accuracy=${accuracy}`);
 
             // GPU sends 0-based epoch, convert to 1-based for display
             const displayEpoch = epoch + 1;
 
-            // Just update the display with received metrics (no job matching)
-                this.updateMetricsDisplay({ epoch: displayEpoch, loss, accuracy: accuracy * 100 });
-
-            // // TODO: Enable job matching when external_job_id mapping is ready
-            // // Find job by external_job_id (UUID stored in hyperparameters)
-            // const job = this.trainingJobs.find(j =>
-            //     j.hyperparameters?.external_job_id === external_job_id
-            // );
-            //
-            // if (!job) {
-            //     console.warn('[Training Page] No job found for external_job_id:', external_job_id);
-            //     return;
-            // }
-            //
-            // console.log(`[Training Page] Matched job ${job.id} (${job.name}) with metrics:`, { epoch, loss, accuracy });
-            //
-            // // Store metrics by internal job ID
-            // if (!this.metricsData[job.id]) {
-            //     this.metricsData[job.id] = [];
-            // }
-            // this.metricsData[job.id].push({
-            //     epoch,
-            //     loss,
-            //     accuracy: accuracy * 100, // Convert to percentage
-            //     timestamp: new Date()
-            // });
-            //
-            // // Update job metrics
-            // job.current_epoch = epoch;
-            // job.current_loss = loss;
-            // job.current_accuracy = accuracy * 100;
-            //
-            // // Update UI if this is the selected job
-            // if (this.selectedJob && this.selectedJob.id === job.id) {
-            //     this.updateMetricsDisplay({ epoch, loss, accuracy: accuracy * 100 });
-            // }
-            //
-            // // Update stats display
-            // this.updateStatsDisplay();
+            // Update the display with received metrics
+            this.updateMetricsDisplay({ epoch: displayEpoch, loss, accuracy: accuracy * 100 });
 
         } catch (error) {
             console.error('[Training Page] Error handling training metrics:', error);
@@ -912,7 +873,7 @@ class TrainingPage {
         const job = this.trainingJobs.find(j => j.id === id);
 
         if (job) {
-            console.log('[Training Page] Selected job:', job.id, job.name);
+            console.log('[Training Page] Selected job:', job.id, job.name, 'external_job_id:', job.external_job_id);
             this.selectedJob = job;
 
             // Load S3 metrics for this job
@@ -1377,11 +1338,11 @@ class TrainingPage {
 
             // Reload page data
             await this.loadTrainingJobs();
-            
+
             // Select the newly created job
             if (newJob && newJob.id) {
                 this.selectedJob = this.trainingJobs.find(j => j.id === newJob.id) || newJob;
-                console.log('[Training Page] Auto-selected new job:', this.selectedJob?.name);
+                console.log('[Training Page] Auto-selected new job:', this.selectedJob?.name, 'external_job_id:', newJob.external_job_id);
             }
 
             const app = document.getElementById('app');

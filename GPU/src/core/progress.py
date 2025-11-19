@@ -96,7 +96,7 @@ class Progress:
     def train_llm_log(self, epoch: int , total_epochs: int | None = None):
         """
         1 epoch마다 학습 로그 전송.
-        routing_key: train.log
+        routing_key: train.llm.log
         body:
         {
           "job_id": ...,

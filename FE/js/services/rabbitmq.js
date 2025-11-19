@@ -332,11 +332,28 @@ class RabbitMQService {
     }
 
     /**
-     * Subscribe to training logs (gpu.train.log queue)
+     * Subscribe to training logs (all jobs)
+     * Uses exchange subscription so each browser gets its own temporary queue
+     * This ensures all connected browsers receive all training messages
      * @param {function} callback - Handler for training metrics
+     * @returns {string} Subscription ID
      */
     subscribeToTrainingLogs(callback) {
-        return this.subscribe('gpu.train.log', callback);
+        console.log('[RabbitMQ] Subscribing to training logs via exchange (jobs.events/train.log)');
+        // Use exchange subscription instead of queue to get a dedicated temporary queue per browser
+        return this.subscribe('train.log', callback, 'exchange', 'jobs.events');
+    }
+
+    /**
+     * Subscribe to LLM training logs (all jobs)
+     * Uses exchange subscription so each browser gets its own temporary queue
+     * @param {function} callback - Handler for training metrics
+     * @returns {string} Subscription ID
+     */
+    subscribeToLLMTrainingLogs(callback) {
+        console.log('[RabbitMQ] Subscribing to LLM training logs via exchange (jobs.events/train.llm.log)');
+        // Use exchange subscription instead of queue to get a dedicated temporary queue per browser
+        return this.subscribe('train.llm.log', callback, 'exchange', 'jobs.events');
     }
 }
 

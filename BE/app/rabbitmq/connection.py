@@ -42,7 +42,7 @@ def get_channel():
 
     # Bindings for cmd exchange (commands to GPU workers)
     ch.queue_bind(exchange="jobs.cmd", queue="gpu.train.q", routing_key="train.start")
-    ch.queue_bind(exchange="jobs.cmd", queue="gpu.train.q", routing_key="train.hpo.*")  # GPU 서버로 hyperparameters 전달 (job_id별)
+    ch.queue_bind(exchange="jobs.cmd", queue="gpu.train.q", routing_key="train.*.hpo")  # GPU 서버로 hyperparameters 전달 (job_id가 중간)
     ch.queue_bind(exchange="jobs.cmd", queue="gpu.onnx.q", routing_key="onnx.start")
     ch.queue_bind(exchange="jobs.cmd", queue="gpu.trt.q", routing_key="trt.start")
     ch.queue_bind(exchange="jobs.cmd", queue="gpu.inference.q", routing_key="inference.start")
@@ -50,9 +50,9 @@ def get_channel():
     # Bindings for events exchange
     ch.queue_bind(exchange="jobs.events", queue="be.inference.done", routing_key="inference.done")
     ch.queue_bind(exchange="jobs.events", queue="be.train.done", routing_key="job.*.done")  # BE 와일드카드: job.{job_id}.done
-    ch.queue_bind(exchange="jobs.events", queue="gpu.train.log", routing_key="train.log.*")  # 프론트엔드용 (와일드카드)
-    ch.queue_bind(exchange="jobs.events", queue="be.train.log", routing_key="train.log.*")  # BE 일반 트레이닝용 (와일드카드)
-    ch.queue_bind(exchange="jobs.events", queue="be.train.log", routing_key="train.llm.log.*")  # BE LLM 트레이닝용 (와일드카드)
+    ch.queue_bind(exchange="jobs.events", queue="gpu.train.log", routing_key="train.*.log")  # 프론트엔드용 (job_id 중간)
+    ch.queue_bind(exchange="jobs.events", queue="be.train.log", routing_key="train.*.log")  # BE 일반 트레이닝용 (job_id 중간)
+    ch.queue_bind(exchange="jobs.events", queue="be.train.log", routing_key="train.llm.*.log")  # BE LLM 트레이닝용 (job_id 중간)
 
     ch.confirm_delivery()
     ch.basic_qos(prefetch_count=10)

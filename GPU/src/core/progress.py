@@ -48,9 +48,7 @@ class Progress:
             "percent": float(percent),
             "message": message,
         }
-        # event publish
-        # _safe_publish(self.ch, self.ex, f"job.{self.job_id}.progress.{stage}", body)
-        _safe_publish(self.ch, self.ex, f"job.progress.{stage}", body)
+        _safe_publish(self.ch, self.ex, f"job.{self.job_id}.progress.{stage}", body)
 
     def done(self, artifact: dict, metrics: dict | None = None):
         body = {
@@ -78,7 +76,7 @@ class Progress:
     def train_log(self, epoch: int, metrics: dict | None = None):
         """
         1 epoch마다 학습 로그 전송.
-        routing_key: train.log
+        routing_key: train.{job_id}.log
         body:
         {
           "job_id": ...,
@@ -91,12 +89,12 @@ class Progress:
             "epoch": int(epoch),
             "metrics": metrics or {},
         }
-        _safe_publish(self.ch, self.ex, "train.log", body)
+        _safe_publish(self.ch, self.ex, f"train.{self.job_id}.log", body)
 
     def train_llm_log(self, epoch: int , total_epochs: int | None = None):
         """
         1 epoch마다 학습 로그 전송.
-        routing_key: train.llm.log
+        routing_key: train.llm.{job_id}.log
         body:
         {
           "job_id": ...,
@@ -115,4 +113,4 @@ class Progress:
             "total_epochs": int(total_epochs),
             "percentage": int(percentage)
         }
-        _safe_publish(self.ch, self.ex, "train.llm.log", body)
+        _safe_publish(self.ch, self.ex, f"train.llm.{self.job_id}.log", body)

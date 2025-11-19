@@ -152,8 +152,39 @@ def registry_publish(state: TrainState) -> TrainState:
     metrics = getattr(state, "metrics", {}) or {}
     context = state.context or {}
 
-    if not model_path or not os.path.exists(model_path):
-        print(f"[registry_publish] 경고: model_path가 존재하지 않음 → 등록 건너뜀 ({model_path})")
+    if not model_path:
+        print(f"[registry_publish] 경고: model_path가 없음 → 등록 건너뜀")
+        state.registry_info = {
+            "status": "skipped",
+            "reason": "missing_model",
+            "registered_at": datetime.now().isoformat(),
+        }
+        return state
+    
+    # S3 URI인 경우 다운로드
+    local_model_path = model_path
+    if isinstance(model_path, str) and model_path.startswith("s3://"):
+        print(f"[registry_publish] S3 URI 감지: {model_path}")
+        try:
+            from llm.tools.s3_client import download_s3
+            import tempfile
+            
+            # 임시 파일로 다운로드
+            local_model_path = os.path.join(tempfile.gettempdir(), f"model_{datetime.now().strftime('%Y%m%d_%H%M%S')}.pt")
+            print(f"[registry_publish] S3에서 다운로드 중: {model_path} -> {local_model_path}")
+            download_s3(model_path, local_model_path)
+            print(f"[registry_publish] 다운로드 완료")
+        except Exception as e:
+            print(f"[registry_publish] S3 다운로드 실패: {e} → 등록 건너뜀")
+            state.registry_info = {
+                "status": "skipped",
+                "reason": f"s3_download_failed: {e}",
+                "registered_at": datetime.now().isoformat(),
+            }
+            return state
+    
+    if not os.path.exists(local_model_path):
+        print(f"[registry_publish] 경고: model_path가 존재하지 않음 → 등록 건너뜀 ({local_model_path})")
         state.registry_info = {
             "status": "skipped",
             "reason": "missing_model",
@@ -166,7 +197,7 @@ def registry_publish(state: TrainState) -> TrainState:
     base_dir.mkdir(parents=True, exist_ok=True)
 
     # --- 버전/폴더명 구성 ---
-    model_name = Path(model_path).stem
+    model_name = Path(local_model_path).stem
     timestamp = datetime.now().strftime("%Y%m%d_%H%M%S")
     registry_id = f"{model_name}_{timestamp}"
 
@@ -175,7 +206,7 @@ def registry_publish(state: TrainState) -> TrainState:
 
     # --- 모델 복사 ---
     try:
-        shutil.copy2(model_path, target_dir / Path(model_path).name)
+        shutil.copy2(local_model_path, target_dir / Path(local_model_path).name)
         print(f"[registry_publish] 모델 복사 완료 → {target_dir}")
     except Exception as e:
         print(f"[registry_publish] 모델 복사 실패: {e}")
@@ -186,7 +217,9 @@ def registry_publish(state: TrainState) -> TrainState:
 
     # ---- 콘솔 출력 (사람이 보기 좋게) ----
     print("\n[registry_publish] 📦 최종 등록 요약")
-    print("  • 모델 경로 :", model_path)
+    print("  • 모델 경로 :", model_path)  # 원본 경로 (S3 URI 포함)
+    if local_model_path != model_path:
+        print("  • 로컬 경로 :", local_model_path)
     print("  • 레지스트리:", str(target_dir))
     # 성능
     pm = metric_summary.get("primary_metric")
@@ -211,7 +244,8 @@ def registry_publish(state: TrainState) -> TrainState:
         "metrics": metrics,
         "metric_summary": metric_summary,
         "final_hparams": final_hparams,
-        "source_model_path": str(model_path),
+        "source_model_path": str(model_path),  # 원본 S3 URI 저장
+        "local_model_path": str(local_model_path) if local_model_path != model_path else None,
         "context_summary": {
             "dataset_version": getattr(state, "dataset_version", None),
             "base_model": getattr(state, "base_model", None),

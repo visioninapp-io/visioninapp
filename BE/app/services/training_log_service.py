@@ -12,12 +12,13 @@ log = logging.getLogger(__name__)
 
 def handle_training_log(payload: dict):
     """
-    train.log 이벤트 처리 (각 epoch마다 실시간 업데이트)
+    train.log / train.llm.log 이벤트 처리 (각 epoch마다 실시간 업데이트)
     
-    Expected payload:
+    Expected payload (일반 트레이닝):
     {
         "job_id": "uuid",  # external_job_id (hyperparameters에 저장된 값)
         "epoch": 0,  # 0-based epoch (0 = first epoch completed)
+        "total_epochs": 100,
         "metrics": {
             "loss": 38.22,
             "metrics/precision(B)": 0.0,
@@ -26,10 +27,20 @@ def handle_training_log(payload: dict):
             ...
         }
     }
+    
+    Expected payload (LLM 트레이닝):
+    {
+        "job_id": "uuid",
+        "epoch": 0,
+        "total_epochs": 100,
+        "percentage": 20,  # 전체 파이프라인 진행률 (20-90%)
+        "metrics": { ... }
+    }
     """
     job_id = payload.get("job_id")  # external_job_id
     epoch = payload.get("epoch", 0)
     metrics = payload.get("metrics", {})
+    percentage = payload.get("percentage")  # LLM 트레이닝의 경우 제공됨
 
     if not job_id:
         log.warning("[TRAIN-LOG] Missing job_id in payload")
@@ -74,7 +85,11 @@ def handle_training_log(payload: dict):
         job.current_accuracy = float(accuracy) if accuracy else None
         
         # Calculate progress percentage
-        if job.total_epochs and job.total_epochs > 0:
+        # LLM 트레이닝의 경우 payload의 percentage를 사용 (전체 파이프라인 진행률 반영)
+        if percentage is not None:
+            job.progress_percentage = float(percentage)
+        elif job.total_epochs and job.total_epochs > 0:
+            # 일반 트레이닝: epoch 기반 계산
             # epoch is 0-based: epoch 0 = 1st epoch completed
             # progress = (completed_epochs / total_epochs) * 100
             job.progress_percentage = ((epoch + 1) / job.total_epochs) * 100
@@ -97,9 +112,9 @@ def handle_training_log(payload: dict):
         log.info(
             f"[TRAIN-LOG] Updated job {job.id} ({job.name}): "
             f"epoch={epoch+1}/{job.total_epochs}, "
-            f"loss={loss:.4f if loss else 'N/A'}, "
-            f"accuracy={accuracy:.2f if accuracy else 'N/A'}%, "
-            f"progress={job.progress_percentage:.1f if job.progress_percentage else 0}%"
+            f"loss={f'{loss:.4f}' if loss is not None else 'N/A'}, "
+            f"accuracy={f'{accuracy:.2f}' if accuracy is not None else 'N/A'}%, "
+            f"progress={f'{job.progress_percentage:.1f}' if job.progress_percentage is not None else '0.0'}%"
         )
 
     except Exception as e:

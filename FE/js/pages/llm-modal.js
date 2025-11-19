@@ -425,9 +425,36 @@ async function submitQuery() {
         console.log('[LLM Modal] Full response:', response);
         console.log('[LLM Modal] Hyperparameters:', response.hyperparameters);
         
+        // API 응답에서 하이퍼파라미터 저장 (새로고침 대비)
+        if (response.hyperparameters) {
+            llmModalState.hyperparameters = response.hyperparameters;
+            // localStorage에도 저장 (새로고침 대비)
+            try {
+                localStorage.setItem(`llm_hyperparams_${llmModalState.jobId}`, JSON.stringify(response.hyperparameters));
+                console.log('[LLM Modal] ✅ Stored hyperparameters from API response (memory + localStorage)');
+            } catch (e) {
+                console.warn('[LLM Modal] Failed to save hyperparameters to localStorage:', e);
+            }
+        }
+        
         // Step 2로 이동
         llmModalState.currentStep = 2;
         renderStep(2);
+        
+        // 하이퍼파라미터가 있으면 버튼 즉시 활성화
+        if (llmModalState.hyperparameters) {
+            setTimeout(() => {
+                const hyperparameterBtn = document.getElementById('hyperparameter-btn');
+                if (hyperparameterBtn) {
+                    hyperparameterBtn.disabled = false;
+                    hyperparameterBtn.classList.remove('btn-secondary');
+                    hyperparameterBtn.classList.add('btn-primary');
+                    hyperparameterBtn.style.opacity = '1';
+                    hyperparameterBtn.style.cursor = 'pointer';
+                    console.log('[LLM Modal] ✅ Hyperparameter button activated from API response');
+                }
+            }, 100);
+        }
         
     } catch (error) {
         console.error('[LLM Modal] Training error:', error);
@@ -553,6 +580,32 @@ function renderTrainingProgressStep(container) {
     // 초기 상태: Analyze Prompt를 활성화 상태로 설정
     updateStatusBox('status-analyze', 'active');
     updateStatusBoxText('status-analyze', 'Analyzing your prompt...');
+    
+    // localStorage에서 하이퍼파라미터 복원 (새로고침 대비)
+    if (llmModalState.jobId && !llmModalState.hyperparameters) {
+        try {
+            const storedHyperparams = localStorage.getItem(`llm_hyperparams_${llmModalState.jobId}`);
+            if (storedHyperparams) {
+                llmModalState.hyperparameters = JSON.parse(storedHyperparams);
+                console.log('[LLM Modal] ✅ Restored hyperparameters from localStorage');
+                
+                // 버튼 활성화
+                setTimeout(() => {
+                    const hyperparameterBtn = document.getElementById('hyperparameter-btn');
+                    if (hyperparameterBtn) {
+                        hyperparameterBtn.disabled = false;
+                        hyperparameterBtn.classList.remove('btn-secondary');
+                        hyperparameterBtn.classList.add('btn-primary');
+                        hyperparameterBtn.style.opacity = '1';
+                        hyperparameterBtn.style.cursor = 'pointer';
+                        console.log('[LLM Modal] ✅ Hyperparameter button activated from localStorage');
+                    }
+                }, 100);
+            }
+        } catch (e) {
+            console.warn('[LLM Modal] Failed to restore hyperparameters from localStorage:', e);
+        }
+    }
 }
 
 // RabbitMQ 진행 상황 시작
@@ -598,17 +651,17 @@ async function startRabbitMQProgress() {
         
         // 개별 routing key로 구독 (와일드카드가 안 될 수 있음)
         const individualKeys = [
-            'job.*.progress.analyze.prompt',      // Analyze Prompt 단계 (새로 추가)
-            'job.*.progress.train.download_dataset',
-            'job.*.progress.train.prepare_split',
-            'job.*.progress.train.start',
-            'job.*.progress.upload',
-            'job.*.progress.done',                // 완료 이벤트 (100%)
-            'train.llm.*.log',                    // 학습 진행률 업데이트 (epoch별 퍼센트)
+            'job.#.progress.analyze.prompt',      // Analyze Prompt 단계 (새로 추가)
+            'job.#.progress.train.download_dataset',
+            'job.#.progress.train.prepare_split',
+            'job.#.progress.train.start',
+            'job.#.progress.upload',
+            'job.#.progress.done',                // 완료 이벤트 (100%)
+            'train.llm.#.log',                    // 학습 진행률 업데이트 (epoch별 퍼센트)
             'convert.exchanges',                // 변환 정보 수신
-            'job.*.progress.onnx.done',           // ONNX 변환 완료
-            'job.*.progress.trt.done',            // TensorRT 변환 완료
-            'train.*.hpo'                         // 하이퍼파라미터 메시지
+            'job.#.progress.onnx.done',           // ONNX 변환 완료 (job_id에 .onnx 접미사 포함)
+            'job.#.progress.trt.done',            // TensorRT 변환 완료 (job_id에 .trt 접미사 포함)
+            'train.llm.#.hpo'                     // 하이퍼파라미터 메시지 (jobs.events exchange)
         ];
         
         // 에러 이벤트 구독 (job.{job_id}.error 또는 job.#.error)
@@ -632,12 +685,10 @@ async function startRabbitMQProgress() {
         individualKeys.forEach(routingKey => {
             try {
                 // convert.exchanges는 jobs.event exchange를 사용 (LLM convert_dispatcher)
-                // train.hpo는 jobs.cmd exchange를 사용
+                // 나머지는 모두 jobs.events exchange를 사용
                 let exchangeName = 'jobs.events';
                 if (routingKey === 'convert.exchanges') {
                     exchangeName = 'jobs.event';
-                } else if (routingKey === 'train.hpo') {
-                    exchangeName = 'jobs.cmd';
                 }
                 
                 const subscriptionId = rabbitmqService.subscribe(
@@ -645,10 +696,10 @@ async function startRabbitMQProgress() {
                     (message) => { 
                         console.log(`[LLM Modal] 📨 Progress message received for ${routingKey}:`, message);
                         
-                        // train.hpo 메시지 처리
-                        if (routingKey === 'train.hpo') {
+                        // train.llm.#.hpo 메시지 처리
+                        if (routingKey === 'train.llm.#.hpo') {
                             handleHyperparameterMessage(message);
-                            return; // train.hpo는 여기서 처리 완료
+                            return; // train.llm.#.hpo는 여기서 처리 완료
                         }
                         
                         const messageJobId = String(message.job_id || message.jobId || 'unknown');
@@ -663,8 +714,8 @@ async function startRabbitMQProgress() {
                         }
                         
                         // 중복 메시지 방지: 같은 stage의 메시지가 너무 빠르게 연속으로 오는 경우 무시
-                        // train.llm.log 메시지는 epoch별로 오므로 모든 메시지를 처리 (중복 방지 제외)
-                        if (routingKey !== 'train.llm.log') {
+                        // train.llm.#.log 메시지는 epoch별로 오므로 모든 메시지를 처리 (중복 방지 제외)
+                        if (routingKey !== 'train.llm.#.log') {
                             const stage = message.stage || routingKey;
                             const now = Date.now();
                             if (lastMessageTime[stage] && (now - lastMessageTime[stage] < 100)) {
@@ -1634,7 +1685,14 @@ function handleHyperparameterMessage(message) {
         
         // 하이퍼파라미터 저장
         llmModalState.hyperparameters = hyperparams;
-        console.log('[LLM Modal] ✅ Stored hyperparameters');
+        
+        // localStorage에도 저장 (새로고침 대비)
+        try {
+            localStorage.setItem(`llm_hyperparams_${job_id}`, JSON.stringify(hyperparams));
+            console.log('[LLM Modal] ✅ Stored hyperparameters (memory + localStorage)');
+        } catch (e) {
+            console.warn('[LLM Modal] Failed to save hyperparameters to localStorage:', e);
+        }
         
         // 버튼 활성화
         const hyperparameterBtn = document.getElementById('hyperparameter-btn');

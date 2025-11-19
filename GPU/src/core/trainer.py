@@ -84,7 +84,7 @@ def _to_jsonable(x):
         return str(x)
 
 
-def train_yolo(data_dir: str, out_dir: str, hyper: dict, progress=None) -> dict:
+def train_yolo(data_dir: str, out_dir: str, hyper: dict, progress=None, is_ai_training: bool = False) -> dict:
     """
     hyper 예시(모두 선택적):
     {
@@ -213,11 +213,11 @@ def train_yolo(data_dir: str, out_dir: str, hyper: dict, progress=None) -> dict:
             
             try:
                 print(f"[trainer] train_log 발행 시도...")
-                progress.train_log(epoch=epoch, metrics=safe_metrics)
+                progress.train_log(epoch=epoch, total_epochs=total_epochs, metrics=safe_metrics)
                 print(f"[trainer] ✅ train_log 발행 성공")
                 
                 print(f"[trainer] train_llm_log 발행 시도...")
-                progress.train_llm_log(epoch=epoch, total_epochs=total_epochs)
+                progress.train_llm_log(epoch=epoch, total_epochs=total_epochs, metrics=safe_metrics)
                 print(f"[trainer] ✅ train_llm_log 발행 성공")
             except Exception as e:
                 print(f"[progress] ❌ train.log publish failed (after sanitize): {e}")
@@ -231,10 +231,58 @@ def train_yolo(data_dir: str, out_dir: str, hyper: dict, progress=None) -> dict:
     r = model.train(**train_kwargs)
 
     # 반환(경로 포함)
-    try:
-        metrics_obj = getattr(r, "metrics", {}) or {}
-    except Exception:
-        metrics_obj = {}
+    metrics_obj = {}
+    
+    # 1순위: results.csv에서 최종 epoch 메트릭 읽기
+    print(f"[trainer] 🔍 results_csv 경로 확인: {results_csv}")
+    print(f"[trainer] 🔍 results_csv 존재 여부: {results_csv.exists()}")
+    
+    if results_csv.exists():
+        try:
+            import pandas as pd
+            import numpy as np
+            print(f"[trainer] 📖 results.csv 읽기 시도...")
+            df = pd.read_csv(results_csv)
+            print(f"[trainer] 📊 CSV shape: {df.shape}, empty: {df.empty}")
+            
+            if not df.empty:
+                # 마지막 row의 메트릭 추출
+                last_row = df.iloc[-1].to_dict()
+                print(f"[trainer] 📋 마지막 row 컬럼 수: {len(last_row)}")
+                
+                # 숫자형 메트릭만 추출 (NaN 제외)
+                metrics_obj = {}
+                for k, v in last_row.items():
+                    try:
+                        # NaN이 아니고 숫자로 변환 가능한 값만 추가
+                        if pd.notna(v):
+                            metrics_obj[k] = float(v)
+                    except (ValueError, TypeError):
+                        # 숫자로 변환 불가능한 값은 무시
+                        pass
+                print(f"[trainer] ✅ results.csv에서 메트릭 추출 완료: {len(metrics_obj)}개 메트릭, 키={list(metrics_obj.keys())[:10]}")
+            else:
+                print(f"[trainer] ⚠️ results.csv가 비어있음")
+        except Exception as e:
+            print(f"[trainer] ⚠️ results.csv 읽기 실패: {e}")
+            import traceback
+            traceback.print_exc()
+    else:
+        print(f"[trainer] ⚠️ results.csv 파일이 존재하지 않음: {results_csv}")
+    
+    # 2순위: results 객체에서 메트릭 추출 시도
+    if not metrics_obj:
+        try:
+            # results.results_dict 또는 results.metrics 시도
+            if hasattr(r, "results_dict") and isinstance(r.results_dict, dict):
+                metrics_obj = r.results_dict
+            elif hasattr(r, "metrics") and isinstance(r.metrics, dict):
+                metrics_obj = r.metrics
+            else:
+                metrics_obj = getattr(r, "metrics", {}) or {}
+        except Exception as e:
+            print(f"[trainer] ⚠️ results 객체에서 메트릭 추출 실패: {e}")
+            metrics_obj = {}
 
     return {
         "metrics": metrics_obj,

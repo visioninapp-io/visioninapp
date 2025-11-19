@@ -532,7 +532,12 @@ async def create_llm_training(
     
     # external_job_id 생성
     job_id_str = str(uuid.uuid4()).replace("-", "")
-    db_job.hyperparameters["external_job_id"] = job_id_str
+    # 기존 hyperparameters 불러오기
+    hp = dict(db_job.hyperparameters or {})
+    # external_job_id 추가
+    hp["external_job_id"] = job_id_str
+    # JSON 전체를 다시 넣어야 한다!
+    db_job.hyperparameters = hp
     db.commit()
     db.refresh(db_job)
     
@@ -593,19 +598,23 @@ def run_llm_training_pipeline(job_id: int, user_query: str, dataset_path: str):
         external_job_id = str(uuid.uuid4()).replace("-", "")
         
         # DB에 external_job_id 매핑 저장 (추적용)
-        if not job.hyperparameters:
-            job.hyperparameters = {}
-        job.hyperparameters["external_job_id"] = external_job_id
+        # 기존 hyperparameters 불러오기
+        hp = dict(job.hyperparameters or {})
+        # external_job_id 추가
+        hp["external_job_id"] = external_job_id
+        # JSON 전체를 다시 넣어야 한다!
+        job.hyperparameters = hp
         db.commit()
         
         logger.info(f"[LLM Training] Generated external_job_id: {external_job_id} for job {job_id}")
         
-        # hyperparameters에서 output_prefix 가져오기 (train_trial에서 사용)
+        # hyperparameters에서 output_prefix와 ai_mode 가져오기 (train_trial에서 사용)
         hp = job.hyperparameters or {}
         output_prefix = hp.get("output_prefix")
+        ai_mode = hp.get("ai_mode", True)  # 기본값 True (LLM 파이프라인은 AI 트레이닝)
         
-        # LLM 기반 학습 파이프라인 실행 (UUID와 output_prefix 전달)
-        builder(user_query, dataset_path, external_job_id, output_prefix)
+        # LLM 기반 학습 파이프라인 실행 (UUID, output_prefix, ai_mode 전달)
+        builder(user_query, dataset_path, external_job_id, output_prefix, ai_mode)
         
         job.status = TrainingStatus.COMPLETED
         job.training_log = "AI training completed successfully"

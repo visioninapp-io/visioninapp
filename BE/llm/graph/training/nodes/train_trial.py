@@ -380,13 +380,13 @@ def train_trial(state: TrainState) -> TrainState:
     logger.info(f"[train_trial] 학습 요청 발행 시작: job_id={job_id}")
     _publish_to_rabbitmq(payload, RK_START)
     
-    # GPU 서버로 hyperparameters 전달 (job_id별 구분)
-    hpo_routing_key = f"train.hpo.{job_id}"
+    # GPU 서버로 hyperparameters 전달 (job_id가 중간에 위치)
+    hpo_routing_key = f"train.{job_id}.hpo"
     _publish_to_rabbitmq(hpo, hpo_routing_key)
     
     # 2️⃣ 백엔드 DB에 hyperparameters 저장 (UI 표시용)
-    # jobs.events exchange로 train.llm.hpo.{job_id} routing key로 발행
-    llm_hpo_routing_key = f"train.llm.hpo.{job_id}"
+    # jobs.events exchange로 train.llm.{job_id}.hpo routing key로 발행
+    llm_hpo_routing_key = f"train.llm.{job_id}.hpo"
     _publish_to_rabbitmq(hpo, llm_hpo_routing_key, exchange=EXCHANGE_EVENTS)
 
     # 2️⃣ 완료 이벤트 대기 (job.{job_id}.done)

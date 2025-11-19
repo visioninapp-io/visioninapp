@@ -333,27 +333,27 @@ class RabbitMQService {
 
     /**
      * Subscribe to training logs (all jobs)
-     * Uses exchange subscription so each browser gets its own temporary queue
+     * Uses exchange subscription with wildcard to receive all job-specific logs
      * This ensures all connected browsers receive all training messages
      * @param {function} callback - Handler for training metrics
      * @returns {string} Subscription ID
      */
     subscribeToTrainingLogs(callback) {
-        console.log('[RabbitMQ] Subscribing to training logs via exchange (jobs.events/train.log)');
-        // Use exchange subscription instead of queue to get a dedicated temporary queue per browser
-        return this.subscribe('train.log', callback, 'exchange', 'jobs.events');
+        console.log('[RabbitMQ] Subscribing to training logs via exchange (jobs.events/train.*.log)');
+        // Use wildcard to match train.{job_id}.log pattern
+        return this.subscribe('train.*.log', callback, 'exchange', 'jobs.events');
     }
 
     /**
      * Subscribe to LLM training logs (all jobs)
-     * Uses exchange subscription so each browser gets its own temporary queue
+     * Uses exchange subscription with wildcard to receive all job-specific logs
      * @param {function} callback - Handler for training metrics
      * @returns {string} Subscription ID
      */
     subscribeToLLMTrainingLogs(callback) {
-        console.log('[RabbitMQ] Subscribing to LLM training logs via exchange (jobs.events/train.llm.log)');
-        // Use exchange subscription instead of queue to get a dedicated temporary queue per browser
-        return this.subscribe('train.llm.log', callback, 'exchange', 'jobs.events');
+        console.log('[RabbitMQ] Subscribing to LLM training logs via exchange (jobs.events/train.llm.*.log)');
+        // Use wildcard to match train.llm.{job_id}.log pattern
+        return this.subscribe('train.llm.*.log', callback, 'exchange', 'jobs.events');
     }
 }
 

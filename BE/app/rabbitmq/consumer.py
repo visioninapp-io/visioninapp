@@ -9,9 +9,9 @@ log = logging.getLogger(__name__)
 EXCHANGE_EVENTS = "jobs.events"
 RK_INFERENCE_DONE = "inference.done"
 RK_TRAIN_DONE = "job.*.done"  # 와일드카드: job.{job_id}.done 매칭
-RK_TRAIN_LOG = "train.log.*"  # 와일드카드: train.log.{job_id} 매칭
-RK_TRAIN_LLM_LOG = "train.llm.log.*"  # 와일드카드: train.llm.log.{job_id} 매칭
-RK_TRAIN_LLM_HPO = "train.llm.hpo.*"  # 와일드카드: train.llm.hpo.{job_id} 매칭
+RK_TRAIN_LOG = "train.*.log"  # 와일드카드: train.{job_id}.log 매칭
+RK_TRAIN_LLM_LOG = "train.llm.*.log"  # 와일드카드: train.llm.{job_id}.log 매칭
+RK_TRAIN_LLM_HPO = "train.llm.*.hpo"  # 와일드카드: train.llm.{job_id}.hpo 매칭
 RK_ONNX_DONE = "onnx.done"
 RK_TRT_DONE = "trt.done"
 
@@ -148,11 +148,11 @@ def start_llm_hpo_consumer(handler: Callable[[dict], None]):
     queue_name = "be.train.llm.hpo"
     ch.queue_declare(queue=queue_name, durable=True)
 
-    # Binding: jobs.events exchange -> llm_hpo queue (routing_key: train.llm.hpo.*)
+    # Binding: jobs.events exchange -> llm_hpo queue (routing_key: train.llm.*.hpo)
     ch.queue_bind(
         exchange=EXCHANGE_EVENTS,
         queue=queue_name,
-        routing_key=RK_TRAIN_LLM_HPO  # train.llm.hpo.* (와일드카드)
+        routing_key=RK_TRAIN_LLM_HPO  # train.llm.*.hpo (와일드카드)
     )
 
     log.info(f"[RMQ Consumer] Waiting for {RK_TRAIN_LLM_HPO} messages on queue '{queue_name}'...")
@@ -208,18 +208,18 @@ def start_train_log_consumer(handler: Callable[[dict], None]):
     queue_name = "be.train.log"
     ch.queue_declare(queue=queue_name, durable=True)
 
-    # Binding 1: 일반 트레이닝용 train.log.*
+    # Binding 1: 일반 트레이닝용 train.*.log
     ch.queue_bind(
         exchange=EXCHANGE_EVENTS,
         queue=queue_name,
-        routing_key=RK_TRAIN_LOG  # train.log.* (와일드카드)
+        routing_key=RK_TRAIN_LOG  # train.*.log (와일드카드)
     )
     
-    # Binding 2: LLM 트레이닝용 train.llm.log.*
+    # Binding 2: LLM 트레이닝용 train.llm.*.log
     ch.queue_bind(
         exchange=EXCHANGE_EVENTS,
         queue=queue_name,
-        routing_key=RK_TRAIN_LLM_LOG  # train.llm.log.* (와일드카드)
+        routing_key=RK_TRAIN_LLM_LOG  # train.llm.*.log (와일드카드)
     )
 
     log.info(f"[RMQ Consumer] Waiting for {RK_TRAIN_LOG} messages on queue '{queue_name}'...")

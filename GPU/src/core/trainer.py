@@ -184,11 +184,16 @@ def train_yolo(data_dir: str, out_dir: str, hyper: dict, progress=None) -> dict:
 
     # 진행 콜백
     if progress is not None:
+        print(f"[trainer] Progress callback 등록: job_id={progress.job_id}")
+        
         def _on_fit_epoch_end(trainer):
+            print(f"[trainer] on_fit_epoch_end 콜백 실행됨")
             try:
                 epoch = int(getattr(trainer, "epoch", 0))
                 total_epochs = int(getattr(trainer, "epochs", 0) or getattr(getattr(trainer, "args", None), "epochs", 0))
-            except Exception:
+                print(f"[trainer] Epoch {epoch}/{total_epochs} 완료")
+            except Exception as e:
+                print(f"[trainer] Epoch 정보 추출 실패: {e}")
                 epoch = 0
                 total_epochs = 0
 
@@ -204,13 +209,23 @@ def train_yolo(data_dir: str, out_dir: str, hyper: dict, progress=None) -> dict:
                     raw_metrics[attr] = getattr(trainer, attr)
 
             safe_metrics = _to_jsonable(raw_metrics)
+            print(f"[trainer] 메트릭 준비 완료: {list(safe_metrics.keys())}")
+            
             try:
+                print(f"[trainer] train_log 발행 시도...")
                 progress.train_log(epoch=epoch, metrics=safe_metrics)
+                print(f"[trainer] ✅ train_log 발행 성공")
+                
+                print(f"[trainer] train_llm_log 발행 시도...")
                 progress.train_llm_log(epoch=epoch, total_epochs=total_epochs)
+                print(f"[trainer] ✅ train_llm_log 발행 성공")
             except Exception as e:
-                print(f"[progress] train.log publish failed (after sanitize): {e}")
+                print(f"[progress] ❌ train.log publish failed (after sanitize): {e}")
+                import traceback
+                traceback.print_exc()
 
         model.add_callback("on_fit_epoch_end", _on_fit_epoch_end)
+        print(f"[trainer] ✅ Progress callback 등록 완료")
 
     # 학습 실행
     r = model.train(**train_kwargs)

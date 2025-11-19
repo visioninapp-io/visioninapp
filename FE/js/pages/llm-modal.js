@@ -591,24 +591,24 @@ async function startRabbitMQProgress() {
             }
         }
 
-        // GPU 서버가 job.progress.{stage} 형식으로 메시지를 보내므로
+        // GPU 서버가 job.{job_id}.progress.{stage} 형식으로 메시지를 보내므로
         // 모든 progress 메시지를 구독하고 body의 job_id로 필터링
-        // STOMP over WebSocket에서는 # (0개 이상) 와일드카드 지원
-        const progressRoutingKey = `job.progress.#`;
+        // STOMP over WebSocket에서는 # (0개 이상), * (1개) 와일드카드 지원
+        const progressRoutingKey = `job.*.progress.#`;
         
         // 개별 routing key로 구독 (와일드카드가 안 될 수 있음)
         const individualKeys = [
-            'job.progress.analyze.prompt',      // Analyze Prompt 단계 (새로 추가)
-            'job.progress.train.download_dataset',
-            'job.progress.train.prepare_split',
-            'job.progress.train.start',
-            'job.progress.upload',
-            'job.progress.done',                // 완료 이벤트 (100%)
-            'train.llm.log',                    // 학습 진행률 업데이트 (epoch별 퍼센트)
+            'job.*.progress.analyze.prompt',      // Analyze Prompt 단계 (새로 추가)
+            'job.*.progress.train.download_dataset',
+            'job.*.progress.train.prepare_split',
+            'job.*.progress.train.start',
+            'job.*.progress.upload',
+            'job.*.progress.done',                // 완료 이벤트 (100%)
+            'train.llm.*.log',                    // 학습 진행률 업데이트 (epoch별 퍼센트)
             'convert.exchanges',                // 변환 정보 수신
-            'job.progress.onnx.done',           // ONNX 변환 완료
-            'job.progress.trt.done',            // TensorRT 변환 완료
-            'train.hpo'                         // 하이퍼파라미터 메시지
+            'job.*.progress.onnx.done',           // ONNX 변환 완료
+            'job.*.progress.trt.done',            // TensorRT 변환 완료
+            'train.*.hpo'                         // 하이퍼파라미터 메시지
         ];
         
         // 에러 이벤트 구독 (job.{job_id}.error 또는 job.#.error)
@@ -925,7 +925,7 @@ function handleProgressMessage(message, routingKey = '') {
     console.log(`[LLM Modal] Raw Stage: "${stage}", Percent: ${percent}, Message: "${messageText}", RoutingKey: "${routingKey}"`);
     
     // ONNX/TensorRT 변환 완료 메시지 처리
-    if (routingKey === 'job.progress.onnx.done' || routingKey === 'job.progress.trt.done') {
+    if (routingKey.endsWith('.progress.onnx.done') || routingKey.endsWith('.progress.trt.done')) {
         console.log(`[LLM Modal] 🎉 Model conversion completed: ${routingKey}`);
         
         // Export 상태 박스를 complete로 설정
@@ -965,8 +965,8 @@ function handleProgressMessage(message, routingKey = '') {
         return; // onnx/trt done 이벤트는 여기서 처리 완료
     }
     
-    // routingKey가 'job.progress.done'이면 완료로 처리 (더 확실한 감지)
-    if (routingKey === 'job.progress.done' || routingKey.endsWith('.done')) {
+    // routingKey가 'job.{job_id}.progress.done'이면 완료로 처리 (더 확실한 감지)
+    if (routingKey.endsWith('.progress.done') || routingKey.endsWith('.done')) {
         stage = 'done';
         console.log(`[LLM Modal] ✅ Detected completion via routingKey: ${routingKey}`);
     }
@@ -992,9 +992,9 @@ function handleProgressMessage(message, routingKey = '') {
     }
     
     // done 이벤트 처리 (100% 완료)
-    // 조건: stage가 'done'이거나, percent가 100 이상이거나, routingKey가 'job.progress.done'인 경우
+    // 조건: stage가 'done'이거나, percent가 100 이상이거나, routingKey가 'job.{job_id}.progress.done'인 경우
     // 단, 변환이 필요한 경우는 여기서 완료 처리하지 않음 (onnx.done/trt.done에서 처리)
-    if (stage === 'done' || percent >= 100 || routingKey === 'job.progress.done') {
+    if (stage === 'done' || percent >= 100 || routingKey.endsWith('.progress.done')) {
         console.log('[LLM Modal] Training completed (100%), checking conversion requirements');
         console.log(`[LLM Modal] Completion detected: stage="${stage}", percent=${percent}, routingKey="${routingKey}"`);
         console.log(`[LLM Modal] Needs conversion: ${llmModalState.needsConversion}, type: ${llmModalState.conversionType}`);

@@ -58,8 +58,8 @@ class TrainingPage {
                 this.handleTrainingMetrics(message);
             });
 
-            // Subscribe to hyperparameter messages (train.hpo routing key)
-            rabbitmqService.subscribe('train.hpo', (message) => {
+            // Subscribe to hyperparameter messages (train.*.hpo routing key with wildcard)
+            rabbitmqService.subscribe('train.*.hpo', (message) => {
                 this.handleHyperparameterMessage(message);
             }, 'exchange', 'jobs.cmd');
 

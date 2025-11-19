@@ -339,8 +339,17 @@ async def create_training_job(
 
     # 6) external_job_id
     job_id_str = str(uuid.uuid4()).replace("-", "")
-    db_job.hyperparameters["external_job_id"] = job_id_str
-    db.commit(); db.refresh(db_job)
+    # 기존 hyperparameters 불러오기
+    hp = dict(db_job.hyperparameters or {})
+
+    # external_job_id 추가
+    hp["external_job_id"] = job_id_str
+
+    # JSON 전체를 다시 넣어야 한다!
+    db_job.hyperparameters = hp
+
+    db.commit()
+    db.refresh(db_job)
 
     # 7) 아티팩트(PT) 선점 INSERT (storage_uri만 확정)
     try:

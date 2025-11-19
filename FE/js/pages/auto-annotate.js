@@ -63,7 +63,7 @@ class AutoAnnotatePage {
             // Use 'id' field from backend (always present), fallback to model_id or model_name
             this.models = trainedModels.map(m => ({
                 id: m.id || m.model_id || m.model_name,  // Backend provides 'id' field that's always present
-                // model_id: m.model_id,  // Keep original model_id for API calls
+                model_id: m.model_id,  // Keep original model_id for API calls
                 name: m.model_name,
                 model_path: m.relative_path,
                 s3_key: m.s3_key,  // Keep S3 key for reference

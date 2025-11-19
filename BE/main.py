@@ -87,9 +87,11 @@ app.mount("/datasets", StaticFiles(directory=str(datasets_dir)), name="datasets"
 @app.on_event("startup")
 def start_rabbitmq_consumers():
     """Start RabbitMQ consumers in background threads"""
-    from app.rabbitmq.consumer import start_inference_consumer, start_training_consumer
+    from app.rabbitmq.consumer import start_inference_consumer, start_training_consumer, start_llm_hpo_consumer, start_train_log_consumer
     from app.services.auto_annotation_service import handle_inference_done
     from app.services.training_completion_service import handle_training_done
+    from app.services.training_hpo_service import handle_llm_hpo
+    from app.services.training_log_service import handle_training_log
     from app.services.training_sync_service import run_periodic_sync
     import logging
     import threading
@@ -110,6 +112,20 @@ def start_rabbitmq_consumers():
         except Exception as e:
             log.error(f"[RMQ] Training consumer error: {e}", exc_info=True)
 
+    def run_train_log_consumer():
+        try:
+            log.info("[RMQ] Starting train.log consumer...")
+            start_train_log_consumer(handle_training_log)
+        except Exception as e:
+            log.error(f"[RMQ] Train log consumer error: {e}", exc_info=True)
+
+    def run_llm_hpo_consumer():
+        try:
+            log.info("[RMQ] Starting train.llm.hpo consumer...")
+            start_llm_hpo_consumer(handle_llm_hpo)
+        except Exception as e:
+            log.error(f"[RMQ] LLM HPO consumer error: {e}", exc_info=True)
+
     def run_training_sync():
         """Periodic sync service to catch any missed train.done events"""
         try:
@@ -126,6 +142,14 @@ def start_rabbitmq_consumers():
     training_thread = threading.Thread(target=run_training_consumer, daemon=True)
     training_thread.start()
     log.info("[RMQ] Training consumer thread started")
+
+    train_log_thread = threading.Thread(target=run_train_log_consumer, daemon=True)
+    train_log_thread.start()
+    log.info("[RMQ] Train log consumer thread started")
+
+    llm_hpo_thread = threading.Thread(target=run_llm_hpo_consumer, daemon=True)
+    llm_hpo_thread.start()
+    log.info("[RMQ] LLM HPO consumer thread started")
 
     # Periodic sync service (backup for missed events)
     sync_thread = threading.Thread(target=run_training_sync, daemon=True)

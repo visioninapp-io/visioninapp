@@ -4,6 +4,7 @@
 let llmModalState = {
     currentStep: 1, // 1: query input, 2: training in progress, 3: completion
     query: "",
+    jobName: "",  // 트레이닝 잡 이름
     selectedDatasetId: null,
     datasets: [],
     timers: [],
@@ -26,6 +27,7 @@ async function showLLMModal() {
     llmModalState = {
         currentStep: 1,
         query: "",
+        jobName: "",
         selectedDatasetId: null,
         datasets: [],
         timers: [],
@@ -177,15 +179,16 @@ function renderQueryInputStep(container) {
                 <p class="text-muted">Enter a training query and select a dataset.</p>
             </div>
 
+            <!-- Training Job Name Field -->
             <div class="mb-4">
-                <label class="form-label fw-semibold">User Query</label>
-                <textarea 
+                <label class="form-label fw-semibold">Training Job Name *</label>
+                <input type="text" 
                        class="form-control form-control-lg" 
-                       id="llm-query-input"
-                       rows="6"
-                       placeholder="ex) Use the YOLOv12 model and set the number of epochs to 100. Apply data augmentation during training. Use learning rate of 0.001 and batch size of 32."
-                       style="resize: vertical; min-height: 120px;">${llmModalState.query}</textarea>
-                <small class="text-muted">Enter detailed training instructions or model configuration</small>
+                       id="llm-job-name-input"
+                       placeholder="e.g., ProductDefect-LLM-Training-v1"
+                       value="${llmModalState.jobName || ''}"
+                       required>
+                <small class="text-muted">Enter a unique name for this training job</small>
             </div>
 
             <!-- Dataset Selection Field -->
@@ -197,6 +200,17 @@ function renderQueryInputStep(container) {
                     <option value="">-- Select Dataset --</option>
                 </select>
                 <small class="text-muted">Select a dataset for training</small>
+            </div>
+
+            <div class="mb-4">
+                <label class="form-label fw-semibold">User Query</label>
+                <textarea 
+                       class="form-control form-control-lg" 
+                       id="llm-query-input"
+                       rows="6"
+                       placeholder="ex) Use the YOLOv12 model and set the number of epochs to 100. Apply data augmentation during training. Use learning rate of 0.001 and batch size of 32."
+                       style="resize: vertical; min-height: 120px;">${llmModalState.query}</textarea>
+                <small class="text-muted">Enter detailed training instructions or model configuration</small>
             </div>
 
             <button class="btn btn-primary w-100 py-3" 
@@ -221,6 +235,14 @@ function renderQueryInputStep(container) {
         // Save input value in real-time
         input.addEventListener('input', (e) => {
             llmModalState.query = e.target.value;
+        });
+    }
+
+    // Save job name input value in real-time
+    const jobNameInput = document.getElementById('llm-job-name-input');
+    if (jobNameInput) {
+        jobNameInput.addEventListener('input', (e) => {
+            llmModalState.jobName = e.target.value;
         });
     }
 
@@ -305,6 +327,14 @@ async function submitQuery() {
         return;
     }
 
+    // Job name is required
+    const jobNameInput = document.getElementById('llm-job-name-input');
+    if (!jobNameInput || !jobNameInput.value.trim()) {
+        console.warn('[LLM Modal] Job name is empty');
+        showToast('Please enter a training job name', 'warning');
+        return;
+    }
+
     // Dataset selection is required
     if (!llmModalState.selectedDatasetId) {
         console.warn('[LLM Modal] No dataset selected');
@@ -315,6 +345,7 @@ async function submitQuery() {
     console.log('[LLM Modal] Validation passed, proceeding with API call...');
 
     llmModalState.query = input.value.trim();
+    llmModalState.jobName = jobNameInput.value.trim();
     
     // Submit button 비활성화
     const submitBtn = document.getElementById('llm-submit-btn');
@@ -370,10 +401,10 @@ async function submitQuery() {
         // LLM 학습 요청
         const response = await apiService.createLLMTraining({
             user_query: llmModalState.query,
+            job_name: llmModalState.jobName,  // 사용자가 지정한 잡 이름
             dataset_id: dataset.id,              // dataset_id 추가
             dataset_name: dataset.name,
-            dataset_s3_prefix: s3Prefix,
-            run_name: `llm_${dataset.name}_${Date.now()}`
+            dataset_s3_prefix: s3Prefix
         });
         
         console.log('[LLM Modal] API call completed, response:', response);

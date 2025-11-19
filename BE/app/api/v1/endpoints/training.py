@@ -428,12 +428,16 @@ async def create_llm_training(
     # 프론트엔드에서 user_query 또는 query로 보낼 수 있음
     user_query = request.get("user_query") or request.get("query", "")
     user_query = user_query.strip() if user_query else ""
+    job_name = request.get("job_name", "").strip()
     dataset_id = request.get("dataset_id")
     dataset_name = request.get("dataset_name", "")
     dataset_s3_prefix = request.get("dataset_s3_prefix", "")
     
     if not user_query:
         raise HTTPException(status_code=400, detail="Query is required")
+    
+    if not job_name:
+        raise HTTPException(status_code=400, detail="Job name is required")
     
     # Dataset 조회 (dataset_id 우선, 없으면 dataset_name으로 찾기)
     dataset = None
@@ -454,6 +458,10 @@ async def create_llm_training(
     else:
         raise HTTPException(status_code=400, detail="Either dataset_id or dataset_name is required")
     
+    # 0) 이름 중복 방지 (일반 트레이닝과 동일하게)
+    if db.query(TrainingJob).filter(TrainingJob.name == job_name).first():
+        raise HTTPException(status_code=400, detail="Training job with this name already exists")
+    
     # S3 client 초기화 (버전 확인용)
     s3_client = boto3.client(
         's3',
@@ -465,8 +473,10 @@ async def create_llm_training(
     # 다음 버전 번호 가져오기
     version = _get_next_version(s3_client, settings.AWS_BUCKET_NAME, dataset_name, "ai-train")
     
+    # 기본 epochs 설정 (LLM이 나중에 결정하면 업데이트됨)
+    default_epochs = 20
+    
     # TrainingJob 생성
-    job_name = dataset_name
     db_job = TrainingJob(
         name=job_name,
         dataset_id=dataset.id,  # dataset_id를 바로 설정
@@ -477,8 +487,10 @@ async def create_llm_training(
             "dataset_s3_prefix": dataset_s3_prefix or f"datasets/{dataset_name}/",
             "ai_mode": True,
             "version": version,
-            "output_prefix": f"models/{dataset_name}/ai-train/{version}"
+            "output_prefix": f"models/{dataset_name}/ai-train/{version}",
+            "epochs": default_epochs  # 기본 epochs 추가
         },
+        total_epochs=default_epochs,  # total_epochs 설정
         status=TrainingStatus.PENDING,
         created_by=current_user["uid"]
     )

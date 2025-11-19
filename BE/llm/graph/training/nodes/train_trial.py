@@ -22,7 +22,8 @@ EXCHANGE_CMD = os.getenv("RMQ_EXCHANGE_CMD", "jobs.cmd")
 EXCHANGE_EVENTS = os.getenv("RMQ_EXCHANGE_EVENTS", "jobs.events")
 
 RK_START = "train.start"             # 학습 요청
-RK_HPO = "train.hpo"
+RK_HPO = "train.hpo"                 # GPU 서버로 hyperparameters 전달
+RK_LLM_HPO = "train.llm.hpo"         # 백엔드 DB에 hyperparameters 저장
 RK_DONE_FMT = "job.{job_id}.done"    # 완료 이벤트 routing key
 RK_ERROR_FMT = "job.{job_id}.error"
 RK_STATUS_FMT = "job.{job_id}.status"
@@ -144,23 +145,26 @@ def _infer_output(state: TrainState, dataset_name: str) -> Dict[str, str]:
 
 # ------------------- RabbitMQ 통신 -------------------
 
-def _publish_to_rabbitmq(message: Dict[str, Any], rk: str) -> None:
+def _publish_to_rabbitmq(message: Dict[str, Any], rk: str, exchange: str = None) -> None:
     import pika
 
     try:
+        # exchange가 지정되지 않으면 기본값 사용
+        if exchange is None:
+            exchange = EXCHANGE_CMD
+        
         logger.info(f"[train_trial] RabbitMQ 연결 시도: {RABBITMQ_URL}")
         params = pika.URLParameters(RABBITMQ_URL)
         conn = pika.BlockingConnection(params)
         ch = conn.channel()
 
-        # 요청은 cmd exchange로
-        logger.info(f"[train_trial] Exchange 선언: {EXCHANGE_CMD}")
-        ch.exchange_declare(exchange=EXCHANGE_CMD, exchange_type="topic", durable=True)
+        logger.info(f"[train_trial] Exchange 선언: {exchange}")
+        ch.exchange_declare(exchange=exchange, exchange_type="topic", durable=True)
 
         body = json.dumps(message, ensure_ascii=False).encode("utf-8")
-        logger.info(f"[train_trial] 메시지 발행: exchange={EXCHANGE_CMD}, routing_key={RK_START}")
+        logger.info(f"[train_trial] 메시지 발행: exchange={exchange}, routing_key={rk}")
         ch.basic_publish(
-            exchange=EXCHANGE_CMD,
+            exchange=exchange,
             routing_key=rk,
             body=body,
             properties=pika.BasicProperties(
@@ -375,7 +379,15 @@ def train_trial(state: TrainState) -> TrainState:
     # 1️⃣ 학습 요청 발행
     logger.info(f"[train_trial] 학습 요청 발행 시작: job_id={job_id}")
     _publish_to_rabbitmq(payload, RK_START)
-    _publish_to_rabbitmq(hpo, RK_HPO)
+    
+    # GPU 서버로 hyperparameters 전달 (job_id별 구분)
+    hpo_routing_key = f"train.hpo.{job_id}"
+    _publish_to_rabbitmq(hpo, hpo_routing_key)
+    
+    # 2️⃣ 백엔드 DB에 hyperparameters 저장 (UI 표시용)
+    # jobs.events exchange로 train.llm.hpo.{job_id} routing key로 발행
+    llm_hpo_routing_key = f"train.llm.hpo.{job_id}"
+    _publish_to_rabbitmq(hpo, llm_hpo_routing_key, exchange=EXCHANGE_EVENTS)
 
     # 2️⃣ 완료 이벤트 대기 (job.{job_id}.done)
     wait_sec = int(os.getenv("TRAIN_WAIT_TIMEOUT_SEC", "10800"))

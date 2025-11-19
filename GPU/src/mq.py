@@ -34,6 +34,9 @@ def declare_topology(ch, exchanges: dict, queues: dict):
 
 
 def publish(ch, ex: str, routing_key: str, body: dict):
+    """
+    기본 publish 함수 (job_id가 없는 경우)
+    """
     ch.basic_publish(
         exchange=ex,
         routing_key=routing_key,
@@ -43,6 +46,60 @@ def publish(ch, ex: str, routing_key: str, body: dict):
             content_type="application/json",
         ),
     )
+
+
+def publish_with_job_binding(ch, ex: str, routing_key: str, body: dict, job_id: str):
+    """
+    job_id 기반으로 동적 exchange, queue 선언 및 바인딩 후 publish, 그리고 즉시 해제
+
+    Args:
+        ch: RabbitMQ channel
+        ex: Exchange name (e.g., 'jobs.events')
+        routing_key: Routing key (e.g., 'train.{job_id}.log')
+        body: Message body (dict)
+        job_id: Job ID for queue naming
+    """
+    # 1. job_id 기반 queue 이름 생성
+    queue_name = f"job.{job_id}.temp.queue"
+
+    try:
+        # 2. Exchange 선언 (이미 존재하면 무시됨)
+        ch.exchange_declare(exchange=ex, exchange_type="topic", durable=True)
+        logger.info(f"[mq] Declared exchange: {ex}")
+
+        # 3. Queue 선언 (임시)
+        ch.queue_declare(queue=queue_name, durable=False, auto_delete=True)
+        logger.info(f"[mq] Declared temp queue: {queue_name}")
+
+        # 4. Exchange와 Queue를 routing_key로 바인딩
+        ch.queue_bind(queue=queue_name, exchange=ex, routing_key=routing_key)
+        logger.info(f"[mq] Bound queue '{queue_name}' to exchange '{ex}' with routing_key '{routing_key}'")
+
+        # 5. Publish 메시지
+        ch.basic_publish(
+            exchange=ex,
+            routing_key=routing_key,
+            body=json.dumps(body, ensure_ascii=False).encode("utf-8"),
+            properties=pika.BasicProperties(
+                delivery_mode=2,
+                content_type="application/json",
+            ),
+        )
+        logger.info(f"[mq] Published message to {ex}/{routing_key}")
+
+    finally:
+        # 6. 바인딩 해제 및 Queue 삭제
+        try:
+            ch.queue_unbind(queue=queue_name, exchange=ex, routing_key=routing_key)
+            logger.info(f"[mq] Unbound queue '{queue_name}' from exchange '{ex}'")
+        except Exception as e:
+            logger.warning(f"[mq] Failed to unbind queue {queue_name}: {e}")
+
+        try:
+            ch.queue_delete(queue=queue_name)
+            logger.info(f"[mq] Deleted temp queue: {queue_name}")
+        except Exception as e:
+            logger.warning(f"[mq] Failed to delete queue {queue_name}: {e}")
 
 
 def start_consumer_thread(mq: MQ, queue: str, handler: Callable[[dict], None]):

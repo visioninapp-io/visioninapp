@@ -332,28 +332,38 @@ class RabbitMQService {
     }
 
     /**
-     * Subscribe to training logs (all jobs)
-     * Uses exchange subscription with wildcard to receive all job-specific logs
-     * This ensures all connected browsers receive all training messages
+     * Subscribe to training logs for a specific job
+     * Uses exchange subscription with job-specific routing key
+     * This ensures only messages for the selected job are received
+     * @param {string} jobId - Job ID to subscribe to
      * @param {function} callback - Handler for training metrics
      * @returns {string} Subscription ID
      */
-    subscribeToTrainingLogs(callback) {
-        console.log('[RabbitMQ] Subscribing to training logs via exchange (jobs.events/train.*.log)');
-        // Use wildcard to match train.{job_id}.log pattern
-        return this.subscribe('train.*.log', callback, 'exchange', 'jobs.events');
+    subscribeToTrainingLogs(jobId, callback) {
+        if (!jobId) {
+            throw new Error('Job ID is required for training log subscription');
+        }
+        console.log(`[RabbitMQ] Subscribing to training logs for job: ${jobId}`);
+        // Use job-specific routing key to receive only this job's messages
+        const routingKey = `train.${jobId}.log`;
+        return this.subscribe(routingKey, callback, 'exchange', 'jobs.events');
     }
 
     /**
-     * Subscribe to LLM training logs (all jobs)
-     * Uses exchange subscription with wildcard to receive all job-specific logs
+     * Subscribe to LLM training logs for a specific job
+     * Uses exchange subscription with job-specific routing key
+     * @param {string} jobId - Job ID to subscribe to
      * @param {function} callback - Handler for training metrics
      * @returns {string} Subscription ID
      */
-    subscribeToLLMTrainingLogs(callback) {
-        console.log('[RabbitMQ] Subscribing to LLM training logs via exchange (jobs.events/train.llm.*.log)');
-        // Use wildcard to match train.llm.{job_id}.log pattern
-        return this.subscribe('train.llm.*.log', callback, 'exchange', 'jobs.events');
+    subscribeToLLMTrainingLogs(jobId, callback) {
+        if (!jobId) {
+            throw new Error('Job ID is required for LLM training log subscription');
+        }
+        console.log(`[RabbitMQ] Subscribing to LLM training logs for job: ${jobId}`);
+        // Use job-specific routing key to receive only this job's messages
+        const routingKey = `train.llm.${jobId}.log`;
+        return this.subscribe(routingKey, callback, 'exchange', 'jobs.events');
     }
 }
 

@@ -53,17 +53,18 @@ class TrainingPage {
             await rabbitmqService.connect();
             this.rabbitmqConnected = true;
 
-            // Subscribe to all training logs (filtering will be done in handleTrainingMetrics)
-            rabbitmqService.subscribeToTrainingLogs((message) => {
-                this.handleTrainingMetrics(message);
-            });
-
             // Subscribe to hyperparameter messages (train.*.hpo routing key with wildcard)
             rabbitmqService.subscribe('train.*.hpo', (message) => {
                 this.handleHyperparameterMessage(message);
             }, 'exchange', 'jobs.cmd');
 
-            console.log('[Training Page] ✅ Connected to RabbitMQ and subscribed to training logs');
+            console.log('[Training Page] ✅ Connected to RabbitMQ');
+
+            // Subscribe to the currently selected job's training logs (job-specific)
+            if (this.selectedJob) {
+                this.subscribeToCurrentJob();
+            }
+
             showToast('Connected to real-time training updates', 'success');
 
             // Restart periodic refresh with longer interval (now that RabbitMQ is connected)
@@ -72,6 +73,56 @@ class TrainingPage {
         } catch (error) {
             console.error('[Training Page] Failed to connect to RabbitMQ:', error);
             showToast('Failed to connect to real-time updates. Using manual refresh.', 'warning');
+        }
+    }
+
+    subscribeToCurrentJob() {
+        /**
+         * Subscribe to job-specific training logs for the currently selected job
+         * Only receives messages for this specific job (not all jobs)
+         */
+        if (!this.rabbitmqConnected || !this.selectedJob || !this.selectedJob.external_job_id) {
+            console.warn('[Training Page] Cannot subscribe to job - RabbitMQ not connected or no job selected');
+            return;
+        }
+
+        const jobId = this.selectedJob.external_job_id;
+
+        try {
+            // Unsubscribe from previous job if any
+            if (this.currentJobSubscription) {
+                console.log(`[Training Page] Unsubscribing from previous job: ${this.currentJobSubscription}`);
+                rabbitmqService.unsubscribe(this.currentJobSubscription);
+                this.currentJobSubscription = null;
+            }
+
+            // Subscribe to job-specific training logs
+            console.log(`[Training Page] Subscribing to training logs for job: ${jobId}`);
+            rabbitmqService.subscribeToTrainingLogs(jobId, (message) => {
+                this.handleTrainingMetrics(message);
+            });
+
+            // Store the routing key for later unsubscription
+            this.currentJobSubscription = `train.${jobId}.log`;
+            console.log(`[Training Page] ✅ Subscribed to job-specific training logs: ${this.currentJobSubscription}`);
+
+        } catch (error) {
+            console.error('[Training Page] Failed to subscribe to job training logs:', error);
+        }
+    }
+
+    unsubscribeFromCurrentJob() {
+        /**
+         * Unsubscribe from the currently subscribed job's training logs
+         */
+        if (this.currentJobSubscription) {
+            console.log(`[Training Page] Unsubscribing from job: ${this.currentJobSubscription}`);
+            try {
+                rabbitmqService.unsubscribe(this.currentJobSubscription);
+            } catch (error) {
+                console.error('[Training Page] Error unsubscribing from job:', error);
+            }
+            this.currentJobSubscription = null;
         }
     }
 
@@ -144,25 +195,20 @@ class TrainingPage {
          *     ...
          *   }
          * }
+         *
+         * NOTE: Since we now subscribe to job-specific routing keys (train.{jobId}.log),
+         * we only receive messages for the currently selected job. No filtering needed.
          */
         console.log('[Training Page] Received training metrics:', message);
 
         try {
             const { job_id: external_job_id, epoch, metrics } = message;
 
-            // Filter: Only process if this message is for the currently selected job
-            if (this.selectedJob && this.selectedJob.external_job_id) {
-                if (this.selectedJob.external_job_id !== external_job_id) {
-                    console.log(`[Training Page] Ignoring metrics for job ${external_job_id} (selected: ${this.selectedJob.external_job_id})`);
-                    return;
-                }
-            }
-
             // Extract loss and accuracy from metrics object
             const loss = metrics?.loss || metrics?.tloss?.[0] || 0;
             const accuracy = metrics?.['metrics/mAP50(B)'] || metrics?.['metrics/precision(B)'] || 0;
 
-            console.log(`[Training Page] Processing metrics for selected job: epoch=${epoch}, loss=${loss}, accuracy=${accuracy}`);
+            console.log(`[Training Page] Processing metrics for job ${external_job_id}: epoch=${epoch}, loss=${loss}, accuracy=${accuracy}`);
 
             // GPU sends 0-based epoch, convert to 1-based for display
             const displayEpoch = epoch + 1;
@@ -400,8 +446,11 @@ class TrainingPage {
 
         // Disconnect from RabbitMQ
         if (this.rabbitmqConnected) {
-            rabbitmqService.unsubscribe('gpu.train.log');
-            rabbitmqService.unsubscribe('train.hpo');
+            // Unsubscribe from job-specific subscription
+            this.unsubscribeFromCurrentJob();
+
+            // Unsubscribe from hyperparameter messages
+            rabbitmqService.unsubscribe('train.*.hpo');
             console.log('[Training Page] Unsubscribed from RabbitMQ');
         }
 
@@ -873,7 +922,14 @@ class TrainingPage {
 
         if (job) {
             console.log('[Training Page] Selected job:', job.id, job.name, 'external_job_id:', job.external_job_id);
+
+            // Update selected job
             this.selectedJob = job;
+
+            // Switch RabbitMQ subscription to this job (if connected)
+            if (this.rabbitmqConnected) {
+                this.subscribeToCurrentJob();
+            }
 
             // Load S3 metrics for this job
             await this.loadS3MetricsForJob(job);

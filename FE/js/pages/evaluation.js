@@ -56,8 +56,10 @@ class EvaluationPage {
 
         if (this.completedTrainings.length === 0) {
             container.innerHTML = `
-                <div class="text-center py-3">
-                    <p class="text-muted">No completed trainings available</p>
+                <div class="text-center py-5">
+                    <i class="bi bi-inbox text-muted" style="font-size: 2.5rem; opacity: 0.5;"></i>
+                    <p class="text-muted mt-3 mb-0">No completed trainings available</p>
+                    <p class="text-muted small mt-2">Training jobs will appear here once completed</p>
                 </div>
             `;
             return;
@@ -945,21 +947,28 @@ class EvaluationPage {
                 return;
             }
             
-            // 완료된 트레이닝도 없으면 안내 메시지 표시
-            container.innerHTML = completedTrainingsSection + `
-                <div class="col-lg-8">
-                    <div class="card border-0 shadow-sm">
-                        <div class="card-body text-center py-5">
-                            <i class="bi bi-clipboard-data text-muted" style="font-size: 3rem;"></i>
-                            <p class="text-muted mt-3">No evaluation data available</p>
-                            <p class="text-muted small">Train and evaluate a model to see metrics here</p>
-                            <a href="#/training" class="btn btn-primary mt-2">Start Training</a>
+            // 완료된 트레이닝도 없으면 간단한 안내 메시지 표시
+            container.innerHTML = `
+                <div class="row justify-content-center">
+                    <div class="col-12" style="min-width: 600px; max-width: 900px; margin: 0 auto;">
+                        <div class="card border-0 shadow-sm">
+                            <div class="card-body text-center py-5 px-5">
+                                <i class="bi bi-clipboard-data text-primary" style="font-size: 4rem; opacity: 0.7;"></i>
+                                <h4 class="mt-4 mb-3 fw-bold">No Training Results Available</h4>
+                                <p class="text-muted mb-4">You haven't completed any training jobs yet. Start training a model to see evaluation metrics and performance data here.</p>
+                                <div class="d-flex flex-column flex-sm-row gap-3 justify-content-center">
+                                    <a href="#/training" class="btn btn-primary btn-lg">
+                                        <i class="bi bi-play-circle me-2"></i>Start Training
+                                    </a>
+                                    <a href="#/datasets" class="btn btn-outline-secondary btn-lg">
+                                        <i class="bi bi-folder me-2"></i>View Datasets
+                                    </a>
+                                </div>
+                            </div>
                         </div>
                     </div>
                 </div>
             `;
-            // 완료된 학습 목록 렌더링
-            setTimeout(() => this.renderCompletedTrainings(), 100);
             return;
         }
 

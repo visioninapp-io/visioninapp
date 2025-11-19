@@ -715,6 +715,72 @@ class TrainingPage {
 
     attachEventListeners() {
         // Event listeners are handled via onclick in HTML
+        this.attachYoloDropdownListeners();
+    }
+
+    attachYoloDropdownListeners() {
+        // YOLO version and size dropdowns
+        const versionSelect = document.getElementById('yolo-version-select');
+        const sizeSelect = document.getElementById('yolo-size-select');
+        const architectureHidden = document.getElementById('architecture-select');
+        
+        if (!versionSelect || !sizeSelect || !architectureHidden) {
+            return; // Elements not found (modal might not be rendered yet)
+        }
+        
+        // Remove existing listeners to avoid duplicates
+        const newVersionSelect = versionSelect.cloneNode(true);
+        versionSelect.parentNode.replaceChild(newVersionSelect, versionSelect);
+        const newSizeSelect = sizeSelect.cloneNode(true);
+        sizeSelect.parentNode.replaceChild(newSizeSelect, sizeSelect);
+        
+        // Attach version select listener
+        newVersionSelect.addEventListener('change', (e) => {
+            const version = e.target.value;
+            const sizes = [
+                { value: 'n', label: 'Nano (Fastest, Smallest)' },
+                { value: 's', label: 'Small' },
+                { value: 'm', label: 'Medium' },
+                { value: 'l', label: 'Large' },
+                { value: 'x', label: 'XLarge (Most Accurate)' }
+            ];
+            
+            if (version) {
+                // Populate size dropdown
+                newSizeSelect.innerHTML = '<option value="">-- Select Size --</option>';
+                sizes.forEach(size => {
+                    const option = document.createElement('option');
+                    option.value = size.value;
+                    option.textContent = size.label;
+                    newSizeSelect.appendChild(option);
+                });
+                newSizeSelect.disabled = false;
+                newSizeSelect.required = true;
+                
+                // Clear architecture when version changes
+                architectureHidden.value = '';
+            } else {
+                newSizeSelect.innerHTML = '<option value="">-- Select Version First --</option>';
+                newSizeSelect.disabled = true;
+                newSizeSelect.required = false;
+                architectureHidden.value = '';
+            }
+        });
+        
+        // Attach size select listener
+        newSizeSelect.addEventListener('change', (e) => {
+            const version = newVersionSelect.value;
+            const size = e.target.value;
+            
+            if (version && size) {
+                // Combine version + size into architecture (e.g., "yolov8" + "n" = "yolov8n")
+                const architecture = `${version}${size}`;
+                architectureHidden.value = architecture;
+                console.log('[Training Page] Architecture selected:', architecture);
+            } else {
+                architectureHidden.value = '';
+            }
+        });
     }
 
     async loadS3MetricsForJob(job) {
@@ -1113,25 +1179,25 @@ class TrainingPage {
                                     </select>
                                     <small class="text-muted">Choose an existing model or create a new one</small>
                                 </div>
-                                <div class="mb-3">
-                                    <label class="form-label">Model Architecture *</label>
-                                    <select class="form-select" id="architecture-select" required>
-                                        <option value="">-- Select Architecture --</option>
-                                        <optgroup label="Object Detection (YOLO)">
-                                            <option value="yolov8n">YOLOv8 Nano (Fastest, Smallest)</option>
-                                            <option value="yolov8s">YOLOv8 Small</option>
-                                            <option value="yolov8m">YOLOv8 Medium</option>
-                                            <option value="yolov8l">YOLOv8 Large</option>
-                                            <option value="yolov8x">YOLOv8 XLarge (Most Accurate)</option>
-                                        </optgroup>
-                                        <optgroup label="Image Classification (Not Yet Supported)">
-                                            <option value="resnet18" disabled>ResNet18 (Coming Soon)</option>
-                                            <option value="resnet50" disabled>ResNet50 (Coming Soon)</option>
-                                            <option value="mobilenet_v2" disabled>MobileNet V2 (Coming Soon)</option>
-                                        </optgroup>
-                                    </select>
-                                    <small class="text-muted">YOLO for object detection, ResNet/MobileNet for classification</small>
+                                <div class="row">
+                                    <div class="col-md-6 mb-3">
+                                        <label class="form-label">YOLO Version *</label>
+                                        <select class="form-select" id="yolo-version-select" required>
+                                            <option value="">-- Select Version --</option>
+                                            <option value="yolov8">YOLOv8</option>
+                                            <option value="yolo11">YOLO11</option>
+                                            <option value="yolo12">YOLO12</option>
+                                        </select>
+                                    </div>
+                                    <div class="col-md-6 mb-3">
+                                        <label class="form-label">Model Size *</label>
+                                        <select class="form-select" id="yolo-size-select" required disabled>
+                                            <option value="">-- Select Version First --</option>
+                                        </select>
+                                    </div>
                                 </div>
+                                <input type="hidden" id="architecture-select" />
+                                <small class="text-muted">YOLO for object detection, ResNet/MobileNet for classification</small>
                                 <div class="row">
                                     <div class="col-md-3">
                                         <label class="form-label">Epochs</label>
@@ -1176,6 +1242,9 @@ class TrainingPage {
 
         // Handle form submission
         document.getElementById('start-training-btn').addEventListener('click', () => this.handleStartTraining());
+
+        // Attach YOLO dropdown listeners when modal is shown
+        this.attachYoloDropdownListeners();
 
         modal.show();
     }

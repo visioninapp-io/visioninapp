@@ -138,8 +138,14 @@ class APIService {
     }
 
     // GET request
-    async get(endpoint) {
-        return this.request(endpoint, { method: 'GET' });
+    async get(endpoint, params = null) {
+        // Add query parameters if provided
+        let url = endpoint;
+        if (params && typeof params === 'object') {
+            const queryString = new URLSearchParams(params).toString();
+            url = `${endpoint}?${queryString}`;
+        }
+        return this.request(url, { method: 'GET' });
     }
 
     // POST request
